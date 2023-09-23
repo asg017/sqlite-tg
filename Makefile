@@ -80,14 +80,8 @@ test:
 .PHONY: version loadable static test clean gh-release \
 	ruby
 
-gh-release:
-	make version
-	git add --all
-	git commit -m "v$(VERSION)"
-	git tag v$(VERSION)
-	git push origin main v$(VERSION)
-	gh release create v$(VERSION) --prerelease --notes="" --title=v$(VERSION)
-
+publish-release:
+        ./scripts/publish_release.sh
 
 TARGET_WHEELS=$(prefix)/wheels
 INTERMEDIATE_PYPACKAGE_EXTENSION=bindings/python/sqlite_tg/
