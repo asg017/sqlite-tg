@@ -143,3 +143,6 @@ version:
 	make bindings/sqlite-utils/pyproject.toml bindings/sqlite-utils/sqlite_utils_sqlite_tg/version.py
 	make node
 	make deno
+
+test-loadable:
+	python3 tests/test-loadable.py
