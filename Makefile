@@ -81,7 +81,7 @@ test:
 	ruby
 
 publish-release:
-        ./scripts/publish_release.sh
+	./scripts/publish_release.sh
 
 TARGET_WHEELS=$(prefix)/wheels
 INTERMEDIATE_PYPACKAGE_EXTENSION=bindings/python/sqlite_tg/
