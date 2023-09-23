@@ -1,7 +1,6 @@
 import sqlite3
 import unittest
-import time
-import os
+import shapely
 
 EXT_PATH="./dist/tg0"
 
@@ -38,10 +37,20 @@ def spread_args(args):
 FUNCTIONS = [
   'tg_debug',
   'tg_intersects',
+  'tg_point_geojson',
+  'tg_point_wkb',
+  'tg_point_wkt',
+  'tg_type',
   'tg_version',
 ]
 
 MODULES = []
+
+
+LINE_A = shapely.from_wkt('LINESTRING (0 0, 1 1)')
+
+LINE_CROSSES = (shapely.from_wkt('LINESTRING (0 0, 2 2)'), shapely.from_wkt('LINESTRING (1 0, 1 2)'))
+LINE_SEPARATE = (shapely.from_wkt('LINESTRING (0 0, 0 2)'), shapely.from_wkt('LINESTRING (2 0, 2 2)'))
 
 class TestTg(unittest.TestCase):
   def test_funcs(self):
@@ -62,8 +71,29 @@ class TestTg(unittest.TestCase):
 
   def test_tg_intersects(self):
     tg_intersects = lambda *args: db.execute("select tg_intersects(?, ?)", args).fetchone()[0]
-    self.assertEqual(tg_intersects('LINESTRING (0 0, 2 2)', 'LINESTRING (1 0, 1 2)'), 1)
-    self.assertEqual(tg_intersects('LINESTRING (0 0, 0 2)', 'LINESTRING (2 0, 2 2)'), 0)
+
+    for format in ("wkt", "wkb", "geojson"):
+      self.assertEqual(tg_intersects(*[getattr(shapely, f"to_{format}")(l) for l in LINE_CROSSES]), 1)
+      self.assertEqual(tg_intersects(*[getattr(shapely, f"to_{format}")(l) for l in LINE_SEPARATE]), 0)
+
+  def test_tg_type(self):
+    tg_type = lambda *args: db.execute("select tg_type(?)", args).fetchone()[0]
+    self.assertEqual(tg_type(shapely.to_wkt(LINE_A)), 'LineString')
+
+  def test_tg_point_geojson(self):
+    tg_point_geojson = lambda *args: db.execute("select tg_point_geojson(?, ?)", args).fetchone()[0]
+    self.assertEqual(tg_point_geojson(1, 2), '{"type":"Point","coordinates":[1,2]}')
+    self.assertEqual(tg_point_geojson(1.111, 2.222), '{"type":"Point","coordinates":[1.111,2.222]}')
+
+  def test_tg_point_wkb(self):
+    tg_point_wkb = lambda *args: db.execute("select tg_point_wkb(?, ?)", args).fetchone()[0]
+    self.assertEqual(tg_point_wkb(1, 2), b'\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf0?\x00\x00\x00\x00\x00\x00\x00@')
+    self.assertEqual(tg_point_wkb(1.111, 2.222), b'\x01\x01\x00\x00\x00-\xb2\x9d\xef\xa7\xc6\xf1?-\xb2\x9d\xef\xa7\xc6\x01@')
+
+  def test_tg_point_wkt(self):
+    tg_point_wkt = lambda *args: db.execute("select tg_point_wkt(?, ?)", args).fetchone()[0]
+    self.assertEqual(tg_point_wkt(1, 2), 'POINT(1 2)')
+    self.assertEqual(tg_point_wkt(1.111, 2.222), 'POINT(1.111 2.222)')
 
 
 class TestCoverage(unittest.TestCase):

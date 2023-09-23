@@ -74,6 +74,15 @@ $(TARGET_STATIC_H): sqlite-tg.h $(prefix)
 clean:
 	rm -rf dist/*
 
+
+FORMAT_FILES=sqlite-tg.h sqlite-tg.c
+format: $(FORMAT_FILES)
+	clang-format -i $(FORMAT_FILES)
+
+lint: SHELL:=/bin/bash
+lint:
+	diff -u <(cat $(FORMAT_FILES)) <(clang-format $(FORMAT_FILES))
+
 test:
 	sqlite3 :memory: '.read test.sql'
 
@@ -138,5 +147,5 @@ version:
 	make node
 	make deno
 
-test-loadable:
+test-loadable: loadable
 	python3 tests/test-loadable.py
