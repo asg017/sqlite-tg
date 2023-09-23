@@ -197,37 +197,6 @@ jobs:
               data: process.env.CHECKSUMS,
             });
             return process.env.CHECKSUMS
-  upload-hex:
-    runs-on: ubuntu-latest
-    needs: [upload-extensions]
-    steps:
-      - uses: actions/checkout@v2
-      - uses: erlef/setup-beam@v1
-        with:
-          otp-version: "24"
-          rebar3-version: "3.16.1"
-          elixir-version: "1.14"
-      - run: ./scripts/elixir_generate_checksum.sh "${{ needs.upload-extensions.outputs.checksums }}"
-      - run: mix deps.get
-        working-directory: ./bindings/elixir
-      - run: mix compile --docs
-        working-directory: ./bindings/elixir
-      - run: mix hex.publish --yes
-        working-directory: ./bindings/elixir
-        env:
-          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
-  upload-crate:
-    runs-on: ubuntu-latest
-    needs: [upload-extensions]
-    steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-      - run: cargo publish --no-verify
-        working-directory: ./bindings/rust
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
   upload-gem:
     needs:
       [
