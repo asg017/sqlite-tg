@@ -1,0 +1,8 @@
+{
+  "name": "sqlite-tg",
+  "version": "0.0.1-alpha.1",
+  "github": "https://github.com/asg017/sqlite-tg",
+  "tasks": {
+    "test": "deno test --unstable -A test.ts"
+  }
+}

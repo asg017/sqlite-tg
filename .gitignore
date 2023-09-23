@@ -1,0 +1,9 @@
+dist/
+*.dylib
+*.so
+*.dll
+
+.ruby-version
+.vscode
+examples/c
+examples/c++

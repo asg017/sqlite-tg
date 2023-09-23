@@ -1,0 +1,5 @@
+{
+  "env": {
+    "myDefaultIncludePath": ["${workspaceFolder}/vendor/tg"]
+  }
+}
