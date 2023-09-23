@@ -60,7 +60,7 @@ $(TARGET_LOADABLE): sqlite-tg.c $(prefix)
 	-Ivendor -Ivendor/tg \
 	-O3 \
 	$(DEFINE_SQLITE_TG) $(CFLAGS) \
-	$< -o vendor/tg/tg.c $@
+	$< vendor/tg/tg.c -o $@
 
 $(TARGET_STATIC): sqlite-tg.c $(prefix)
 	gcc -Ivendor -Ivendor/tg $(DEFINE_SQLITE_TG) $(CFLAGS) -DSQLITE_CORE \
