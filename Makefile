@@ -57,13 +57,13 @@ static: $(TARGET_STATIC)
 
 $(TARGET_LOADABLE): sqlite-tg.c $(prefix)
 	gcc -fPIC -shared \
-	-Ivendor -Ivendor/tg \
+	-Ivendor/sqlite -Ivendor/tg \
 	-O3 \
 	$(DEFINE_SQLITE_TG) $(CFLAGS) \
 	$< vendor/tg/tg.c -o $@
 
 $(TARGET_STATIC): sqlite-tg.c $(prefix)
-	gcc -Ivendor -Ivendor/tg $(DEFINE_SQLITE_TG) $(CFLAGS) -DSQLITE_CORE \
+	gcc -Ivendor/sqlite -Ivendor/tg $(DEFINE_SQLITE_TG) $(CFLAGS) -DSQLITE_CORE \
 	-O3 -c  $< vendor/tg/tg.c -o $(prefix)/tg.o
 	ar rcs $@ $(prefix)/tg.o
 
