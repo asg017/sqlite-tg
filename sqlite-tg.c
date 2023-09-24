@@ -14,6 +14,8 @@ SQLITE_EXTENSION_INIT1
 
 #pragma region value
 
+static const char *TG_GEOM_POINTER_NAME = "tg0-tg_geom";
+
 static struct tg_geom *geomValue(sqlite3_value *value) {
   int n = sqlite3_value_bytes(value);
   switch (sqlite3_value_type(value)) {
@@ -32,12 +34,17 @@ static struct tg_geom *geomValue(sqlite3_value *value) {
       return tg_parse_wktn_ix(text, n, TG_NONE);
     }
   }
+  case SQLITE_NULL: {
+    void *p = sqlite3_value_pointer(value, TG_GEOM_POINTER_NAME);
+    if (p) {
+      return (struct tg_geom *)p;
+    }
+  }
   }
   return NULL;
 }
 
 #pragma endregion
-
 
 #pragma resulting
 
@@ -73,27 +80,40 @@ static void resultGeomGeojson(sqlite3_context *context, struct tg_geom *geom) {
   // TODO assert enough space?
   tg_geom_geojson(geom, buffer, size + 1);
   sqlite3_result_text(context, buffer, size, sqlite3_free);
+  sqlite3_result_subtype(context, JSON_SUBTYPE);
 }
 
-enum export_format { WKT = 1, WKB = 2, GEOJSON = 3 };
+static void resultGeomPointer(sqlite3_context *context, struct tg_geom *geom) {
+  sqlite3_result_pointer(context, geom, TG_GEOM_POINTER_NAME,
+                         (void (*)(void *))tg_geom_free);
+}
 
-static void resultGeomFormat(sqlite3_context *context, struct tg_geom *geom,
-                             enum export_format format) {
+enum export_format { WKT = 1, WKB = 2, GEOJSON = 3, POINTER = 4 };
+
+static void resultAndFreeGeomFormat(sqlite3_context *context,
+                                    struct tg_geom *geom,
+                                    enum export_format format) {
   switch (format) {
   case WKT: {
     resultGeomWkt(context, geom);
+    tg_geom_free(geom);
     break;
   }
   case WKB: {
     resultGeomWkb(context, geom);
+    tg_geom_free(geom);
     break;
   }
   case GEOJSON: {
     resultGeomGeojson(context, geom);
+    tg_geom_free(geom);
     break;
   }
-  default:
-    sqlite3_result_error(context, "BEEP BEEP BEEP", -1);
+  case POINTER: {
+    // takes ownership of geom, no need to free
+    resultGeomPointer(context, geom);
+    break;
+  }
   }
 }
 
@@ -108,6 +128,39 @@ static void tg_version(sqlite3_context *context, int argc,
 static void tg_debug(sqlite3_context *context, int argc, sqlite3_value **arg) {
   sqlite3_result_text(context, sqlite3_user_data(context), -1, SQLITE_STATIC);
 }
+static void tg_to_wkt(sqlite3_context *context, int argc,
+                      sqlite3_value **argv) {
+  struct tg_geom *geom = geomValue(argv[0]);
+  if (tg_geom_error(geom)) {
+    sqlite3_result_error(context, tg_geom_error(geom), -1);
+    return;
+  }
+  resultGeomWkt(context, geom);
+  tg_geom_free(geom);
+}
+
+static void tg_to_wkb(sqlite3_context *context, int argc,
+                      sqlite3_value **argv) {
+  struct tg_geom *geom = geomValue(argv[0]);
+  if (tg_geom_error(geom)) {
+    sqlite3_result_error(context, tg_geom_error(geom), -1);
+    return;
+  }
+  resultGeomWkb(context, geom);
+  tg_geom_free(geom);
+}
+
+static void tg_to_geojson(sqlite3_context *context, int argc,
+                          sqlite3_value **argv) {
+  struct tg_geom *geom = geomValue(argv[0]);
+  if (tg_geom_error(geom)) {
+    sqlite3_result_error(context, tg_geom_error(geom), -1);
+    return;
+  }
+  resultGeomGeojson(context, geom);
+  tg_geom_free(geom);
+}
+
 static void tg_intersects(sqlite3_context *context, int argc,
                           sqlite3_value **argv) {
   struct tg_geom *a = geomValue(argv[0]);
@@ -148,9 +201,8 @@ static void tg_point_impl(sqlite3_context *context, int argc,
     sqlite3_result_error(context, tg_geom_error(geom), -1);
     return;
   }
-  resultGeomFormat(context, geom,
-                   *((enum export_format *)sqlite3_user_data(context)));
-  tg_geom_free(geom);
+  resultAndFreeGeomFormat(context, geom,
+                          *((enum export_format *)sqlite3_user_data(context)));
 }
 
 #pragma endregion
@@ -174,6 +226,7 @@ __declspec(dllexport)
   static enum export_format FORMAT_WKT = WKT;
   static enum export_format FORMAT_WKB = WKB;
   static enum export_format FORMAT_GEOJSON = GEOJSON;
+  static enum export_format FORMAT_POINTER = POINTER;
 
   static const struct {
 
@@ -189,6 +242,12 @@ __declspec(dllexport)
       {(char *)"tg_version",        0, tg_version,    NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_intersects",     2, tg_intersects, NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_type",           1, tg_type,       NULL,             NULL,         DEFAULT_FLAGS},
+
+      {(char *)"tg_to_wkt",         1, tg_to_wkt,     NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_to_wkb",         1, tg_to_wkb,     NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_to_geojson",     1, tg_to_geojson, NULL,             NULL,         DEFAULT_FLAGS},
+
+      {(char *)"tg_point",          2, tg_point_impl, &FORMAT_POINTER,  NULL,         DEFAULT_FLAGS},
       {(char *)"tg_point_wkt",      2, tg_point_impl, &FORMAT_WKT,      NULL,         DEFAULT_FLAGS},
       {(char *)"tg_point_wkb",      2, tg_point_impl, &FORMAT_WKB,      NULL,         DEFAULT_FLAGS},
       {(char *)"tg_point_geojson",  2, tg_point_impl, &FORMAT_GEOJSON,  NULL,         DEFAULT_FLAGS},

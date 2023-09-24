@@ -78,6 +78,7 @@ clean:
 FORMAT_FILES=sqlite-tg.h sqlite-tg.c
 format: $(FORMAT_FILES)
 	clang-format -i $(FORMAT_FILES)
+	black tests/test-loadable.py
 
 lint: SHELL:=/bin/bash
 lint:
@@ -149,3 +150,5 @@ version:
 
 test-loadable: loadable
 	$(PYTHON) tests/test-loadable.py
+test-loadable-watch:
+	watchexec -w sqlite-tg.c -w tests/test-loadable.py --clear -- make test-loadable
