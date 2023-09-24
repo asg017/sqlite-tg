@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - run: make loadable
-      - run: brew install geos; pip3 install shapely; make test-loadable
+      - run: brew install python; pip3 install shapely; make test-loadable python=/usr/local/opt/python@3/libexec/bin/python
       - uses: actions/upload-artifact@v3
         with:
           name: sqlite-tg-macos-x86_64-extension
