@@ -4,7 +4,7 @@ $LOAD_PATH.unshift(lib) unless $LOAD_PATH.include?(lib)
 require "version"
 
 Gem::Specification.new do |spec|
-  spec.name          = "sqlite_tg"
+  spec.name          = "sqlite-tg"
   spec.version       = SqliteTg::VERSION
   spec.authors       = ["Alex Garcia"]
   spec.email         = ["alexsebastian.garcia@gmail.com"]
