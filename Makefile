@@ -148,4 +148,4 @@ version:
 	make deno
 
 test-loadable: loadable
-	python3 tests/test-loadable.py
+	$(PYTHON) tests/test-loadable.py
