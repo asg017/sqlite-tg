@@ -18,10 +18,10 @@ module.exports = async ({ github, context }) => {
       path: `sqlite-tg-linux-x86_64-extension/tg0.so`,
       name: `sqlite-tg-${VERSION}-deno-linux-x86_64.tg0.so`,
     },
-    {
-      path: `sqlite-tg-windows-x86_64-extension/tg0.dll`,
-      name: `sqlite-tg-${VERSION}-deno-windows-x86_64.tg0.dll`,
-    },
+    //{
+    //  path: `sqlite-tg-windows-x86_64-extension/tg0.dll`,
+    //  name: `sqlite-tg-${VERSION}-deno-windows-x86_64.tg0.dll`,
+    //},
   ];
 
   const release = await github.rest.repos.getReleaseByTag({

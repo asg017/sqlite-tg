@@ -35,4 +35,4 @@ echo "✅ generated bindings/node/$PACKAGE_NAME_BASE"
 generate darwin x64
 generate darwin arm64
 generate linux x64
-generate windows x64
+#generate windows x64

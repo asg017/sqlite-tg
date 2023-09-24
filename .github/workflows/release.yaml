@@ -82,6 +82,7 @@ jobs:
           path: dist/wheels/*.whl
   build-windows-x86_64-extension:
     runs-on: windows-2019
+    if: false
     steps:
       - uses: actions/checkout@v3
       - run: make loadable
@@ -117,12 +118,11 @@ jobs:
           name: sqlite-tg-datasette-sqlite-utils-wheels
           path: dist/wheels/*.whl
   upload-deno:
-    needs:
-      [
+    needs: [
         build-linux-x86_64-extension,
         build-macos-x86_64-extension,
         build-macos-aarch64-extension,
-        build-windows-x86_64-extension,
+        #build-windows-x86_64-extension,
       ]
     outputs:
       deno-checksums: ${{ steps.deno-assets.outputs.result }}
@@ -141,12 +141,11 @@ jobs:
             const script = require('.github/workflows/upload-deno-assets.js')
             return await script({github, context})
   upload-extensions:
-    needs:
-      [
+    needs: [
         build-linux-x86_64-extension,
         build-macos-x86_64-extension,
         build-macos-aarch64-extension,
-        build-windows-x86_64-extension,
+        #build-windows-x86_64-extension,
       ]
     permissions:
       contents: write
@@ -165,7 +164,7 @@ jobs:
             macos-x86_64:   sqlite-tg-macos-x86_64-extension/*
             macos-aarch64:  sqlite-tg-macos-aarch64-extension/*
             linux-x86_64:   sqlite-tg-linux-x86_64-extension/*
-            windows-x86_64: sqlite-tg-windows-x86_64-extension/*
+          #windows-x86_64: sqlite-tg-windows-x86_64-extension/*
   upload-checksums:
     needs: [upload-extensions, upload-deno]
     runs-on: ubuntu-latest
@@ -198,12 +197,11 @@ jobs:
             });
             return process.env.CHECKSUMS
   upload-gem:
-    needs:
-      [
+    needs: [
         build-linux-x86_64-extension,
         build-macos-x86_64-extension,
         build-macos-aarch64-extension,
-        build-windows-x86_64-extension,
+        #build-windows-x86_64-extension,
       ]
     permissions:
       contents: write
@@ -236,22 +234,22 @@ jobs:
           rm bindings/ruby/lib/*.{dylib,so,dll} || true
           cp sqlite-tg-windows-x86_64-extension/*.dll bindings/ruby/lib
           gem -C bindings/ruby build -o x64-mingw32.gem sqlite_tg.gemspec
+        if: false
         env:
           PLATFORM: x64-mingw32
       - run: |
           gem push bindings/ruby/x86_64-darwin.gem
           gem push bindings/ruby/arm64-darwin.gem
           gem push bindings/ruby/x86_64-linux.gem
-          gem push bindings/ruby/x64-mingw32.gem
+        #gem push bindings/ruby/x64-mingw32.gem
         env:
           GEM_HOST_API_KEY: ${{ secrets.GEM_HOST_API_KEY }}
   upload-npm:
-    needs:
-      [
+    needs: [
         build-linux-x86_64-extension,
         build-macos-x86_64-extension,
         build-macos-aarch64-extension,
-        build-windows-x86_64-extension,
+        #build-windows-x86_64-extension,
       ]
     runs-on: ubuntu-latest
     steps:
@@ -261,7 +259,7 @@ jobs:
           cp sqlite-tg-linux-x86_64-extension/*.so bindings/node/sqlite-tg-linux-x64/lib/
           cp sqlite-tg-macos-x86_64-extension/*.dylib bindings/node/sqlite-tg-darwin-x64/lib/
           cp sqlite-tg-macos-aarch64-extension/*.dylib bindings/node/sqlite-tg-darwin-arm64/lib/
-          cp sqlite-tg-windows-x86_64-extension/*.dll bindings/node/sqlite-tg-windows-x64/lib/
+        #cp sqlite-tg-windows-x86_64-extension/*.dll bindings/node/sqlite-tg-windows-x64/lib/
       - uses: actions/setup-node@v3
         with:
           node-version: "16"
@@ -281,23 +279,22 @@ jobs:
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Publish NPM sqlite-tg-windows-x64
-        working-directory: bindings/node/sqlite-tg-windows-x64
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      #- name: Publish NPM sqlite-tg-windows-x64
+      #  working-directory: bindings/node/sqlite-tg-windows-x64
+      #  run: npm publish --access public
+      #  env:
+      #    NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish NPM sqlite-tg
         working-directory: bindings/node/sqlite-tg
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
   upload-pypi:
-    needs:
-      [
+    needs: [
         build-linux-x86_64-python,
         build-macos-x86_64-python,
         build-macos-aarch64-python,
-        build-windows-x86_64-python,
+        #build-windows-x86_64-python,
         build-datasette-sqlite-utils,
       ]
     runs-on: ubuntu-latest
@@ -314,10 +311,10 @@ jobs:
         with:
           name: sqlite-tg-macos-aarch64-wheels
           path: dist
-      - uses: actions/download-artifact@v3
-        with:
-          name: sqlite-tg-windows-x86_64-wheels
-          path: dist
+      #- uses: actions/download-artifact@v3
+      #  with:
+      #    name: sqlite-tg-windows-x86_64-wheels
+      #    path: dist
       - uses: actions/download-artifact@v3
         with:
           name: sqlite-tg-datasette-sqlite-utils-wheels
