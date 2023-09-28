@@ -1,0 +1,104 @@
+# serializer version: 1
+# name: test_tg_geometries_each
+  list([
+    dict({
+      'geometry': None,
+      'rowid': 0,
+      'tg_to_geojson(geometry)': '{"type":"Polygon","coordinates":[[[-118.259002742043,34.0500715900119],[-118.258997596447,34.0500772148768],[-118.259001490029,34.050079993156],[-118.258975466397,34.050107780038],[-118.258968222217,34.0501030418042],[-118.258929724939,34.0501438203316],[-118.258942691698,34.0501522840414],[-118.258904061675,34.0501932269238],[-118.258786432707,34.0501163468337],[-118.258791960987,34.0501104822524],[-118.258604204476,34.0499877246241],[-118.258598314554,34.0499939749247],[-118.258528682933,34.0499484542969],[-118.258567642255,34.0499071529226],[-118.258579119918,34.0499146299795],[-118.258612880237,34.0498788624972],[-118.258601633695,34.0498715228827],[-118.258648752142,34.0498216025098],[-118.258984083169,34.0500342480779],[-118.258986709316,34.0500358994584],[-118.259017602394,34.0500553378068],[-118.259002742043,34.0500715900119]]]}',
+    }),
+    dict({
+      'geometry': None,
+      'rowid': 1,
+      'tg_to_geojson(geometry)': '{"type":"Polygon","coordinates":[[[-118.27468048882203,34.056943273618785],[-118.25037076861341,34.056943273618785],[-118.25037076861341,34.04351544272916],[-118.27468048882203,34.04351544272916],[-118.27468048882203,34.056943273618785]]]}',
+    }),
+    dict({
+      'geometry': None,
+      'rowid': 2,
+      'tg_to_geojson(geometry)': '{"type":"LineString","coordinates":[[-118.2525418,34.0410524],[-118.2511956,34.0422758]]}',
+    }),
+    dict({
+      'geometry': None,
+      'rowid': 3,
+      'tg_to_geojson(geometry)': '{"type":"Point","coordinates":[-118.2097812,34.0437074]}',
+    }),
+    dict({
+      'geometry': None,
+      'rowid': 4,
+      'tg_to_geojson(geometry)': '{"type":"Point","coordinates":[-118.209855,34.0443535]}',
+    }),
+  ])
+# ---
+# name: test_tg_points_each
+  list([
+    dict({
+      'point': None,
+      'rowid': 0,
+      'subtype(point)': 112,
+      'tg_to_geojson(point)': '{"type":"Point","coordinates":[10,40]}',
+      'tg_to_wkt(point)': 'POINT(10 40)',
+    }),
+    dict({
+      'point': None,
+      'rowid': 1,
+      'subtype(point)': 112,
+      'tg_to_geojson(point)': '{"type":"Point","coordinates":[40,30]}',
+      'tg_to_wkt(point)': 'POINT(40 30)',
+    }),
+    dict({
+      'point': None,
+      'rowid': 2,
+      'subtype(point)': 112,
+      'tg_to_geojson(point)': '{"type":"Point","coordinates":[20,20]}',
+      'tg_to_wkt(point)': 'POINT(20 20)',
+    }),
+    dict({
+      'point': None,
+      'rowid': 3,
+      'subtype(point)': 112,
+      'tg_to_geojson(point)': '{"type":"Point","coordinates":[30,10]}',
+      'tg_to_wkt(point)': 'POINT(30 10)',
+    }),
+  ])
+# ---
+# name: test_tg_points_each.1
+  list([
+    dict({
+      'point': None,
+      'rowid': 0,
+      'subtype(point)': 112,
+      'tg_to_geojson(point)': '{"type":"Point","coordinates":[10,20]}',
+      'tg_to_wkt(point)': 'POINT(10 20)',
+    }),
+    dict({
+      'point': None,
+      'rowid': 1,
+      'subtype(point)': 112,
+      'tg_to_geojson(point)': '{"type":"Point","coordinates":[30,40]}',
+      'tg_to_wkt(point)': 'POINT(30 40)',
+    }),
+    dict({
+      'point': None,
+      'rowid': 0,
+      'subtype(point)': 112,
+      'tg_to_geojson(point)': '{"type":"Point","coordinates":[90,80]}',
+      'tg_to_wkt(point)': 'POINT(90 80)',
+    }),
+    dict({
+      'point': None,
+      'rowid': 1,
+      'subtype(point)': 112,
+      'tg_to_geojson(point)': '{"type":"Point","coordinates":[70,60]}',
+      'tg_to_wkt(point)': 'POINT(70 60)',
+    }),
+    dict({
+      'point': None,
+      'rowid': 2,
+      'subtype(point)': 112,
+      'tg_to_geojson(point)': '{"type":"Point","coordinates":[50,40]}',
+      'tg_to_wkt(point)': 'POINT(50 40)',
+    }),
+  ])
+# ---
+# name: test_tg_to_wkb
+  b'\x01\x02\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf0?\x00\x00\x00\x00\x00\x00\xf0?'
+# ---

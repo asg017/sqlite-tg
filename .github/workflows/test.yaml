@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - run: make loadable
-      - run: pip install shapely; make test-loadable
+      - run: pip install pytest syrupy shapely; make test-loadable
       - uses: actions/upload-artifact@v3
         with:
           name: sqlite-tg-linux-x86_64-extension
@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - run: make loadable
-      - run: /usr/local/opt/python@3/libexec/bin/python -m pip install shapely; make test-loadable python=/usr/local/opt/python@3/libexec/bin/python
+      - run: /usr/local/opt/python@3/libexec/bin/python -m pip install pytest syrupy shapely; make test-loadable python=/usr/local/opt/python@3/libexec/bin/python
       - uses: actions/upload-artifact@v3
         with:
           name: sqlite-tg-macos-x86_64-extension
@@ -41,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - run: make loadable
-      - run: pip install shapely; make test-loadable
+      - run: pip install pytest syrupy shapely; make test-loadable
       - uses: actions/upload-artifact@v3
         with:
           name: sqlite-tg-windows-x86_64-extension

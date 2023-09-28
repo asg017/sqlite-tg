@@ -149,6 +149,6 @@ version:
 	make deno
 
 test-loadable: loadable
-	$(PYTHON) tests/test-loadable.py
+	$(PYTHON) -m pytest -vv tests/test-loadable.py
 test-loadable-watch:
 	watchexec -w sqlite-tg.c -w tests/test-loadable.py -w docs.md -w Makefile --clear -- make test-loadable
