@@ -159,6 +159,6 @@ test-loadable-watch:
 
 wasm-playground:
 	mkdir -p $(prefix)/wasm-playground
-	echo "hello!" > $(prefix)/wasm-playground/index.html
+	cp bindings/wasm/playground.html $(prefix)/wasm-playground/index.html
 	cp $(prefix)/sqljs.wasm $(prefix)/wasm-playground
 	cp $(prefix)/sqljs.js $(prefix)/wasm-playground
