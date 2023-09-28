@@ -14,3 +14,5 @@ venv/
 examples/**/*.geojson
 *.csv
 *.zip
+
+__pycache__

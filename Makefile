@@ -150,5 +150,9 @@ version:
 
 test-loadable: loadable
 	$(PYTHON) -m pytest -vv tests/test-loadable.py
+
+test-loadable-snapshot-update: loadable
+	$(PYTHON) -m pytest -vv tests/test-loadable.py --snapshot-update
+
 test-loadable-watch:
 	watchexec -w sqlite-tg.c -w tests/test-loadable.py -w docs.md -w Makefile --clear -- make test-loadable
