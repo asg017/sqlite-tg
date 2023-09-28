@@ -6,24 +6,24 @@ version = {}
 with open("sqlite_tg/version.py") as fp:
     exec(fp.read(), version)
 
-VERSION = version['__version__']
+VERSION = version["__version__"]
 
 system = platform.system()
 machine = platform.machine()
 
 print(system, machine)
 
-if system == 'Darwin':
-  if machine not in ['x86_64', 'arm64']:
-    raise Exception("unsupported platform")
-elif system == 'Linux':
-  if machine not in ['x86_64']:
-    raise Exception("unsupported platform")
-elif system == 'Windows':
-  # TODO only 64 bit I think
-  pass
+if system == "Darwin":
+    if machine not in ["x86_64", "arm64"]:
+        raise Exception("unsupported platform")
+elif system == "Linux":
+    if machine not in ["x86_64"]:
+        raise Exception("unsupported platform")
+elif system == "Windows":
+    # TODO only 64 bit I think
+    pass
 else:
-  raise Exception("unsupported platform")
+    raise Exception("unsupported platform")
 
 setup(
     name="sqlite-tg",
@@ -40,7 +40,7 @@ setup(
     license="MIT License, Apache License, Version 2.0",
     version=VERSION,
     packages=["sqlite_tg"],
-    package_data={"sqlite_tg": ['*.so', '*.dylib', '*.dll']},
+    package_data={"sqlite_tg": ["*.so", "*.dylib", "*.dll"]},
     install_requires=[],
     # Adding an Extension makes `pip wheel` believe that this isn't a
     # pure-python package. The noop.c was added since the windows build

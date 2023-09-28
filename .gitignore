@@ -9,3 +9,8 @@ examples/c
 examples/c++
 
 venv/
+
+*.db
+*.geojson
+*.csv
+*.zip

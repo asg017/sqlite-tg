@@ -3,6 +3,7 @@ import sqlite_tg
 
 from datasette_sqlite_tg.version import __version_info__, __version__
 
+
 @hookimpl
 def prepare_connection(conn):
     conn.enable_load_extension(True)

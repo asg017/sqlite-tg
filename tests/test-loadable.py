@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import unittest
 import shapely
 from pathlib import Path
@@ -48,6 +49,9 @@ def spread_args(args):
 
 FUNCTIONS = [
     "tg_debug",
+    "tg_extra_json",
+    "tg_geom",
+    "tg_geom",
     "tg_intersects",
     "tg_point",
     "tg_point_geojson",
@@ -57,10 +61,19 @@ FUNCTIONS = [
     "tg_to_wkb",
     "tg_to_wkt",
     "tg_type",
+    "tg_valid_geojson",
+    "tg_valid_wkb",
+    "tg_valid_wkt",
     "tg_version",
 ]
 
-MODULES = []
+MODULES = [
+    "tg_geometries_each",
+    "tg_lines_each",
+    "tg_points_each",
+    "tg_polygons_each",
+    "tg_rect_parts",
+]
 
 
 LINE_A = shapely.from_wkt("LINESTRING (0 0, 1 1)")
@@ -74,6 +87,7 @@ LINE_SEPARATE = (
     shapely.from_wkt("LINESTRING (2 0, 2 2)"),
 )
 
+COLLECTION_GEOJSON = (Path(__file__).parent / "data"  / "collection.geojson").read_text()
 
 class TestTg(unittest.TestCase):
     def test_funcs(self):
@@ -144,6 +158,10 @@ class TestTg(unittest.TestCase):
             "GeometryCollection",
         )
 
+        db.execute(
+            "select tg_type(tg_point(1, 2)) from json_each('[1,2,3]')"
+        ).fetchall()
+
     def test_tg_to_wkt(self):
         tg_to_wkt = lambda *args: db.execute("select tg_to_wkt(?)", args).fetchone()[0]
         self.assertEqual(tg_to_wkt(shapely.to_wkb(LINE_A)), "LINESTRING(0 0,1 1)")
@@ -156,6 +174,99 @@ class TestTg(unittest.TestCase):
             b"\x01\x02\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf0?\x00\x00\x00\x00\x00\x00\xf0?",
         )
         # TODO more tests
+
+    def test_tg_extra_json(self):
+        tg_extra_json = lambda *args: db.execute(
+            "select tg_extra_json(?)", args
+        ).fetchone()[0]
+        self.assertEqual(
+            tg_extra_json('{"type": "Point","coordinates": [-118.2097812,34.0437074]}'),
+            None,
+        )
+        self.assertEqual(
+            tg_extra_json(
+                '{"id": "A", "type": "Point","coordinates": [-118.2097812,34.0437074]}'
+            ),
+            '{"id":"A"}',
+        )
+
+    def test_tg_geom(self):
+        self.assertEqual(
+            db.execute("select tg_geom(?)", ["POINT(1 1)"]).fetchone()[0], None
+        )
+        self.assertEqual(
+            db.execute("select subtype(tg_geom(?))", ["POINT(1 1)"]).fetchone()[0], 112
+        )
+        with self.assertRaisesRegex(
+            sqlite3.OperationalError, "ParseError: invalid text"
+        ):
+            db.execute("select tg_geom(?)", ["POINT(1 1"]).fetchone()
+        # self.skipTest("TODO")
+
+    def test_tg_valid_geojson(self):
+        tg_valid_geojson = lambda *args: db.execute(
+            "select tg_valid_geojson(?)", args
+        ).fetchone()[0]
+        self.assertEqual(tg_valid_geojson(shapely.to_geojson(LINE_A)), 1)
+        self.assertEqual(tg_valid_geojson(shapely.to_wkt(LINE_A)), 0)
+
+    def test_tg_valid_wkb(self):
+        tg_valid_wkb = lambda *args: db.execute(
+            "select tg_valid_wkb(?)", args
+        ).fetchone()[0]
+        self.assertEqual(tg_valid_wkb(shapely.to_wkb(LINE_A)), 1)
+        self.assertEqual(tg_valid_wkb(shapely.to_wkt(LINE_A)), 0)
+
+    def test_tg_valid_wkt(self):
+        tg_valid_wkt = lambda *args: db.execute(
+            "select tg_valid_wkt(?)", args
+        ).fetchone()[0]
+        self.assertEqual(tg_valid_wkt(shapely.to_wkt(LINE_A)), 1)
+        self.assertEqual(tg_valid_wkt(shapely.to_wkb(LINE_A)), 0)
+
+    def test_tg_geometries_each(self):
+        tg_geometries_each = lambda *args: execute_all(
+            db, "select rowid, * from tg_geometries_each(?)", args
+        )
+        self.assertEqual(tg_geometries_each(COLLECTION_GEOJSON), [])
+        with self.assertRaisesRegex(sqlite3.OperationalError, "XXX"):
+            tg_geometries_each(1)
+
+    def test_tg_lines_each(self):
+        self.skipTest("TODO")
+        tg_lines_each = lambda *args: execute_all(
+            db, "select rowid, * from tg_lines_each(?)", args
+        )
+        self.assertEqual(tg_lines_each(), [])
+        with self.assertRaisesRegex(sqlite3.OperationalError):
+            tg_lines_each()
+
+    def test_tg_points_each(self):
+        self.skipTest("TODO")
+        tg_points_each = lambda *args: execute_all(
+            db, "select rowid, * from tg_points_each(?)", args
+        )
+        self.assertEqual(tg_points_each(), [])
+        with self.assertRaisesRegex(sqlite3.OperationalError):
+            tg_points_each()
+
+    def test_tg_polygons_each(self):
+        self.skipTest("TODO")
+        tg_polygons_each = lambda *args: execute_all(
+            db, "select rowid, * from tg_polygons_each(?)", args
+        )
+        self.assertEqual(tg_polygons_each(), [])
+        with self.assertRaisesRegex(sqlite3.OperationalError):
+            tg_polygons_each()
+
+    def test_tg_rect_parts(self):
+        self.skipTest("TODO")
+        tg_rect_parts = lambda *args: execute_all(
+            db, "select rowid, * from tg_rect_parts(?)", args
+        )
+        self.assertEqual(tg_rect_parts(), [])
+        with self.assertRaisesRegex(sqlite3.OperationalError):
+            tg_rect_parts()
 
     def test_tg_to_geojson(self):
         tg_to_geojson = lambda *args: db.execute(
@@ -219,6 +330,106 @@ class TestTg(unittest.TestCase):
         self.assertEqual(tg_point_wkt(1, 2), "POINT(1 2)")
         self.assertEqual(tg_point_wkt(1.111, 2.222), "POINT(1.111 2.222)")
 
+    def test_tg_points_each(self):
+        self.assertEqual(
+            execute_all(
+                db,
+                "select rowid, point, subtype(point), tg_to_wkt(point), tg_to_geojson(point) from tg_points_each(?)",
+                ["MULTIPOINT ((10 40), (40 30), (20 20), (30 10))"],
+            ),
+            [
+                {
+                    "rowid": 0,
+                    "point": None,
+                    "subtype(point)": 112,
+                    "tg_to_wkt(point)": "POINT(10 40)",
+                    "tg_to_geojson(point)": '{"type":"Point","coordinates":[10,40]}',
+                },
+                {
+                    "rowid": 1,
+                    "point": None,
+                    "subtype(point)": 112,
+                    "tg_to_wkt(point)": "POINT(40 30)",
+                    "tg_to_geojson(point)": '{"type":"Point","coordinates":[40,30]}',
+                },
+                {
+                    "rowid": 2,
+                    "point": None,
+                    "subtype(point)": 112,
+                    "tg_to_wkt(point)": "POINT(20 20)",
+                    "tg_to_geojson(point)": '{"type":"Point","coordinates":[20,20]}',
+                },
+                {
+                    "rowid": 3,
+                    "point": None,
+                    "subtype(point)": 112,
+                    "tg_to_wkt(point)": "POINT(30 10)",
+                    "tg_to_geojson(point)": '{"type":"Point","coordinates":[30,10]}',
+                },
+            ],
+        )
+        self.maxDiff = 10000
+        self.assertEqual(
+            execute_all(
+                db,
+                """
+                  select
+                    tg_points_each.rowid,
+                    point,
+                    subtype(point),
+                    tg_to_wkt(point),
+                    tg_to_geojson(point)
+                  from json_each(?)
+                  join tg_points_each(value)
+                """,
+                [
+                    json.dumps(
+                        [
+                            "MULTIPOINT ((10 20), (30 40))",
+                            "MULTIPOINT (90 80,70 60,50 40)",
+                        ]
+                    )
+                ],
+            ),
+            [
+                {
+                    "rowid": 0,
+                    "point": None,
+                    "subtype(point)": 112,
+                    "tg_to_wkt(point)": "POINT(10 20)",
+                    "tg_to_geojson(point)": '{"type":"Point","coordinates":[10,20]}',
+                },
+                {
+                    "rowid": 1,
+                    "point": None,
+                    "subtype(point)": 112,
+                    "tg_to_wkt(point)": "POINT(30 40)",
+                    "tg_to_geojson(point)": '{"type":"Point","coordinates":[30,40]}',
+                },
+                {
+                    "rowid": 0,
+                    "point": None,
+                    "subtype(point)": 112,
+                    "tg_to_wkt(point)": "POINT(90 80)",
+                    "tg_to_geojson(point)": '{"type":"Point","coordinates":[90,80]}',
+                },
+                {
+                    "rowid": 1,
+                    "point": None,
+                    "subtype(point)": 112,
+                    "tg_to_wkt(point)": "POINT(70 60)",
+                    "tg_to_geojson(point)": '{"type":"Point","coordinates":[70,60]}',
+                },
+                {
+                    "rowid": 2,
+                    "point": None,
+                    "subtype(point)": 112,
+                    "tg_to_wkt(point)": "POINT(50 40)",
+                    "tg_to_geojson(point)": '{"type":"Point","coordinates":[50,40]}',
+                },
+            ],
+        )
+
 
 class TestCoverage(unittest.TestCase):
     def test_coverage(self):
@@ -226,7 +437,7 @@ class TestCoverage(unittest.TestCase):
             method for method in dir(TestTg) if method.startswith("test_tg")
         ]
         funcs_with_tests = set([x.replace("test_", "") for x in test_methods])
-        for func in FUNCTIONS:
+        for func in [*FUNCTIONS, *MODULES]:
             self.assertTrue(
                 func in funcs_with_tests,
                 f"{func} does not have cooresponding test in {funcs_with_tests}",
@@ -236,7 +447,7 @@ class TestCoverage(unittest.TestCase):
 class TestDocs(unittest.TestCase):
     def test_docs(self):
         README = (Path(__file__).parent.parent / "docs.md").read_text()
-        for func in FUNCTIONS:
+        for func in [*FUNCTIONS, *MODULES]:
             self.assertTrue(func in README, f"{func} is not documented")
             self.assertTrue(f'name="{func}"' in README, f"{func} is not documented")
             self.assertTrue(f"{func}(" in README, f"{func} missing code sample")

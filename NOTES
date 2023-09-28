@@ -1,0 +1,88 @@
+## NOTES
+
+UPCASTING: only `tg_line`, `tg_ring`, and `tg_poly` can upcast to tg_geom.
+
+## geom idx
+
+```sql
+select
+  tg_intersect(
+    tg_geom(:big_blob, 'ystripes'),
+    tg_point(latitude, longitude)
+  )
+from businesses;
+```
+
+## constructors
+
+- `tg_point()`
+
+- `tg_linestring(p1, p2, ...)` (alias to `tg_line`?)
+- `tg_group_linestring(p)`
+
+- `tg_ring(p1, p2, ...)`
+- `tg_group_ring(p)`
+
+- `tg_polygon(exterior, hole1, hole2, ...)` (params are rings)
+- `tg_group_polygon(exterior, hole)` -- ensure 1st arg 'exterior' remains constant
+
+- `tg_multipoint(p1, p2, ...)`
+- `tg_group_multipoint(p)`
+
+- `tg_multilinestring(l1, l2, ...)`
+- `tg_group_multilinestring(l1, l2, ...)`
+
+- `tg_multipolygon(p1, p2)`
+- `tg_group_multipolygon(p)`
+
+- `tg_geometrycollection(g1, g2)`
+- `tg_group_geometrycollection(g)`
+
+tg_rect(minX, minY, maxX, maxY)
+tg_rect(minP, maxP)
+
+tg_segment(aX, aY, bX, bY)
+tg_segment(aP, bP)
+
+## geom table functions
+
+| SQL table function        | Status | Input     | C num func                 | C at func               |
+| ------------------------- | :----: | --------- | -------------------------- | ----------------------- |
+| `tg_points_each()`        |   ✅   | `tg_geom` | `tg_geom_num_points()`     | `tg_geom_point_at()`    |
+| `tg_lines_each()`         |   ✅   | `tg_geom` | `tg_geom_num_lines()`      | `tg_geom_line_at()`     |
+| `tg_polygons_each()`      |   ✅   | `tg_geom` | `tg_geom_num_polys()`      | `tg_geom_poly_at()`     |
+| `tg_geometries_each()`    |   ✅   | `tg_geom` | `tg_geom_num_geometries()` | `tg_geom_geometry_at()` |
+| `tg_line_points_each()`   |   ❌   | `tg_line` | `tg_line_num_points()`     | `tg_line_point_at()`    |
+| `tg_line_segments_each()` |   ❌   | `tg_line` | `tg_line_num_segments()`   | `tg_line_segment_at()`  |
+| `tg_poly_holes_each()`    |   ❌   | `tg_poly` | `tg_poly_num_holes()`      | `tg_poly_hole_at()`     |
+| `tg_ring_points_each()`   |   ❌   | `tg_ring` | `tg_ring_num_points()`     | `tg_ring_point_at()`    |
+| `tg_ring_segments_each()` |   ❌   | `tg_ring` | `tg_ring_num_segments()`   | `tg_ring_segment_at()`  |
+
+## goal sqlite-tg queries that should be fast
+
+1. PIP many points, 1 polygon
+
+```sql
+select
+  tg_point_inside(
+    cast(readfile("brazil.geojson") as text),
+    tg_point(longitude, latitude)
+  )
+from businesses;
+```
+
+2. PIP many points, many polygon
+
+```sql
+select
+  tg_point_inside(
+    ???,
+    tg_point(longitude, latitude)
+  )
+from businesses
+join ???;
+```
+
+3. RTree-backed "which shapes intersect this shape"
+
+4. KNN

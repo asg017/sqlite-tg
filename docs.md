@@ -177,6 +177,26 @@ select tg_type('GEOMETRYCOLLECTION (POINT (40 10),LINESTRING (10 10, 20 20, 10 4
 -- 'GeometryCollection'
 ```
 
+<h4 name="tg_extra_json"><code>tg_extra_json(geometry)</code></h4>
+
+If the original geometry is a GeoJSON with extra fields such as `id` or `property`, those extra fields will be returned in a JSON object.
+
+```sql
+select tg_extra_json('{
+  "type": "Point",
+  "coordinates": [-118.2097812,34.0437074]
+}');
+-- NULL
+
+select tg_extra_json('{
+  "id": "ASG0017",
+  "type": "Point",
+  "coordinates": [-118.2097812,34.0437074],
+  "properties": {"color": "red"}
+}');
+-- '{"id":"ASG0017","properties":{"color": "red"}}'
+```
+
 ### Operations
 
 <h4 name="tg_intersects"><code>tg_intersects(a, b)</code></h4>
@@ -240,3 +260,57 @@ select tg_intersects('POLYGON((
 select tg_XXX();
 ```
 -->
+
+<h4 name="tg_geom"><code>tg_geom()</code></h4>
+
+```sql
+select tg_geom();
+```
+
+<h4 name="tg_valid_geojson"><code>tg_valid_geojson()</code></h4>
+
+```sql
+select tg_valid_geojson();
+```
+
+<h4 name="tg_valid_wkb"><code>tg_valid_wkb()</code></h4>
+
+```sql
+select tg_valid_wkb();
+```
+
+<h4 name="tg_valid_wkt"><code>tg_valid_wkt()</code></h4>
+
+```sql
+select tg_valid_wkt();
+```
+
+<h4 name="tg_geometries_each"><code>tg_geometries_each()</code></h4>
+
+```sql
+select tg_geometries_each();
+```
+
+<h4 name="tg_lines_each"><code>tg_lines_each()</code></h4>
+
+```sql
+select tg_lines_each();
+```
+
+<h4 name="tg_points_each"><code>tg_points_each()</code></h4>
+
+```sql
+select tg_points_each();
+```
+
+<h4 name="tg_polygons_each"><code>tg_polygons_each()</code></h4>
+
+```sql
+select tg_polygons_each();
+```
+
+<h4 name="tg_rect_parts"><code>tg_rect_parts()</code></h4>
+
+```sql
+select tg_rect_parts();
+```

@@ -55,7 +55,7 @@ TARGET_STATIC_H=$(prefix)/sqlite-tg.h
 loadable: $(TARGET_LOADABLE)
 static: $(TARGET_STATIC)
 
-$(TARGET_LOADABLE): sqlite-tg.c $(prefix)
+$(TARGET_LOADABLE): sqlite-tg.c vendor/tg/tg.c $(prefix)
 	gcc -fPIC -shared \
 	-Ivendor/sqlite -Ivendor/tg \
 	-O3 \
@@ -151,4 +151,4 @@ version:
 test-loadable: loadable
 	$(PYTHON) tests/test-loadable.py
 test-loadable-watch:
-	watchexec -w sqlite-tg.c -w tests/test-loadable.py --clear -- make test-loadable
+	watchexec -w sqlite-tg.c -w tests/test-loadable.py -w docs.md -w Makefile --clear -- make test-loadable
