@@ -7,7 +7,7 @@
     _free
     addFunction
     allocate
-    $allocateUTF8OnStack
+    allocateUTF8OnStack
     getValue
     intArrayFromString
     removeFunction
@@ -906,7 +906,7 @@ Module["onRuntimeInitialized"] = function onRuntimeInitialized() {
     var stack = stackSave();
     var stmt = null;
     try {
-      var nextSqlPtr = $allocateUTF8OnStack(sql);
+      var nextSqlPtr = allocateUTF8OnStack(sql);
       var pzTail = stackAlloc(4);
       var results = [];
       while (getValue(nextSqlPtr, "i8") !== NULL) {
