@@ -156,3 +156,7 @@ test-loadable-snapshot-update: loadable
 
 test-loadable-watch:
 	watchexec -w sqlite-tg.c -w tests/test-loadable.py -w docs.md -w Makefile --clear -- make test-loadable
+
+wasm-playground:
+	mkdir -p $(prefix)/wasm-playground
+	echo "hello!" > $(prefix)/wasm-playground/index.html
