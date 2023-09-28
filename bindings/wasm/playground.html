@@ -1,88 +1,42 @@
 <meta charset="utf8" />
 <html>
+  <head>
+    <title>sqlite-tg WASM Playground</title>
+  </head>
   <body>
-    <div id="results">⏳ Running tests...</div>
-    <style>
-      td {
-        border: 1px solid #ccc;
-      }
-      th {
-        background: #ccc;
-        border: 1px solid black;
-      }
-      code pre {
-        background: #eee;
-      }
-    </style>
+    <h1>sqlite-tg WASM Playground</h1>
+    <div>
+      <div id="editor"></div>
+    </div>
+    <div style="padding: 2rem 1rem;">
+      <div id="results"></div>
+    </div>
   </body>
   <script src="./sqljs.js"></script>
-  <script type="module">
-    import { html } from "https://cdn.skypack.dev/htl";
-
-    const testCases = [
-      `
-select name
-from pragma_function_list
-where name like 'tg%'
-order by 1`,
-      `
-select name
-from pragma_module_list
-where name like 'tg%'
-order by 1`,
-      `select tg_to_geojson('POINT(1 2)');`,
-      `
-select
-  rowid,
-  geometry,
-  tg_to_wkt(geometry),
-  tg_to_geojson(geometry)
-from tg_geometries_each('GEOMETRYCOLLECTION (POINT (40 10),
-LINESTRING (10 10, 20 20, 10 40),
-POLYGON ((40 40, 20 45, 45 30, 40 40)))');`,
-    ];
-
-    initSqlJs({
-      locateFile: (filename, prefix) => {
-        return `./${filename}`;
-      },
-    }).then(function (SQL) {
-      var db = new SQL.Database();
-
-      let error = false;
-      for (const query of testCases) {
-        try {
-          let stmt = db.prepare(query);
-          const columns = stmt.getColumnNames();
-          const rows = [];
-          while (stmt.step()) {
-            rows.push(stmt.get());
-          }
-
-          document.body.appendChild(html` <div
-            style="border: 1px solid black;margin-bottom: 1rem; padding: 1rem;"
-          >
-            <code><pre>${query}</pre></code>
-            <table style="border-collapse: collapse;">
-              <thead>
-                <tr>
-                  ${columns.map((column) => html`<th>${column}</th>`)}
-                </tr>
-              </thead>
-              <tbody>
-                ${rows.map(
-                  (values) => html`<tr>
-                    ${values.map((d) => html`<td><pre>${d}</pre></td>`)}
-                  </tr>`
-                )}
-              </tbody>
-            </table>
-          </div>`);
-        } catch {
-          error = true;
-        }
-      }
-      document.querySelector("#results").innerText = error ?  "❌ test(s) failed, check console": "✅ tests passed"
-    });
-  </script>
+  <script src="editor.bundle.js"></script>
+  <style>
+    table {
+      border-collapse: collapse;
+    }
+    td, th {
+      border: 1px solid black;
+      padding: 4px 8px;
+    }
+    th {
+      background: #dedede;
+    }
+    td {
+      background: white;
+      font-family: monospace;
+    }
+    table {
+      max-height: 600px;
+      overflow: auto;
+      display: block;
+    }
+    thead th {
+      position: sticky;
+      top: 0;
+    }
+  </style>
 </html>

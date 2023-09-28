@@ -162,3 +162,5 @@ wasm-playground:
 	cp bindings/wasm/playground.html $(prefix)/wasm-playground/index.html
 	cp $(prefix)/sqljs.wasm $(prefix)/wasm-playground
 	cp $(prefix)/sqljs.js $(prefix)/wasm-playground
+
+	bindings/wasm/node_modules/.bin/rollup bindings/wasm/editor.mjs -f iife -o $(prefix)/wasm-playground/editor.bundle.js -p @rollup/plugin-node-resolve
