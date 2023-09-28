@@ -58,6 +58,9 @@ SQLJS_EMFLAGS_DEBUG = \
 	-s ASSERTIONS=1 \
 	-O1
 
+$(prefix):
+	mkdir -p $@
+
 $(TARGET_SQLJS): $(prefix) $(shell find bindings/wasm/ -type f) sqlite-tg.c $(TARGET_SQLITE3_EXTRA_C)
 	emcc $(SQLJS_CFLAGS) $(SQLJS_EMFLAGS) $(SQLJS_EMFLAGS_DEBUG) $(SQLJS_EMFLAGS_WASM) \
 		-I./ -Ivendor/sqlite -Ivendor/tg \
