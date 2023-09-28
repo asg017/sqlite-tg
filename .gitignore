@@ -11,6 +11,6 @@ examples/c++
 venv/
 
 *.db
-*.geojson
+examples/**/*.geojson
 *.csv
 *.zip
