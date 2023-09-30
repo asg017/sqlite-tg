@@ -365,10 +365,15 @@ def test_tg_group_multipoint():
         == "MULTIPOINT(0 0,1 1,2 2,3 3,4 4,5 5,6 6,7 7,8 8,9 9)"
     )
 
-    with pytest.raises(sqlite3.OperationalError, match="invalid geometry input. Must be"):
+    with pytest.raises(
+        sqlite3.OperationalError, match="invalid geometry input. Must be"
+    ):
         db.execute("select tg_group_multipoint(NULL)")
 
-    with pytest.raises(sqlite3.OperationalError, match="parameters to tg_group_multipoint\(\) must be Point gemetries"):
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="parameters to tg_group_multipoint\(\) must be Point gemetries",
+    ):
         db.execute("select tg_group_multipoint('MULTIPOINT EMPTY')")
 
 
@@ -442,6 +447,7 @@ def test_tg_touches():
 def test_tg_within():
     tg_within = lambda *args: db.execute("select tg_within(?)", args).fetchone()[0]
     pass
+
 
 def test_coverage():
     current_module = inspect.getmodule(inspect.currentframe())
