@@ -59,6 +59,8 @@ A [pointer function](#pointer-functions) that returns a point geometry with the 
 
 In most cases, you should consider the sibling functions [`tg_point_geojson()`](#tg_point_geojson), [`tg_point_wkb()`](#tg_point_wkb), and [`tg_point_wkt()`](#tg_point_wkt).
 
+TODO mention that pointer values don't exist past CTE boundaries and must be serialized
+
 ```sql
 select tg_point(1, 2); -- appears to be NULL
 
@@ -87,6 +89,24 @@ Creates a new point geometry with the given `x` and `y` values. Returns a WKT st
 
 ```sql
 select tg_point_wkt(1, 2); -- 'POINT(1 2)'
+```
+
+<h4 name="tg_multipoint"><code>tg_multipoint(p1, p2, ...)</code></h4>
+
+A [pointer function](#pointer-functions) that returns a MultiPoint geometry with the given points. This value will appear to be `NULL` on direct access, so consider wr
+
+Input arguments must be Point geometries, which can be WKT, WKB, or GeoJSON.
+
+```sql
+select tg_multipoint(tg_point());
+```
+
+<h4 name="tg_group_multipoint"><code>tg_group_multipoint()</code></h4>
+
+TODO
+
+```sql
+select tg_group_multipoint();
 ```
 
 ### Conversions
@@ -253,6 +273,54 @@ select tg_intersects('POLYGON((
 ))', 'POINT(-73.985130 40.758896)')
 ```
 
+<h4 name="tg_contains"><code>tg_contains()</code></h4>
+
+TODO
+
+```sql
+select tg_contains();
+```
+
+<h4 name="tg_coveredby"><code>tg_coveredby()</code></h4>
+
+TODO
+
+```sql
+select tg_coveredby();
+```
+
+<h4 name="tg_covers"><code>tg_covers()</code></h4>
+
+TODO
+
+```sql
+select tg_covers();
+```
+
+<h4 name="tg_disjoint"><code>tg_disjoint()</code></h4>
+
+TODO
+
+```sql
+select tg_disjoint();
+```
+
+<h4 name="tg_touches"><code>tg_touches()</code></h4>
+
+TODO
+
+```sql
+select tg_touches();
+```
+
+<h4 name="tg_within"><code>tg_within()</code></h4>
+
+TODO
+
+```sql
+select tg_within();
+```
+
 <!--
 <h4 name="tg_XXX"><code>tg_XXX()</code></h4>
 
@@ -263,11 +331,15 @@ select tg_XXX();
 
 <h4 name="tg_geom"><code>tg_geom()</code></h4>
 
+TODO
+
 ```sql
 select tg_geom();
 ```
 
 <h4 name="tg_valid_geojson"><code>tg_valid_geojson()</code></h4>
+
+TODO
 
 ```sql
 select tg_valid_geojson();
@@ -275,11 +347,15 @@ select tg_valid_geojson();
 
 <h4 name="tg_valid_wkb"><code>tg_valid_wkb()</code></h4>
 
+TODO
+
 ```sql
 select tg_valid_wkb();
 ```
 
 <h4 name="tg_valid_wkt"><code>tg_valid_wkt()</code></h4>
+
+TODO
 
 ```sql
 select tg_valid_wkt();
@@ -287,11 +363,15 @@ select tg_valid_wkt();
 
 <h4 name="tg_geometries_each"><code>tg_geometries_each()</code></h4>
 
+TODO
+
 ```sql
 select tg_geometries_each();
 ```
 
 <h4 name="tg_lines_each"><code>tg_lines_each()</code></h4>
+
+TODO
 
 ```sql
 select tg_lines_each();
@@ -299,18 +379,24 @@ select tg_lines_each();
 
 <h4 name="tg_points_each"><code>tg_points_each()</code></h4>
 
+TODO
+
 ```sql
 select tg_points_each();
 ```
 
 <h4 name="tg_polygons_each"><code>tg_polygons_each()</code></h4>
 
+TODO
+
 ```sql
 select tg_polygons_each();
 ```
 
-<h4 name="tg_rect_parts"><code>tg_rect_parts()</code></h4>
+<h4 name="tg_bbox"><code>tg_bbox()</code></h4>
+
+TODO
 
 ```sql
-select tg_rect_parts();
+select tg_bbox();
 ```

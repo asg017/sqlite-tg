@@ -164,3 +164,6 @@ wasm-playground:
 	cp $(prefix)/sqljs.js $(prefix)/wasm-playground
 
 	bindings/wasm/node_modules/.bin/rollup bindings/wasm/editor.mjs -f iife -o $(prefix)/wasm-playground/editor.bundle.js -p @rollup/plugin-node-resolve
+
+wasm-playground-watch:
+	watchexec -w bindings/wasm --clear -- make wasm-playground

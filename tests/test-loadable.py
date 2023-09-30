@@ -51,11 +51,17 @@ def spread_args(args):
 
 
 FUNCTIONS = [
+    "tg_contains",
+    "tg_coveredby",
+    "tg_covers",
     "tg_debug",
+    "tg_disjoint",
     "tg_extra_json",
     "tg_geom",
     "tg_geom",
+    "tg_group_multipoint",
     "tg_intersects",
+    "tg_multipoint",
     "tg_point",
     "tg_point_geojson",
     "tg_point_wkb",
@@ -63,19 +69,93 @@ FUNCTIONS = [
     "tg_to_geojson",
     "tg_to_wkb",
     "tg_to_wkt",
+    "tg_touches",
     "tg_type",
     "tg_valid_geojson",
     "tg_valid_wkb",
     "tg_valid_wkt",
     "tg_version",
+    "tg_within",
 ]
+
+
+@pytest.mark.skip(reason="TODO")
+def test_tg_group_multipoint():
+    tg_group_multipoint = lambda *args: db.execute(
+        "select tg_group_multipoint(?)", args
+    ).fetchone()[0]
+    pass
+
+
+def test_tg_multipoint():
+    tg_multipoint = lambda *args: db.execute(
+        f"select tg_to_wkt(tg_multipoint({spread_args(args)}))", args
+    ).fetchone()[0]
+    assert tg_multipoint() == "MULTIPOINT EMPTY"
+    assert tg_multipoint("point(0 0)") == "MULTIPOINT(0 0)"
+    assert tg_multipoint("point(0 0)", "point(1 1)") == "MULTIPOINT(0 0,1 1)"
+    assert (
+        tg_multipoint("point(0 0)", "point(1 1)", "point(2 2)")
+        == "MULTIPOINT(0 0,1 1,2 2)"
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="argument to tg_multipoint\(\) at index 0 is an invalid geometry"):
+        tg_multipoint("invalid")
+
+    with pytest.raises(sqlite3.OperationalError, match="argument to tg_multipoint\(\) at index 1 is an invalid geometry"):
+        tg_multipoint("point(1 1)", "invalid")
+
+    with pytest.raises(sqlite3.OperationalError, match="argument to tg_multipoint\(\) at index 0 expected a point, found MultiPoint"):
+        tg_multipoint("multipoint(1 1)")
+
+
+@pytest.mark.skip(reason="TODO")
+def test_tg_contains():
+    tg_contains = lambda *args: db.execute("select tg_contains(?)", args).fetchone()[0]
+
+    pass
+
+
+@pytest.mark.skip(reason="TODO")
+def test_tg_coveredby():
+    tg_coveredby = lambda *args: db.execute("select tg_coveredby(?)", args).fetchone()[
+        0
+    ]
+
+    pass
+
+
+@pytest.mark.skip(reason="TODO")
+def test_tg_covers():
+    tg_covers = lambda *args: db.execute("select tg_covers(?)", args).fetchone()[0]
+
+    pass
+
+
+@pytest.mark.skip(reason="TODO")
+def test_tg_disjoint():
+    tg_disjoint = lambda *args: db.execute("select tg_disjoint(?)", args).fetchone()[0]
+    pass
+
+
+@pytest.mark.skip(reason="TODO")
+def test_tg_touches():
+    tg_touches = lambda *args: db.execute("select tg_touches(?)", args).fetchone()[0]
+    pass
+
+
+@pytest.mark.skip(reason="TODO")
+def test_tg_within():
+    tg_within = lambda *args: db.execute("select tg_within(?)", args).fetchone()[0]
+    pass
+
 
 MODULES = [
     "tg_geometries_each",
     "tg_lines_each",
     "tg_points_each",
     "tg_polygons_each",
-    "tg_rect_parts",
+    "tg_bbox",
 ]
 
 SUPPORTS_SUBTYPE = sqlite3.version_info[1] > 38
@@ -272,13 +352,13 @@ def test_tg_polygons_each():
 
 
 @pytest.mark.skip(reason="TODO")
-def test_tg_rect_parts():
-    tg_rect_parts = lambda *args: execute_all(
-        db, "select rowid, * from tg_rect_parts(?)", args
+def test_tg_bbox():
+    tg_tg_bbox = lambda *args: execute_all(
+        db, "select rowid, * from tg_tg_bbox(?)", args
     )
-    assert tg_rect_parts() == []
+    assert tg_tg_bbox() == []
     with pytest.raises(sqlite3.OperationalError):
-        tg_rect_parts()
+        tg_tg_bbox()
 
 
 def test_tg_to_geojson():
@@ -372,7 +452,7 @@ def test_tg_points_each(snapshot):
     )
 
 
-def test_coverate():
+def test_coverage():
     current_module = inspect.getmodule(inspect.currentframe())
     test_methods = [
         member[0]

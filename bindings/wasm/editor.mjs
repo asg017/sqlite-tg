@@ -16,8 +16,12 @@ POLYGON ((40 40, 20 45, 45 30, 40 40)))');
 function main(SQL) {
   var db = new SQL.Database();
 
+  const SUBMIT_ELEMENT = document.getElementById("submit");
+  const EDITOR_ELEMENT = document.getElementById("editor");
+  const RESULTS_ELEMENT = document.getElementById("results");
+
   const editor = new EditorView({
-    parent: document.getElementById("editor"),
+    parent: EDITOR_ELEMENT,
     doc: INITIAL,
     extensions: [
       keymap.of([
@@ -37,12 +41,20 @@ function main(SQL) {
     ],
   });
 
-  const results = document.getElementById("results");
+  SUBMIT_ELEMENT.addEventListener("click", () => {
+    onSubmit(editor.state.doc.toString());
+  });
+
+  function updateResults(node) {
+    while (RESULTS_ELEMENT.firstChild)
+      RESULTS_ELEMENT.removeChild(RESULTS_ELEMENT.firstChild);
+    RESULTS_ELEMENT.appendChild(node);
+  }
+
   function onSubmit(code) {
     console.log(code);
 
-    while (results.firstChild) results.removeChild(results.firstChild);
-    results.appendChild(html`loading...`);
+    updateResults(html`loading...`);
 
     const start = performance.now();
 
@@ -56,8 +68,7 @@ function main(SQL) {
       }
     } catch (error) {
       const duration = performance.now() - start;
-      while (results.firstChild) results.removeChild(results.firstChild);
-      results.appendChild(html`<div>
+      updateResults(html`<div>
         <pre>${error.toString()}</pre>
         <div>
           Error after
@@ -90,8 +101,7 @@ function main(SQL) {
       )}
     </tbody>`);
 
-    while (results.firstChild) results.removeChild(results.firstChild);
-    results.appendChild(html`<div>
+    updateResults(html`<div>
       ${table}
       <div style="font-style: italic; margin-top: 4px;">
         ${rows.length} row${rows.length > 1 ? "s" : ""}, completed in

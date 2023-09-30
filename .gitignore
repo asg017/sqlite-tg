@@ -11,7 +11,9 @@ examples/c++
 venv/
 
 *.db
+*.gpkg
 examples/**/*.geojson
+examples/**/*.json
 *.csv
 *.zip
 

@@ -1,3 +1,7 @@
+## TODO
+
+- tg_geom_error requires tg_geom_free!
+
 ## NOTES
 
 UPCASTING: only `tg_line`, `tg_ring`, and `tg_poly` can upcast to tg_geom.
@@ -13,30 +17,25 @@ select
 from businesses;
 ```
 
+- [ ] `tg_group_bbox()`
+
 ## constructors
 
-- `tg_point()`
-
-- `tg_linestring(p1, p2, ...)` (alias to `tg_line`?)
-- `tg_group_linestring(p)`
-
-- `tg_ring(p1, p2, ...)`
-- `tg_group_ring(p)`
-
-- `tg_polygon(exterior, hole1, hole2, ...)` (params are rings)
-- `tg_group_polygon(exterior, hole)` -- ensure 1st arg 'exterior' remains constant
-
-- `tg_multipoint(p1, p2, ...)`
-- `tg_group_multipoint(p)`
-
-- `tg_multilinestring(l1, l2, ...)`
-- `tg_group_multilinestring(l1, l2, ...)`
-
-- `tg_multipolygon(p1, p2)`
-- `tg_group_multipolygon(p)`
-
-- `tg_geometrycollection(g1, g2)`
-- `tg_group_geometrycollection(g)`
+- [x] `tg_point()`
+- [.] `tg_multipoint(p1, p2, ...)`
+- [.] `tg_group_multipoint(p)`
+- [ ] `tg_geometrycollection(g1, g2)`
+- [ ] `tg_group_geometrycollection(g)`
+- [ ] `tg_linestring(p1, p2, ...)` (alias to `tg_line`?)
+- [ ] `tg_group_linestring(p)`
+- [ ] `tg_ring(p1, p2, ...)`
+- [ ] `tg_group_ring(p)`
+- [ ] `tg_polygon(exterior, hole1, hole2, ...)` (params are rings)
+- [ ] `tg_group_polygon(exterior, hole)` -- ensure 1st arg 'exterior' remains constant
+- [ ] `tg_multilinestring(l1, l2, ...)`
+- [ ] `tg_group_multilinestring(l1, l2, ...)`
+- [ ] `tg_multipolygon(p1, p2)`
+- [ ] `tg_group_multipolygon(p)`
 
 tg_rect(minX, minY, maxX, maxY)
 tg_rect(minP, maxP)
@@ -86,3 +85,45 @@ join ???;
 3. RTree-backed "which shapes intersect this shape"
 
 4. KNN
+
+## Sample ideas
+
+US congressional district + opiod
+
+## WASM playground
+
+- submit button
+- blue border color when un-submitted changes
+- buttons with pre-defined queries
+- some sample GIS dataset ppl can query
+- URL params for sharing queries
+
+rectangle to geojson
+
+## managed rtree
+
+```sql
+create table x(id integer primary key autoincrement, boundary, X1, X2, ...);
+
+create virtual table x_rtree(id, minX, maxX, minY, maxY, +X1, +X2);
+```
+
+```sql
+create virtual tg_ca_block_groups using tg0(backend="sqlite-rtree");
+
+insert into tg_ca_block_groups(rowid, boundary)
+  select
+    rowid,
+    geometry
+  from tg_geometries_each(cast(readfile('ca-block-groups.geojson') as text));
+
+-- pip, "intersects"
+select rowid from ca_block_groups_index where tg_intersects(boundary, :my_polygon);
+select rowid from ca_block_groups_index where tg_covers(:my_polygon, boundary);
+```
+
+equals
+intersects/disjoint (for pip)
+contains/within (swap)
+covers/coveredby (swap)
+touches

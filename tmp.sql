@@ -4,6 +4,50 @@
 .header on
 .bail on
 
+select tg_to_wkt(tg_multipoint());
+
+.exit
+
+with first as (
+  select tg_point(1,2) as p
+)
+select tg_to_wkt(p) from first;
+
+select tg_intersects(
+  'LINESTRING (0 0, 2 2)',
+  'LINESTRING (1 0, 1 2)'
+);
+
+select tg_disjoint(
+  'LINESTRING (0 0, 2 2)',
+  'LINESTRING (1 0, 1 2)'
+);
+
+select tg_disjoint(
+  'LINESTRING (0 0, 0 2)',
+  'LINESTRING (2 0, 2 2)'
+);
+
+.exit
+
+select tg_to_geojson(
+  tg_group_multipoint(
+    tg_point(value, value)
+  )
+)
+from generate_series(1,4);
+
+
+select tg_to_geojson(
+  tg_multipoint(
+    tg_point(1,2),
+    tg_point(8,9)
+  )
+);
+
+.exit
+
+
 select tg_geom('LINESTRING (10 10, 20 20, 10 40)');
 select tg_geom('LINESTRING (10 10, 20 20, 10 40)', 'none');
 select tg_geom('LINESTRING (10 10, 20 20, 10 40)', 'natural');
