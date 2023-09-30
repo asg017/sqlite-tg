@@ -16,13 +16,10 @@ SQLITE_EXTENSION_INIT1
 
 static const char *TG_GEOM_POINTER_NAME = "tg0-tg_geom";
 
-#define INVALID_GEO_INPUT "invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text)."
+#define INVALID_GEO_INPUT                                                      \
+  "invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON "  \
+  "(as text)."
 
-#define RESULT_INVALID_GEO_INPUT                                               \
-  do {                                                                         \
-    printf("sqlite3_result_error(context, \"invalid geometry input. Must be "  \
-           "WKT (as text), WKB (as blob), or GeoJSON (as text).\", -1);\n");   \
-  } while (0)
 static struct tg_geom *geomValue(sqlite3_value *value, int *needsFree,
                                  int *invalid) {
   int n = sqlite3_value_bytes(value);
@@ -102,32 +99,6 @@ static void resultGeomPointer(sqlite3_context *context, struct tg_geom *geom) {
 
 enum export_format { WKT = 1, WKB = 2, GEOJSON = 3, POINTER = 4 };
 
-static void resultAndFreeGeomFormat(sqlite3_context *context,
-                                    struct tg_geom *geom,
-                                    enum export_format format) {
-  switch (format) {
-  case WKT: {
-    resultGeomWkt(context, geom);
-    tg_geom_free(geom);
-    break;
-  }
-  case WKB: {
-    resultGeomWkb(context, geom);
-    tg_geom_free(geom);
-    break;
-  }
-  case GEOJSON: {
-    resultGeomGeojson(context, geom);
-    tg_geom_free(geom);
-    break;
-  }
-  case POINTER: {
-    // takes ownership of geom, no need to free
-    resultGeomPointer(context, geom);
-    break;
-  }
-  }
-}
 
 #pragma endregion
 
@@ -149,15 +120,15 @@ static void tg_to_wkt(sqlite3_context *context, int argc,
                       sqlite3_value **argv) {
   int needsFree, invalid;
   struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if(invalid) {
-    RESULT_INVALID_GEO_INPUT;
+  if (invalid) {
+    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
     return;
   }
   if (tg_geom_error(geom)) {
     sqlite3_result_error(context, tg_geom_error(geom), -1);
-    return;
+  }else {
+    resultGeomWkt(context, geom);
   }
-  resultGeomWkt(context, geom);
   if (needsFree)
     tg_geom_free(geom);
 }
@@ -166,15 +137,15 @@ static void tg_to_wkb(sqlite3_context *context, int argc,
                       sqlite3_value **argv) {
   int needsFree, invalid;
   struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if(invalid) {
-    RESULT_INVALID_GEO_INPUT;
+  if (invalid) {
+    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
     return;
   }
   if (tg_geom_error(geom)) {
     sqlite3_result_error(context, tg_geom_error(geom), -1);
-    return;
+  }else {
+    resultGeomWkb(context, geom);
   }
-  resultGeomWkb(context, geom);
   if (needsFree)
     tg_geom_free(geom);
 }
@@ -183,21 +154,20 @@ static void tg_to_geojson(sqlite3_context *context, int argc,
                           sqlite3_value **argv) {
   int needsFree, invalid;
   struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if(invalid) {
-    RESULT_INVALID_GEO_INPUT;
+  if (invalid) {
+    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
     return;
   }
   if (tg_geom_error(geom)) {
     sqlite3_result_error(context, tg_geom_error(geom), -1);
-    return;
+  }else {
+    resultGeomGeojson(context, geom);
   }
-  resultGeomGeojson(context, geom);
   if (needsFree)
     tg_geom_free(geom);
 }
 
 #pragma endregion
-
 
 #pragma region predicates
 
@@ -207,32 +177,32 @@ typedef bool (*GeomPredicateFunc)(const struct tg_geom *a,
 static void tg_predicate_impl(sqlite3_context *context, int argc,
                               sqlite3_value **argv) {
   int needsFreeA = 0;
+  int needsFreeB = 0;
   int invalid;
   struct tg_geom *a = geomValue(argv[0], &needsFreeA, &invalid);
   if (invalid) {
-    RESULT_INVALID_GEO_INPUT;
+    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
     return;
   }
   if (tg_geom_error(a)) {
     sqlite3_result_error(context, tg_geom_error(a), -1);
+    if(needsFreeA) tg_geom_free(a);
     return;
   }
-  int needsFreeB = 0;
   struct tg_geom *b = geomValue(argv[1], &needsFreeB, &invalid);
   if (invalid) {
-    RESULT_INVALID_GEO_INPUT;
+    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
     if (needsFreeA)
       tg_geom_free(a);
     return;
   }
   if (tg_geom_error(b)) {
-    if (needsFreeA)
-      tg_geom_free(a);
     sqlite3_result_error(context, tg_geom_error(b), -1);
-    return;
+  }else {
+    GeomPredicateFunc func = sqlite3_user_data(context);
+    sqlite3_result_int(context, func(a, b));
   }
-  GeomPredicateFunc func = sqlite3_user_data(context);
-  sqlite3_result_int(context, func(a, b));
+
 
   if (needsFreeA)
     tg_geom_free(a);
@@ -254,8 +224,8 @@ static void tg_valid_geojson(sqlite3_context *context, int argc,
     sqlite3_result_int(context, 0);
   } else {
     sqlite3_result_int(context, 1);
-    tg_geom_free(geom);
   }
+  tg_geom_free(geom);
 }
 static void tg_valid_wkt(sqlite3_context *context, int argc,
                          sqlite3_value **argv) {
@@ -267,8 +237,8 @@ static void tg_valid_wkt(sqlite3_context *context, int argc,
     sqlite3_result_int(context, 0);
   } else {
     sqlite3_result_int(context, 1);
-    tg_geom_free(geom);
   }
+  tg_geom_free(geom);
 }
 static void tg_valid_wkb(sqlite3_context *context, int argc,
                          sqlite3_value **argv) {
@@ -280,8 +250,8 @@ static void tg_valid_wkb(sqlite3_context *context, int argc,
     sqlite3_result_int(context, 0);
   } else {
     sqlite3_result_int(context, 1);
-    tg_geom_free(geom);
   }
+  tg_geom_free(geom);
 }
 
 #pragma endregion
@@ -333,6 +303,7 @@ static void tg_geom(sqlite3_context *context, int argc, sqlite3_value **argv) {
   }
   if (tg_geom_error(geom)) {
     sqlite3_result_error(context, tg_geom_error(geom), -1);
+    tg_geom_free(geom);
     return;
   }
   sqlite3_result_pointer(context, geom, TG_GEOM_POINTER_NAME,
@@ -342,16 +313,15 @@ static void tg_type(sqlite3_context *context, int argc, sqlite3_value **argv) {
   int needsFree = 0;
   int invalid;
   struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if(invalid) {
-    RESULT_INVALID_GEO_INPUT;
+  if (invalid) {
+    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
     return;
   }
   if (tg_geom_error(geom)) {
     sqlite3_result_error(context, tg_geom_error(geom), -1);
-    return;
+  }else {
+    sqlite3_result_text(context, tg_geom_type_string(tg_geom_typeof(geom)), -1,SQLITE_STATIC);
   }
-  sqlite3_result_text(context, tg_geom_type_string(tg_geom_typeof(geom)), -1,
-                      SQLITE_STATIC);
 
   if (needsFree)
     tg_geom_free(geom);
@@ -362,21 +332,21 @@ static void tg_extra_json(sqlite3_context *context, int argc,
   int needsFree = 0;
   int invalid;
   struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if(invalid) {
-    RESULT_INVALID_GEO_INPUT;
+  if (invalid) {
+    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
     return;
   }
   if (tg_geom_error(geom)) {
     sqlite3_result_error(context, tg_geom_error(geom), -1);
-    return;
-  }
-  const char *result = tg_geom_extra_json(geom);
-  if (result) {
-    // TODO what if null character in json?
-    sqlite3_result_text(context, result, -1, SQLITE_TRANSIENT);
-    sqlite3_result_subtype(context, JSON_SUBTYPE);
-  } else {
-    sqlite3_result_null(context);
+  }else {
+    const char *result = tg_geom_extra_json(geom);
+    if (result) {
+      // TODO what if null character in json?
+      sqlite3_result_text(context, result, -1, SQLITE_TRANSIENT);
+      sqlite3_result_subtype(context, JSON_SUBTYPE);
+    } else {
+      sqlite3_result_null(context);
+    }
   }
 
   if (needsFree)
@@ -386,19 +356,30 @@ static void tg_extra_json(sqlite3_context *context, int argc,
 
 #pragma region constructors
 
-static void tg_point_impl(sqlite3_context *context, int argc,
+static void tg_point(sqlite3_context *context, int argc,
                           sqlite3_value **argv) {
+  int typeX = sqlite3_value_type(argv[0]);
+  int typeY = sqlite3_value_type(argv[1]);
+  if (typeX != SQLITE_INTEGER && typeX != SQLITE_FLOAT) {
+    sqlite3_result_error(context, "point X value must be an integer or float",
+                         -1);
+    return;
+  }
+  if (typeY != SQLITE_INTEGER && typeY != SQLITE_FLOAT) {
+    sqlite3_result_error(context, "point Y value must be an integer or float",
+                         -1);
+    return;
+  }
   double x = sqlite3_value_double(argv[0]);
   double y = sqlite3_value_double(argv[1]);
   struct tg_point point = {x, y};
   struct tg_geom *geom = tg_geom_new_point(point);
   if (tg_geom_error(geom)) {
     sqlite3_result_error(context, tg_geom_error(geom), -1);
+    tg_geom_free(geom);
     return;
   }
-  // TODO wut
-  resultAndFreeGeomFormat(context, geom,
-                          *((enum export_format *)sqlite3_user_data(context)));
+  resultGeomPointer(context, geom);
 }
 
 static void tg_multipoint(sqlite3_context *context, int argc,
@@ -407,11 +388,12 @@ static void tg_multipoint(sqlite3_context *context, int argc,
     struct tg_geom *geom = tg_geom_new_multipoint_empty();
     if (!geom) {
       sqlite3_result_error_nomem(context);
-    } else {
+    }else {
       resultGeomPointer(context, geom);
     }
     return;
   }
+
   struct tg_point *points = sqlite3_malloc(argc * sizeof(struct tg_point));
   if (!points) {
     sqlite3_result_error_nomem(context);
@@ -423,29 +405,32 @@ static void tg_multipoint(sqlite3_context *context, int argc,
     int needsFree;
     int invalid;
     struct tg_geom *geom = geomValue(argv[i], &needsFree, &invalid);
-    if(invalid) {
-      RESULT_INVALID_GEO_INPUT;
+    if (invalid) {
+      sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
       sqlite3_free(points);
       return;
     }
     if (tg_geom_error(geom)) {
-      const char * zErr = sqlite3_mprintf("argument to tg_multipoint() at index %i is an invalid geometry", i);
+      const char *zErr = sqlite3_mprintf(
+          "argument to tg_multipoint() at index %i is an invalid geometry", i);
       sqlite3_result_error(context, zErr, -1);
-      sqlite3_free((void *) zErr);
+      sqlite3_free((void *)zErr);
 
       if (needsFree) {
-      tg_geom_free(geom);
+        tg_geom_free(geom);
       }
       sqlite3_free(points);
       return;
     }
     if (tg_geom_typeof(geom) != TG_POINT) {
-      const char * zErr = sqlite3_mprintf("argument to tg_multipoint() at index %i expected a point, found %s", i, tg_geom_type_string(tg_geom_typeof(geom)));
+      const char *zErr = sqlite3_mprintf(
+          "argument to tg_multipoint() at index %i expected a point, found %s",
+          i, tg_geom_type_string(tg_geom_typeof(geom)));
       sqlite3_result_error(context, zErr, -1);
-      sqlite3_free((void *) zErr);
-if (needsFree) {
-      tg_geom_free(geom);
-}
+      sqlite3_free((void *)zErr);
+      if (needsFree) {
+        tg_geom_free(geom);
+      }
       sqlite3_free(points);
       return;
     }
@@ -468,14 +453,13 @@ if (needsFree) {
 
 typedef struct MultiPointContext MultiPointContext;
 struct MultiPointContext {
-  unsigned capacity; /* Number of slots allocated for a[] */
-  unsigned length;  /* Number of slots actually used in a[] */
-  struct tg_point *points;
+  unsigned capacity;
+  unsigned length;
+  struct tg_point *array;
 };
 
 static void tg_multipoint_step(sqlite3_context *context, int argc,
                                sqlite3_value *argv[]) {
-  sqlite3_int64 *pInt;
 
   MultiPointContext *pContext = (MultiPointContext *)sqlite3_aggregate_context(
       context, sizeof(MultiPointContext));
@@ -484,35 +468,37 @@ static void tg_multipoint_step(sqlite3_context *context, int argc,
   }
   if (pContext->length >= pContext->capacity) {
     unsigned newCapacity = pContext->capacity * 2 + 250;
-    struct tg_point *a =
-        sqlite3_realloc64(pContext->points, sizeof(struct tg_point) * newCapacity);
+    struct tg_point *a = sqlite3_realloc64(
+        pContext->array, sizeof(struct tg_point) * newCapacity);
     if (a == 0) {
-      sqlite3_free(pContext->points);
+      sqlite3_free(pContext->array);
       memset(pContext, 0, sizeof(*pContext));
       sqlite3_result_error_nomem(context);
       return;
     }
     pContext->capacity = newCapacity;
-    pContext->points = a;
+    pContext->array = a;
   }
 
   int needsFree;
   int invalid;
   struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if(invalid) {
-    RESULT_INVALID_GEO_INPUT;
+  if (invalid) {
+    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
     return;
   }
-  if (!geom) {
-    // TODO
+  if (tg_geom_error(geom)) {
+    sqlite3_result_error(context, tg_geom_error(geom), -1);
+    tg_geom_free(geom);
     return;
   }
   if (tg_geom_typeof(geom) != TG_POINT) {
-    // TODO
+    sqlite3_result_error(context, "parameters to tg_group_multipoint() must be Point gemetries", -1);
+    tg_geom_free(geom);
     return;
   }
   struct tg_point src = tg_geom_point(geom);
-  struct tg_point *dest = &pContext->points[pContext->length++];
+  struct tg_point *dest = &pContext->array[pContext->length++];
   dest->x = src.x;
   dest->y = src.y;
 
@@ -526,17 +512,17 @@ static void tg_multipoint_final(sqlite3_context *context) {
   p = (MultiPointContext *)sqlite3_aggregate_context(context, 0);
   if (p == 0)
     return;
-  if (p->points == 0)
+  if (p->array == 0)
     return;
   if (p->length) {
-    struct tg_geom *geom = tg_geom_new_multipoint(p->points, p->length);
+    struct tg_geom *geom = tg_geom_new_multipoint(p->array, p->length);
     if (!geom) {
       sqlite3_result_error_nomem(context);
     } else {
       resultGeomPointer(context, geom);
     }
   }
-  sqlite3_free(p->points);
+  sqlite3_free(p->array);
   memset(p, 0, sizeof(*p));
 }
 
@@ -728,15 +714,16 @@ static int template_eachFilter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
   }
   int invalid;
   pCur->target = pControl->xValue(argv[0], &pCur->targetNeedsFree, &invalid);
-  if(invalid) {
+  if (invalid) {
     sqlite3_free(pVtabCursor->pVtab->zErrMsg);
     pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("%s", INVALID_GEO_INPUT);
     return SQLITE_ERROR;
   }
   // TODO need to generalize it if line/ring support?
-  if(tg_geom_error(pCur->target)) {
+  if (tg_geom_error(pCur->target)) {
     sqlite3_free(pVtabCursor->pVtab->zErrMsg);
-    pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("%s", tg_geom_error(pCur->target));
+    pVtabCursor->pVtab->zErrMsg =
+        sqlite3_mprintf("%s", tg_geom_error(pCur->target));
     tg_geom_free(pCur->target);
     return SQLITE_ERROR;
   }
@@ -892,17 +879,19 @@ static int tg_bboxFilter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
   pCur->iRowid = 0;
   int needsFree, invalid;
   struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if(invalid) {
+  if (invalid) {
     pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("%s", INVALID_GEO_INPUT);
     return SQLITE_ERROR;
   }
   if (tg_geom_error(geom)) {
     sqlite3_free(pVtabCursor->pVtab->zErrMsg);
     pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("%s", tg_geom_error(geom));
+    tg_geom_free(geom);
     return SQLITE_ERROR;
   }
 
   pCur->rect = tg_geom_rect(geom);
+
   if (needsFree)
     tg_geom_free(geom);
   return SQLITE_OK;
@@ -1039,10 +1028,7 @@ __declspec(dllexport)
       {(char *)"tg_to_geojson",     1, tg_to_geojson, NULL,             NULL,         DEFAULT_FLAGS},
 
       {(char *)"tg_multipoint",    -1, tg_multipoint, NULL,             NULL,         DEFAULT_FLAGS},
-      {(char *)"tg_point",          2, tg_point_impl, &FORMAT_POINTER,  NULL,         DEFAULT_FLAGS},
-      {(char *)"tg_point_wkt",      2, tg_point_impl, &FORMAT_WKT,      NULL,         DEFAULT_FLAGS},
-      {(char *)"tg_point_wkb",      2, tg_point_impl, &FORMAT_WKB,      NULL,         DEFAULT_FLAGS},
-      {(char *)"tg_point_geojson",  2, tg_point_impl, &FORMAT_GEOJSON,  NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_point",          2, tg_point,      NULL,             NULL,         DEFAULT_FLAGS},
       // clang-format on
 
   };

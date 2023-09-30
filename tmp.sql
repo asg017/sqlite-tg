@@ -4,7 +4,13 @@
 .header on
 .bail on
 
+select tg_group_multipoint(NULL);
+
+.exit
+
 select tg_to_wkt(tg_multipoint());
+
+select tg_to_wkt(tg_group_multipoint(tg_point(value, value))) from json_each('[1,2,3]');
 
 .exit
 

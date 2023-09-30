@@ -57,8 +57,6 @@ select tg_debug(); -- "v0....Date...Commit..."
 
 A [pointer function](#pointer-functions) that returns a point geometry with the given `x` and `y` values. This value will appear to be `NULL` on direct access, and is meant for performance critical SQL queries where you want to avoid serializing/de-serializing.
 
-In most cases, you should consider the sibling functions [`tg_point_geojson()`](#tg_point_geojson), [`tg_point_wkb()`](#tg_point_wkb), and [`tg_point_wkt()`](#tg_point_wkt).
-
 TODO mention that pointer values don't exist past CTE boundaries and must be serialized
 
 ```sql
@@ -67,29 +65,7 @@ select tg_point(1, 2); -- appears to be NULL
 select tg_to_wkt(tg_point(1, 2)); -- 'POINT(1 2)'
 ```
 
-<h4 name="tg_point_geojson"><code>tg_point_geojson(x, y)</code></h4>
-
-Creates a new point geometry with the given `x` and `y` values. Returns a GeoJSON string.
-
-```sql
-select tg_point_geojson(1, 2); -- '{"type":"Point","coordinates":[1,2]}'
-```
-
-<h4 name="tg_point_wkb"><code>tg_point_wkb(x, y)</code></h4>
-
-Creates a new point geometry with the given `x` and `y` values. Returns a WKB blob.
-
-```sql
-select tg_point_wkb(1, 2); -- X'0101000000000000000000f03f0000000000000040'
-```
-
-<h4 name="tg_point_wkt"><code>tg_point_wkt(x, y)</code></h4>
-
-Creates a new point geometry with the given `x` and `y` values. Returns a WKT string.
-
-```sql
-select tg_point_wkt(1, 2); -- 'POINT(1 2)'
-```
+==
 
 <h4 name="tg_multipoint"><code>tg_multipoint(p1, p2, ...)</code></h4>
 
