@@ -305,6 +305,12 @@ select tg_XXX();
 ```
 -->
 
+<h4 name="tg0"><code>tg0()</code></h4>
+
+```sql
+select tg_XXX();
+```
+
 <h4 name="tg_geom"><code>tg_geom()</code></h4>
 
 TODO

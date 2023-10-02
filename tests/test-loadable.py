@@ -77,6 +77,7 @@ FUNCTIONS = [
 
 
 MODULES = [
+    "tg0",
     "tg_geometries_each",
     "tg_lines_each",
     "tg_points_each",
@@ -87,6 +88,7 @@ MODULES = [
 SUPPORTS_SUBTYPE = sqlite3.version_info[1] > 38
 
 LINE_A = shapely.from_wkt("LINESTRING (0 0, 1 1)")
+LINE_B = shapely.from_wkt("LINESTRING (1 1, 2 2)")
 
 LINE_CROSSES = (
     shapely.from_wkt("LINESTRING (0 0, 2 2)"),
@@ -447,6 +449,178 @@ def test_tg_touches():
 def test_tg_within():
     tg_within = lambda *args: db.execute("select tg_within(?)", args).fetchone()[0]
     pass
+
+
+# fmt: off
+tg_demo1 = [
+    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23818620800527,32.881627962039275],[-117.23803891594858,32.881627962039275],[-117.23803891594858,32.88150426716983],[-117.23818620800527,32.88150426716983],[-117.23818620800527,32.881627962039275]]]},"properties":{}},
+    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23794407791227,32.88163023398593],[-117.23779678585558,32.88163023398593],[-117.23779678585558,32.88150653911649],[-117.23794407791227,32.88150653911649],[-117.23794407791227,32.88163023398593]]]},"properties":{},},
+    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23818630582224,32.881454314415976],[-117.23803901376554,32.881454314415976],[-117.23803901376554,32.88133061954653],[-117.23818630582224,32.88133061954653],[-117.23818630582224,32.881454314415976]]]},"properties":{}},
+    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.2379432340281,32.881454247902326],[-117.2377959419714,32.881454247902326],[-117.2377959419714,32.88133055303288],[-117.2379432340281,32.88133055303288],[-117.2379432340281,32.881454247902326]]]},"properties":{}},
+]
+# fmt: on
+
+
+def test_tg0():
+    db.execute("create virtual table tg_demo1 using tg0();")
+    assert execute_all(
+        db, "select name from pragma_table_list where name like 'tg%'"
+    ) == [
+        {"name": "tg_demo1_rtree_parent"},
+        {"name": "tg_demo1_rtree_node"},
+        {"name": "tg_demo1_rtree_rowid"},
+        {"name": "tg_demo1_rtree"},
+        {"name": "tg_demo1"},
+    ]
+
+    db.execute(
+        "insert into tg_demo1(rowid, _shape) select key, value from json_each(?)",
+        [json.dumps(tg_demo1)],
+    )
+    assert db.execute("select count(*) from tg_demo1_rtree").fetchone()[0] == 4
+
+    assert execute_all(
+        db, "select rowid, typeof(_shape), tg_to_wkt(_shape) from tg_demo1"
+    ) == [
+        {
+            "rowid": 0,
+            "typeof(_shape)": "blob",
+            "tg_to_wkt(_shape)": "POLYGON((-117.23818620800527 32.881627962039275,-117.23803891594858 32.881627962039275,-117.23803891594858 32.88150426716983,-117.23818620800527 32.88150426716983,-117.23818620800527 32.881627962039275))",
+        },
+        {
+            "rowid": 1,
+            "typeof(_shape)": "blob",
+            "tg_to_wkt(_shape)": "POLYGON((-117.23794407791227 32.88163023398593,-117.23779678585558 32.88163023398593,-117.23779678585558 32.88150653911649,-117.23794407791227 32.88150653911649,-117.23794407791227 32.88163023398593))",
+        },
+        {
+            "rowid": 2,
+            "typeof(_shape)": "blob",
+            "tg_to_wkt(_shape)": "POLYGON((-117.23818630582224 32.881454314415976,-117.23803901376554 32.881454314415976,-117.23803901376554 32.88133061954653,-117.23818630582224 32.88133061954653,-117.23818630582224 32.881454314415976))",
+        },
+        {
+            "rowid": 3,
+            "typeof(_shape)": "blob",
+            "tg_to_wkt(_shape)": "POLYGON((-117.2379432340281 32.881454247902326,-117.2377959419714 32.881454247902326,-117.2377959419714 32.88133055303288,-117.2379432340281 32.88133055303288,-117.2379432340281 32.881454247902326))",
+        },
+    ]
+    assert execute_all(db, "select id, minX, maxX, minY, maxY from tg_demo1_rtree") == [
+        {
+            "id": 0,
+            "minX": -117.23818969726562,
+            "maxX": -117.238037109375,
+            "minY": 32.88150405883789,
+            "maxY": 32.88163375854492,
+        },
+        {
+            "id": 1,
+            "minX": -117.23794555664062,
+            "maxX": -117.23778533935547,
+            "minY": 32.88150405883789,
+            "maxY": 32.88163375854492,
+        },
+        {
+            "id": 2,
+            "minX": -117.23818969726562,
+            "maxX": -117.238037109375,
+            "minY": 32.88132858276367,
+            "maxY": 32.88145446777344,
+        },
+        {
+            "id": 3,
+            "minX": -117.23794555664062,
+            "maxX": -117.23779296875,
+            "minY": 32.881324768066406,
+            "maxY": 32.88145446777344,
+        },
+    ]
+
+    assert (
+        explain_query_plan("select * from tg_demo1")
+        == "SCAN tg_demo1 VIRTUAL TABLE INDEX 0:fullscan"
+    )
+
+    assert (
+        explain_query_plan("select * from tg_demo1 where tg_intersects(_shape, '')")
+        == "SCAN tg_demo1 VIRTUAL TABLE INDEX 150:predicate"
+    )
+    assert (
+        explain_query_plan("select * from tg_demo1 where tg_contains(_shape, '')")
+        == "SCAN tg_demo1 VIRTUAL TABLE INDEX 152:predicate"
+    )
+    # TODO rest of predicates?
+
+    def intersecting(feature):
+        return [
+            row[0]
+            for row in db.execute(
+                "select rowid from tg_demo1 where tg_intersects(_shape, ?)", [feature]
+            ).fetchall()
+        ]
+
+    NO_INTERSECT = '{"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[-117.2382994,32.8816125],[-117.2381318,32.8817785]]}}'
+    assert intersecting(NO_INTERSECT) == []
+
+    INTERSECTS_1 = '{"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[-117.238215,32.8815289],[-117.2380638,32.8816982]]}}'
+    assert intersecting(INTERSECTS_1) == [0]
+    INTERSECTS_ALL = '{"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[-117.23807203378166,32.881557772296276],[-117.23789358476843,32.881557772296276],[-117.23789358476843,32.88141682228195],[-117.23807203378166,32.88141682228195],[-117.23807203378166,32.881557772296276]]]}}'
+    assert intersecting(INTERSECTS_ALL) == [0, 1, 2, 3]
+    FULLY_INSIDE_1 = '{"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[-117.2381120521583,32.88156367813649],[-117.23809600069441,32.88156367813649],[-117.23809600069441,32.88154626655529],[-117.2381120521583,32.88154626655529],[-117.2381120521583,32.88156367813649]]]}}'
+    assert intersecting(FULLY_INSIDE_1) == [0]
+    POINT1 = '{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[-117.2378994,32.8815878]}}'
+    assert intersecting(POINT1) == [1]
+    RIGHT_2 = '{"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[-117.23782724895766,32.881553840644926],[-117.23764879994442,32.881553840644926],[-117.23764879994442,32.8814128906306],[-117.23782724895766,32.8814128906306],[-117.23782724895766,32.881553840644926]]]}}'
+    assert intersecting(RIGHT_2) == [1, 3]
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="The given predicate inside the WHERE clause on tg0 table is not supported yet",
+    ):
+        db.execute(
+            "select * from tg_demo1 where tg_disjoint(_shape, ?)", [NO_INTERSECT]
+        )
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="The given predicate inside the WHERE clause on tg0 table is not supported yet",
+    ):
+        db.execute(
+            "select * from tg_demo1 where tg_contains(_shape, ?)", [NO_INTERSECT]
+        )
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="The given predicate inside the WHERE clause on tg0 table is not supported yet",
+    ):
+        db.execute("select * from tg_demo1 where tg_within(_shape, ?)", [NO_INTERSECT])
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="The given predicate inside the WHERE clause on tg0 table is not supported yet",
+    ):
+        db.execute("select * from tg_demo1 where tg_covers(_shape, ?)", [NO_INTERSECT])
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="The given predicate inside the WHERE clause on tg0 table is not supported yet",
+    ):
+        db.execute(
+            "select * from tg_demo1 where tg_coveredby(_shape, ?)", [NO_INTERSECT]
+        )
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="only 1 predicate is allowed on tg0 WHERE clauses.",
+    ):
+        db.execute(
+            "select * from tg_demo1 where tg_intersects(_shape, ?) and tg_intersects(_shape, ?)",
+            [NO_INTERSECT, NO_INTERSECT],
+        )
+
+    assert db.execute("select count(*) from tg_demo1").fetchone()[0] == 4
+    db.execute("delete from tg_demo1 where rowid = 0")
+    assert db.execute("select count(*) from tg_demo1").fetchone()[0] == 3
+
+    db.execute("drop table tg_demo1;")
+    assert (
+        execute_all(db, "select name from pragma_table_list where name like 'tg%'")
+        == []
+    )
 
 
 def test_coverage():
