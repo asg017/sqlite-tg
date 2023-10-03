@@ -70,6 +70,14 @@ $(TARGET_STATIC): sqlite-tg.c $(prefix)
 $(TARGET_STATIC_H): sqlite-tg.h $(prefix)
 	cp $< $@
 
+test-memory: tests/test-memory.c sqlite-tg.c vendor/tg/tg.c $(prefix)
+	gcc \
+	-Ivendor/sqlite -Ivendor/tg -I./ \
+	-O3 \
+	$(DEFINE_SQLITE_TG) $(CFLAGS) \
+	-lsqlite3 \
+	-DSQLITE_CORE \
+	$< sqlite-tg.c vendor/tg/tg.c -o $@
 
 clean:
 	rm -rf dist/*

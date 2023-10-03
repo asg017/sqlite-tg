@@ -18,6 +18,9 @@ from businesses;
 ```
 
 - [ ] `tg_group_bbox()`
+- [ ] distance stuff?
+- [ ] KNN support
+- [ ] extensions
 
 ## constructors
 

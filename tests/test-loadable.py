@@ -623,6 +623,24 @@ def test_tg0():
     )
 
 
+def test_tg0_with_aux():
+    db.execute("create virtual table tg_demo2 using tg0(a,b,c);")
+    db.execute(
+        "insert into tg_demo2(rowid, _shape, a, b, c) values (1, 'POLYGON ((0 0, 2 2, 4 0, 0 0))', 1, 'text', X'00')"
+    )
+    assert execute_all(
+        db, "select rowid, tg_to_wkt(_shape), a, b, c from tg_demo2"
+    ) == [
+        {
+            "rowid": 1,
+            "tg_to_wkt(_shape)": "POLYGON((0 0,2 2,4 0,0 0))",
+            "a": 1,
+            "b": "text",
+            "c": b"\0",
+        }
+    ]
+
+
 def test_coverage():
     current_module = inspect.getmodule(inspect.currentframe())
     test_methods = [

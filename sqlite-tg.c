@@ -92,9 +92,10 @@ static void resultGeomGeojson(sqlite3_context *context, struct tg_geom *geom) {
   sqlite3_result_subtype(context, JSON_SUBTYPE);
 }
 
+static void d(void *p) { tg_geom_free(p); }
 static void resultGeomPointer(sqlite3_context *context, struct tg_geom *geom) {
   sqlite3_result_pointer(context, geom, TG_GEOM_POINTER_NAME,
-                         (void (*)(void *))tg_geom_free);
+                         d); //(void (*)(void *))tg_geom_free);
 }
 
 enum export_format { WKT = 1, WKB = 2, GEOJSON = 3, POINTER = 4 };
@@ -450,6 +451,7 @@ static void tg_multipoint(sqlite3_context *context, int argc,
   sqlite3_free(points);
 }
 
+#pragma region tg_group_multipoint
 typedef struct MultiPointContext MultiPointContext;
 struct MultiPointContext {
   unsigned capacity;
@@ -526,6 +528,85 @@ static void tg_multipoint_final(sqlite3_context *context) {
   sqlite3_free(p->array);
   memset(p, 0, sizeof(*p));
 }
+#pragma endregion
+
+#pragma region tg_group_geometrycollection
+typedef struct GeometryCollectionContext GeometryCollectionContext;
+struct GeometryCollectionContext {
+  unsigned capacity;
+  unsigned length;
+  struct tg_geom **array;
+};
+
+static void tg_group_geometrycollection_step(sqlite3_context *context, int argc,
+                                             sqlite3_value *argv[]) {
+
+  GeometryCollectionContext *pContext =
+      (GeometryCollectionContext *)sqlite3_aggregate_context(
+          context, sizeof(GeometryCollectionContext));
+  if (!pContext) {
+    return;
+  }
+  if (pContext->length >= pContext->capacity) {
+    unsigned newCapacity = pContext->capacity * 2 + 250;
+    struct tg_geom **a = sqlite3_realloc64(
+        pContext->array, sizeof(struct tg_geom *) * newCapacity);
+    if (a == 0) {
+      sqlite3_free(pContext->array);
+      memset(pContext, 0, sizeof(*pContext));
+      sqlite3_result_error_nomem(context);
+      return;
+    }
+    pContext->capacity = newCapacity;
+    pContext->array = a;
+  }
+
+  int needsFree;
+  int invalid;
+  struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
+  if (invalid) {
+    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
+    return;
+  }
+  if (tg_geom_error(geom)) {
+    sqlite3_result_error(context, tg_geom_error(geom), -1);
+    tg_geom_free(geom);
+    return;
+  }
+
+  if (needsFree) {
+    // printf("adding i=%d geom=%p\n", pContext->length, geom);
+    pContext->array[pContext->length++] = tg_geom_copy(geom);
+    tg_geom_free(geom);
+  } else {
+    // struct tg_geom * t = tg_geom_clone(geom);
+    // printf("adding i=%d geom=%p (clone)\n", pContext->length, t);
+    pContext->array[pContext->length++] = tg_geom_copy(geom);
+  }
+}
+
+static void tg_group_geometrycollection_final(sqlite3_context *context) {
+  GeometryCollectionContext *p;
+  p = (GeometryCollectionContext *)sqlite3_aggregate_context(context, 0);
+  if (p == 0)
+    return;
+  if (p->array == 0)
+    return;
+  if (p->length) {
+    struct tg_geom *geom = tg_geom_new_geometrycollection(p->array, p->length);
+    if (!geom) {
+      sqlite3_result_error_nomem(context);
+    } else {
+      resultGeomPointer(context, geom);
+    }
+  }
+  for (int i = 0; i < p->length; i++) {
+    tg_geom_free(p->array[i]);
+  }
+  sqlite3_free(p->array);
+  memset(p, 0, sizeof(*p));
+}
+#pragma endregion
 
 #pragma endregion
 
@@ -667,7 +748,7 @@ static int template_eachOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **ppCursor) {
 
 static int template_eachClose(sqlite3_vtab_cursor *cur) {
   template_each_cursor *pCur = (template_each_cursor *)cur;
-  if (pCur->target) {
+  if (pCur->target && pCur->targetNeedsFree) {
     struct control *pControl = ((template_each_vtab *)cur->pVtab)->pControl;
     pControl->xFree(pCur->target);
   }
@@ -712,6 +793,7 @@ static int template_eachFilter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
   if (pCur->target && pCur->targetNeedsFree) {
     pControl->xFree(pCur->target);
     pCur->targetNeedsFree = 0;
+    pCur->target = 0;
   }
   int invalid;
   pCur->target = pControl->xValue(argv[0], &pCur->targetNeedsFree, &invalid);
@@ -725,7 +807,7 @@ static int template_eachFilter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
     sqlite3_free(pVtabCursor->pVtab->zErrMsg);
     pVtabCursor->pVtab->zErrMsg =
         sqlite3_mprintf("%s", tg_geom_error(pCur->target));
-    tg_geom_free(pCur->target);
+    // No need to free pCur->target here, the xClose method will do taht
     return SQLITE_ERROR;
   }
   return SQLITE_OK;
@@ -968,27 +1050,11 @@ static sqlite3_module tg_bboxModule = {
 
 #pragma region tg0 virtual table
 
-#define TG0_SQL_CREATE "CREATE TABLE x(_shape)"
 #define TG0_COLUMN_SHAPE 0
+#define TG0_COLUMN_REST 1
 
-#define TG0_SQL_RTREE_CREATE                                                   \
-  "CREATE VIRTUAL TABLE \"%w\".\"%w_rtree\" using rtree(id, minX, maxX, "      \
-  "minY, maxY, +_shape BLOB)"
 #define TG0_SQL_RTREE_DROP "DROP TABLE \"%w\".\"%w_rtree\""
-#define TG0_SQL_RTREE_INSERT                                                   \
-  "INSERT INTO \"%w\".\"%w_rtree\"(id, minX, maxX, minY, maxY, _shape) "       \
-  "VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
 #define TG0_SQL_DELETE "DELETE FROM \"%w\".\"%w_rtree\" WHERE id = ?1"
-
-#define TG0_SQL_RTREE_QUERY_FULLSCAN                                           \
-  "SELECT id, _shape FROM \"%w\".\"%w_rtree\""
-#define TG0_SQL_RTREE_QUERY_INTERSECT                                          \
-  "SELECT id, _shape "                                                         \
-  "FROM \"%w\".\"%w_rtree\" as r "                                             \
-  "WHERE r.minX <= ?1  "                                                       \
-  "AND r.maxX >= ?2 "                                                          \
-  "AND r.minY <= ?3 "                                                          \
-  "AND r.maxY >= ?4"
 
 // clang-format off
 // The different overloaded and intercepted functions for tg0() tables.
@@ -1020,6 +1086,8 @@ struct tg0_vtab {
   // Name of the table the table exists on. must be freed with sqlite3_free() on
   // destruction
   char *tableName;
+
+  int numAuxColumns;
 };
 
 typedef struct tg0_cursor tg0_cursor;
@@ -1040,8 +1108,19 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
                     sqlite3_vtab **ppVtab, char **pzErr, bool isCreate) {
   tg0_vtab *pNew;
   int rc;
+  sqlite3_str *strSchema = sqlite3_str_new(NULL);
+  sqlite3_str_appendall(strSchema, "CREATE TABLE x(_shape");
+  for (int i = 3; i < argc; i++) {
+    sqlite3_str_appendf(strSchema, ", %w", argv[i]);
+  }
+  sqlite3_str_appendall(strSchema, ")");
+  const char *zSchema = sqlite3_str_finish(strSchema);
+  if (!zSchema) {
+    return SQLITE_NOMEM;
+  }
 
-  rc = sqlite3_declare_vtab(db, TG0_SQL_CREATE);
+  rc = sqlite3_declare_vtab(db, zSchema);
+  sqlite3_free((void *)zSchema);
   if (rc != SQLITE_OK) {
     return rc;
   }
@@ -1056,11 +1135,24 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
   pNew->db = db;
   pNew->schemaName = sqlite3_mprintf("%s", schemaName);
   pNew->tableName = sqlite3_mprintf("%s", tableName);
+  pNew->numAuxColumns = argc - 3;
 
   if (isCreate) {
     sqlite3_stmt *stmt;
-    const char *zCreate =
-        sqlite3_mprintf(TG0_SQL_RTREE_CREATE, schemaName, tableName);
+    sqlite3_str *strRtreeSchema = sqlite3_str_new(NULL);
+    sqlite3_str_appendf(strRtreeSchema,
+                        "CREATE VIRTUAL TABLE \"%w\".\"%w_rtree\" using "
+                        "rtree(id, minX, maxX, minY, maxY, +_shape BLOB",
+                        schemaName, tableName);
+    for (int i = 3; i < argc; i++) {
+      sqlite3_str_appendf(strRtreeSchema, ", +c%d", i - 3 + 1);
+    }
+    sqlite3_str_appendall(strRtreeSchema, ")");
+    const char *zCreate = sqlite3_str_finish(strRtreeSchema);
+    if (!zCreate) {
+      return SQLITE_NOMEM;
+    }
+
     int rc = sqlite3_prepare_v2(db, zCreate, -1, &stmt, 0);
     sqlite3_free((void *)zCreate);
 
@@ -1174,7 +1266,9 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
   return SQLITE_OK;
 }
 
+// forward delcaration bc tg0Filter uses it
 static int tg0Next(sqlite3_vtab_cursor *cur);
+
 static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
                      const char *idxStr, int argc, sqlite3_value **argv) {
   tg0_cursor *pCur = (tg0_cursor *)pVtabCursor;
@@ -1193,13 +1287,25 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
 
   if (strcmp(idxStr, "fullscan") == 0) {
     pCur->plan = FULLSCAN;
-    char *zSql = sqlite3_mprintf(TG0_SQL_RTREE_QUERY_FULLSCAN, p->schemaName,
-                                 p->tableName);
+    sqlite3_str *strSqlFullscan = sqlite3_str_new(NULL);
+    sqlite3_str_appendall(strSqlFullscan, "SELECT id, _shape");
+    for (int i = 0; i < p->numAuxColumns; i++) {
+      sqlite3_str_appendf(strSqlFullscan, ", c%d", i + 1);
+    }
+    sqlite3_str_appendf(strSqlFullscan, " FROM \"%w\".\"%w_rtree\"",
+                        p->schemaName, p->tableName);
+
+    const char *zSql = sqlite3_str_finish(strSqlFullscan);
+    if (!zSql) {
+      // TODO what needs to be freed here
+      return SQLITE_NOMEM;
+    }
     int rc = sqlite3_prepare_v2(p->db, zSql, -1, &pCur->stmt, NULL);
-    sqlite3_free(zSql);
+    sqlite3_free((void *)zSql);
     if (rc != SQLITE_OK) {
       sqlite3_free(pVtabCursor->pVtab->zErrMsg);
-      pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("prep error");
+      pVtabCursor->pVtab->zErrMsg =
+          sqlite3_mprintf("prep error: %s", sqlite3_errmsg(p->db));
       return SQLITE_ERROR;
     }
     return tg0Next(pVtabCursor);
@@ -1216,10 +1322,26 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
       }
       struct tg_rect rect = tg_geom_rect(pCur->queryGeom);
 
-      char *zSql = sqlite3_mprintf(TG0_SQL_RTREE_QUERY_INTERSECT, p->schemaName,
-                                   p->tableName);
+      sqlite3_str *strSqlIntersect = sqlite3_str_new(NULL);
+      sqlite3_str_appendall(strSqlIntersect, "SELECT id, _shape");
+      for (int i = 0; i < p->numAuxColumns; i++) {
+        sqlite3_str_appendf(strSqlIntersect, ", c%d", i + 1);
+      }
+      sqlite3_str_appendf(strSqlIntersect, " FROM \"%w\".\"%w_rtree\" as r ",
+                          p->schemaName, p->tableName);
+      sqlite3_str_appendall(strSqlIntersect, "WHERE r.minX <= ?1  "
+                                             "AND r.maxX >= ?2 "
+                                             "AND r.minY <= ?3 "
+                                             "AND r.maxY >= ?4");
+
+      const char *zSql = sqlite3_str_finish(strSqlIntersect);
+      if (!zSql) {
+        // TODO what needs to be freed here
+        return SQLITE_NOMEM;
+      }
+
       int rc = sqlite3_prepare_v2(p->db, zSql, -1, &pCur->stmt, NULL);
-      sqlite3_free(zSql);
+      sqlite3_free((void *)zSql);
 
       if (rc != SQLITE_OK) {
         sqlite3_free(pVtabCursor->pVtab->zErrMsg);
@@ -1274,7 +1396,8 @@ static int tg0Next(sqlite3_vtab_cursor *cur) {
     }
     if (pCur->stepStatus != SQLITE_ROW) {
       sqlite3_free(cur->pVtab->zErrMsg);
-      cur->pVtab->zErrMsg = sqlite3_mprintf("step error: %d", pCur->stepStatus);
+      cur->pVtab->zErrMsg =
+          sqlite3_mprintf("tg0Next step error: %d", pCur->stepStatus);
       return SQLITE_ERROR;
     }
 
@@ -1322,12 +1445,13 @@ static int tg0Eof(sqlite3_vtab_cursor *cur) {
 static int tg0Column(sqlite3_vtab_cursor *cur, sqlite3_context *context,
                      int i) {
   tg0_cursor *pCur = (tg0_cursor *)cur;
-  switch (i) {
-  case TG0_COLUMN_SHAPE: {
+  if (i == TG0_COLUMN_SHAPE) {
     sqlite3_result_value(context, sqlite3_column_value(pCur->stmt, 1));
-    break;
+  } else if (i >= TG0_COLUMN_REST) {
+    sqlite3_result_value(
+        context, sqlite3_column_value(pCur->stmt, 2 + i - TG0_COLUMN_REST));
   }
-  }
+
   return SQLITE_OK;
 }
 
@@ -1379,20 +1503,60 @@ static int tg0Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
       return SQLITE_ERROR;
     }
     struct tg_rect rect = tg_geom_rect(geom);
+
     sqlite3_stmt *stmt;
-    char *zSql =
-        sqlite3_mprintf(TG0_SQL_RTREE_INSERT, p->schemaName, p->tableName);
+    sqlite3_str *strInsert = sqlite3_str_new(NULL);
+    bool hasRowid = sqlite3_value_type(argv[1]) != SQLITE_NULL;
+    if (hasRowid) {
+      sqlite3_str_appendf(
+          strInsert,
+          "INSERT INTO \"%w\".\"%w_rtree\"(id, minX, maxX, minY, maxY, _shape",
+          p->schemaName, p->tableName);
+    } else {
+      sqlite3_str_appendf(
+          strInsert,
+          "INSERT INTO \"%w\".\"%w_rtree\"(minX, maxX, minY, maxY, _shape",
+          p->schemaName, p->tableName);
+    }
+    for (int i = 0; i < p->numAuxColumns; i++) {
+      sqlite3_str_appendf(strInsert, ", c%d", i + 1);
+    }
+    int paramStart;
+    if (hasRowid) {
+      paramStart = 1;
+    } else {
+      paramStart = 0;
+    }
+    if (hasRowid) {
+      sqlite3_str_appendall(strInsert, ") VALUES (?1, ?2, ?3, ?4, ?5, ?6");
+    } else {
+      sqlite3_str_appendall(strInsert, ") VALUES (?1, ?2, ?3, ?4, ?5");
+    }
+    for (int i = 0; i < p->numAuxColumns; i++) {
+      sqlite3_str_appendf(strInsert, ", ?%d", (6 + paramStart) + i);
+    }
+    sqlite3_str_appendall(strInsert, ")");
+
+    const char *zSql = sqlite3_str_finish(strInsert);
+    if (!zSql) {
+      // TODO what needs to be freed here
+      return SQLITE_NOMEM;
+    }
     int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
-    sqlite3_free(zSql);
+    sqlite3_free((void *)zSql);
+
     if (rc != SQLITE_OK) {
       sqlite3_free(pVTab->zErrMsg);
-      pVTab->zErrMsg =
-          sqlite3_mprintf("error preping statement %s", sqlite3_errmsg(p->db));
+      pVTab->zErrMsg = sqlite3_mprintf(
+          "tgoUpdate Error while preparing rtree insert statement:  %s",
+          sqlite3_errmsg(p->db));
       if (needsFree)
         tg_geom_free(geom);
       return rc;
     }
-    // id, minX, maxX, minY, maxY, _shape
+
+    // WKB representation of the inserted geometry
+    // TODO see if the input is already WKB and just use that
     size_t size = tg_geom_wkb(geom, 0, 0);
     void *buffer = sqlite3_malloc(size + 1);
     if (buffer == 0) {
@@ -1401,14 +1565,19 @@ static int tg0Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
       return SQLITE_NOMEM;
     }
     tg_geom_wkb(geom, buffer, size + 1);
-    // TODO argv[1] is NULL when a new rowid has to be picked
-    sqlite3_int64 rowid = sqlite3_value_int64(argv[1]);
-    rc = sqlite3_bind_int64(stmt, 1, rowid);
-    rc = sqlite3_bind_double(stmt, 2, rect.min.x);
-    rc = sqlite3_bind_double(stmt, 3, rect.max.x);
-    rc = sqlite3_bind_double(stmt, 4, rect.min.y);
-    rc = sqlite3_bind_double(stmt, 5, rect.max.y);
-    rc = sqlite3_bind_blob(stmt, 6, buffer, size, sqlite3_free);
+
+    if (hasRowid) {
+      rc = sqlite3_bind_int64(stmt, paramStart, sqlite3_value_int64(argv[1]));
+    }
+    rc = sqlite3_bind_double(stmt, paramStart + 1, rect.min.x);
+    rc = sqlite3_bind_double(stmt, paramStart + 2, rect.max.x);
+    rc = sqlite3_bind_double(stmt, paramStart + 3, rect.min.y);
+    rc = sqlite3_bind_double(stmt, paramStart + 4, rect.max.y);
+    rc = sqlite3_bind_blob(stmt, paramStart + 5, buffer, size, sqlite3_free);
+    for (int i = 0; i < p->numAuxColumns; i++) {
+      rc = sqlite3_bind_value(stmt, paramStart + 6 + i,
+                              argv[2 + TG0_COLUMN_REST + i]);
+    }
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
@@ -1417,6 +1586,7 @@ static int tg0Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
           sqlite3_mprintf("stepping not done? %s", sqlite3_errmsg(p->db));
       if (needsFree)
         tg_geom_free(geom);
+      sqlite3_finalize(stmt);
       return SQLITE_ERROR;
     }
     sqlite3_finalize(stmt);
@@ -1639,7 +1809,12 @@ __declspec(dllexport)
   rc = sqlite3_create_function(db, "tg_group_multipoint", 1,
                                SQLITE_UTF8 | SQLITE_INNOCUOUS, 0, 0,
                                tg_multipoint_step, tg_multipoint_final);
-
+  /*
+  rc = sqlite3_create_function(db, "tg_group_geometrycollection", 1,
+                               SQLITE_UTF8 | SQLITE_INNOCUOUS, 0, 0,
+                               tg_group_geometrycollection_step,
+  tg_group_geometrycollection_final);
+  */
   rc = sqlite3_create_module(db, "tg_bbox", &tg_bboxModule, NULL);
   if (rc != SQLITE_OK)
     return rc;
