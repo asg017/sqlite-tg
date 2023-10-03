@@ -1,6 +1,6 @@
 /**
 * Retrieved from https://raw.githubusercontent.com/tidwall/tg/5c505b9d68470a30ea3efd52fcc437ed438d6a93/tg.h
-* at 2023-10-03T19:51:00.796Z.
+* at 2023-10-03T20:46:20.043Z.
 *
 * The following variables are defined for sqlite-tg debugging.
 */

@@ -21,15 +21,15 @@ if (!VERSION) {
   console.error("Usage: ./update.ts VERSION_NUMBER");
   Deno.exit(1);
 }
-const data = await fetch(
+const commit = await fetch(
   `https://api.github.com/repos/tidwall/tg/commits/${VERSION}`
 ).then((r) => r.json());
 
-const sha = data.sha;
-const date = data.commit.author.date;
+const SHA = commit.sha;
+const DATE = commit.commit.author.date;
 
-const tgCUrl = `https://raw.githubusercontent.com/tidwall/tg/${sha}/tg.c`;
-const tgHUrl = `https://raw.githubusercontent.com/tidwall/tg/${sha}/tg.h`;
+const tgCUrl = `https://raw.githubusercontent.com/tidwall/tg/${SHA}/tg.c`;
+const tgHUrl = `https://raw.githubusercontent.com/tidwall/tg/${SHA}/tg.h`;
 
 const tgC = await fetch(tgCUrl).then((r) => r.text());
 const tgH = await fetch(tgHUrl).then((r) => r.text());
@@ -45,8 +45,8 @@ Deno.writeTextFile(
 */
 
 #define TG_VERSION "${VERSION}"
-#define TG_COMMIT "${sha}"
-#define TG_DATE "${date}"
+#define TG_COMMIT "${SHA}"
+#define TG_DATE "${DATE}"
 
 // Everything after this comment is from the original tg source.
 ${tgH}`
