@@ -1,3 +1,15 @@
+/**
+* Retrieved from https://raw.githubusercontent.com/tidwall/tg/5c505b9d68470a30ea3efd52fcc437ed438d6a93/tg.h
+* at 2023-10-03T19:51:00.796Z.
+*
+* The following variables are defined for sqlite-tg debugging.
+*/
+
+#define TG_VERSION "v0.2.1"
+#define TG_COMMIT "5c505b9d68470a30ea3efd52fcc437ed438d6a93"
+#define TG_DATE "2023-09-30T14:56:31Z"
+
+// Everything after this comment is from the original tg source.
 // https://github.com/tidwall/tg
 //
 // Copyright 2023 Joshua J Baker. All rights reserved.
@@ -118,6 +130,9 @@ double tg_geom_m(const struct tg_geom *geom);
 const double *tg_geom_extra_coords(const struct tg_geom *geom);
 int tg_geom_num_extra_coords(const struct tg_geom *geom);
 size_t tg_geom_memsize(const struct tg_geom *geom);
+void tg_geom_search(const struct tg_geom *geom, struct tg_rect rect,
+    bool (*iter)(const struct tg_geom *geom, int index, void *udata),
+    void *udata);
 /// @}
 
 /// @defgroup GeometryPredicates Geometry predicates
@@ -203,12 +218,14 @@ struct tg_geom *tg_geom_new_geometrycollection_empty(void);
 /// Functions for working directly with the tg_point type.
 /// @{
 struct tg_rect tg_point_rect(struct tg_point point);
+bool tg_point_intersects_rect(struct tg_point a, struct tg_rect b);
 /// @}
 
 /// @defgroup SegmentFuncs Segment functions
 /// Functions for working directly with the tg_segment type.
 /// @{
 struct tg_rect tg_segment_rect(struct tg_segment s);
+bool tg_segment_intersects_segment(struct tg_segment a, struct tg_segment b);
 /// @}
 
 /// @defgroup RectFuncs Rectangle functions
@@ -217,6 +234,8 @@ struct tg_rect tg_segment_rect(struct tg_segment s);
 struct tg_rect tg_rect_expand(struct tg_rect rect, struct tg_rect other);
 struct tg_rect tg_rect_expand_point(struct tg_rect rect, struct tg_point point);
 struct tg_point tg_rect_center(struct tg_rect rect);
+bool tg_rect_intersects_rect(struct tg_rect a, struct tg_rect b);
+bool tg_rect_intersects_point(struct tg_rect a, struct tg_point b);
 /// @}
 
 /// @defgroup RingFuncs Ring functions

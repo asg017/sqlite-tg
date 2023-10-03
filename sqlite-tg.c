@@ -1693,8 +1693,18 @@ __declspec(dllexport)
 #define DEFAULT_FLAGS (SQLITE_UTF8 | SQLITE_INNOCUOUS | SQLITE_DETERMINISTIC)
 
   const char *debug =
-      sqlite3_mprintf("Version: %s\nDate: %s\nSource: %s", SQLITE_TG_VERSION,
-                      SQLITE_TG_DATE, SQLITE_TG_SOURCE);
+      sqlite3_mprintf(
+        (
+          "sqlite-tg version: %s\n"
+        "sqlite-tg date: %s\n"
+        "sqlite-tg commit: %s"
+        "tg version: %s\n"
+        "tg date: %s\n"
+        "tg commit: %s"
+        ),
+        SQLITE_TG_VERSION, SQLITE_TG_DATE, SQLITE_TG_SOURCE,
+        TG_VERSION, TG_DATE, TG_COMMIT
+        );
   static enum export_format FORMAT_WKT = WKT;
   static enum export_format FORMAT_WKB = WKB;
   static enum export_format FORMAT_GEOJSON = GEOJSON;
