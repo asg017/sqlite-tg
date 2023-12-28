@@ -125,7 +125,7 @@ def test_tg_version():
 
 def test_tg_debug():
     debug = db.execute("select tg_debug()").fetchone()[0].split("\n")
-    assert len(debug) == 3
+    assert len(debug) == 5
 
 
 def test_tg_intersects():

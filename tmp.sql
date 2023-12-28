@@ -4,6 +4,20 @@
 .header on
 .bail on
 
+
+select tg_to_geojson(
+  tg_group_geometrycollection(tg_to_wkb(tg_point(value, value)))
+)
+from json_each('[1,2,3,4]');
+
+select tg_to_geojson(
+  tg_group_geometrycollection(tg_point(value, value))
+)
+from json_each('[1,2,3,4]');
+
+
+.exit
+
 create table b as select key as rowid, value from json_each('[
     {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23818620800527,32.881627962039275],[-117.23803891594858,32.881627962039275],[-117.23803891594858,32.88150426716983],[-117.23818620800527,32.88150426716983],[-117.23818620800527,32.881627962039275]]]},"properties":{}},
     {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23794407791227,32.88163023398593],[-117.23779678585558,32.88163023398593],[-117.23779678585558,32.88150653911649],[-117.23794407791227,32.88150653911649],[-117.23794407791227,32.88163023398593]]]},"properties":{}},

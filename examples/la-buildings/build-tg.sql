@@ -4,17 +4,11 @@
 
 attach database "base.db" as base;
 
-create table buildings(id int primary key, extra json);
+create virtual table tg_buildings using tg0(extra);
 
-insert into buildings(id, extra)
-  select rowid, extra from base.base;
-
-
-create virtual table tg_buildings using tg0();
-begin;
-insert into tg_buildings(rowid, _shape)
+insert into tg_buildings(rowid, _shape, extra)
   select
     rowid,
-    boundary
+    boundary,
+    extra
   from base.base;
-commit;

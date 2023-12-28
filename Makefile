@@ -51,9 +51,11 @@ TARGET_LOADABLE=$(prefix)/tg0.$(LOADABLE_EXTENSION)
 TARGET_STATIC=$(prefix)/libsqlite_tg0.a
 TARGET_STATIC_H=$(prefix)/sqlite-tg.h
 
+TARGET_TEST_MEMORY=$(prefix)/test-memory
 
 loadable: $(TARGET_LOADABLE)
 static: $(TARGET_STATIC)
+test-memory: $(TARGET_TEST_MEMORY)
 
 $(TARGET_LOADABLE): sqlite-tg.c vendor/tg/tg.c $(prefix)
 	gcc -fPIC -shared \
@@ -70,7 +72,7 @@ $(TARGET_STATIC): sqlite-tg.c $(prefix)
 $(TARGET_STATIC_H): sqlite-tg.h $(prefix)
 	cp $< $@
 
-test-memory: tests/test-memory.c sqlite-tg.c vendor/tg/tg.c $(prefix)
+$(TARGET_TEST_MEMORY): tests/test-memory.c sqlite-tg.c vendor/tg/tg.c $(prefix)
 	gcc \
 	-Ivendor/sqlite -Ivendor/tg -I./ \
 	-O3 \

@@ -1705,10 +1705,6 @@ __declspec(dllexport)
         SQLITE_TG_VERSION, SQLITE_TG_DATE, SQLITE_TG_SOURCE,
         TG_VERSION, TG_DATE, TG_COMMIT
         );
-  static enum export_format FORMAT_WKT = WKT;
-  static enum export_format FORMAT_WKB = WKB;
-  static enum export_format FORMAT_GEOJSON = GEOJSON;
-  static enum export_format FORMAT_POINTER = POINTER;
 
   static const struct {
 
