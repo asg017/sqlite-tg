@@ -11,7 +11,7 @@ As a reminder, `sqlite-tg` is still young, so breaking changes should be expecte
 1. If a provided argument is a `BLOB`, then it is assumed the blob is valid WKB.
 2. If the provided argument is `TEXT` and is the return value of a [JSON SQL function](https://www.sqlite.org/json1.html), or if it starts with `"{"`, then it is assumed the string is valid GeoJSON.
 3. If the provided argument is still `TEXT`, then it is assumed the text is valid WKT.
-4. If the provided argument is the return value of a `sqlite-tg` function that [returns a geometry pointer]()
+4. If the provided argument is the return value of a `sqlite-tg` function that [returns a geometry pointer](#pointer-functions),
 
 ## Pointer functions
 
@@ -25,19 +25,52 @@ select tg_point(1, 2); -- appears to be NULL
 select tg_to_wkt(tg_point(1, 2)); -- returns 'POINT(1 2)'
 ```
 
-[`tg_point`](#tg-point) is a pointer function, which appears to return `NULL` when directly accessing in a query. However, it can be used to pass into other `sqlite-tg` functions, such as `tg_to_wkt()`, which can access the object under-the-hood.
+[`tg_point`](#tg-point) is a pointer function, which appears to return `NULL` when directly accessing in a query. However, it can be passed into other `sqlite-tg` functions, such as `tg_to_wkt()`, which access the underlying geometric object and serializes it to WKT.
 
-All `sqlite-tg` functions that return a pointer also have counterpart functions that return "proper" values, like WKT/WKB/GeoJSON. For `tg_point()`, the counterpart functions are [`tg_point_wkt()`](#tg_point_wkt), [`tg_point_wkb()`](#tg_point_wkb), and [`tg_point_geojson()`](#tg_point_geojson).
+Keep in mind, SQLite pointer values don't exist past CTE boundaries.
+
+```sql
+with step1 as (
+  select tg_point(1,1) as point1
+),
+step2 as (
+  select tg_to_wkt(point1) from step1
+)
+select * from step2;
+
+-- Runtime error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+```
+
+The above query returns an error because the "pointer" returned from `tg_point()` inside `step1` doesn't exist outside the `step1` CTE boundary. When accessed in `step2`, the `point1` return is `NULL`, so `tg_to_wkt()` throws the error.
+
+The solution is to "serialize" the point with `tg_to_wkt` inside of `step1`. This ensure that `point1` will be a normal SQL `TEXT` value, and can be queries in other table expressions like normal.
+
+```sql
+with step1 as (
+  select tg_to_wkt(tg_point(1,1)) as point1
+),
+step2 as (
+  select point1 from step1
+)
+select * from step2;
+/*
+┌────────────┐
+│   point1   │
+├────────────┤
+│ POINT(1 1) │
+└────────────┘
+*/
+```
 
 ## API Reference
 
 All functions offered by `sqlite-tg`.
 
-### Meta
+### Meta Functions
 
 <h4 name="tg_version"><code>tg_version()</code></h4>
 
-Returns the version of `sqlite-tg`.
+Returns the version string of `sqlite-tg`.
 
 ```sql
 select tg_version(); -- "v0...."
@@ -48,7 +81,7 @@ select tg_version(); -- "v0...."
 Returns fuller debug information of `sqlite-tg`.
 
 ```sql
-select tg_debug(); -- "v0....Date...Commit..."
+select tg_debug(); -- "Version...Date...Commit..."
 ```
 
 ### Constructors
@@ -57,15 +90,11 @@ select tg_debug(); -- "v0....Date...Commit..."
 
 A [pointer function](#pointer-functions) that returns a point geometry with the given `x` and `y` values. This value will appear to be `NULL` on direct access, and is meant for performance critical SQL queries where you want to avoid serializing/de-serializing.
 
-TODO mention that pointer values don't exist past CTE boundaries and must be serialized
-
 ```sql
 select tg_point(1, 2); -- appears to be NULL
 
 select tg_to_wkt(tg_point(1, 2)); -- 'POINT(1 2)'
 ```
-
-==
 
 <h4 name="tg_multipoint"><code>tg_multipoint(p1, p2, ...)</code></h4>
 

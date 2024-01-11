@@ -57,6 +57,13 @@ static struct tg_geom *geomValue(sqlite3_value *value, int *needsFree,
 
 #pragma region resulting
 
+static void destroy_geom(void *p) { tg_geom_free(p); }
+
+static void resultGeomPointer(sqlite3_context *context, struct tg_geom *geom) {
+  sqlite3_result_pointer(context, geom, TG_GEOM_POINTER_NAME, destroy_geom);
+}
+
+
 static void resultGeomWkt(sqlite3_context *context, struct tg_geom *geom) {
   size_t size = tg_geom_wkt(geom, 0, 0);
   void *buffer = sqlite3_malloc(size + 1);
@@ -91,14 +98,6 @@ static void resultGeomGeojson(sqlite3_context *context, struct tg_geom *geom) {
   sqlite3_result_text(context, buffer, size, sqlite3_free);
   sqlite3_result_subtype(context, JSON_SUBTYPE);
 }
-
-static void d(void *p) { tg_geom_free(p); }
-static void resultGeomPointer(sqlite3_context *context, struct tg_geom *geom) {
-  sqlite3_result_pointer(context, geom, TG_GEOM_POINTER_NAME,
-                         d); //(void (*)(void *))tg_geom_free);
-}
-
-enum export_format { WKT = 1, WKB = 2, GEOJSON = 3, POINTER = 4 };
 
 #pragma endregion
 
@@ -1693,18 +1692,14 @@ __declspec(dllexport)
 #define DEFAULT_FLAGS (SQLITE_UTF8 | SQLITE_INNOCUOUS | SQLITE_DETERMINISTIC)
 
   const char *debug =
-      sqlite3_mprintf(
-        (
-          "sqlite-tg version: %s\n"
-        "sqlite-tg date: %s\n"
-        "sqlite-tg commit: %s"
-        "tg version: %s\n"
-        "tg date: %s\n"
-        "tg commit: %s"
-        ),
-        SQLITE_TG_VERSION, SQLITE_TG_DATE, SQLITE_TG_SOURCE,
-        TG_VERSION, TG_DATE, TG_COMMIT
-        );
+      sqlite3_mprintf(("sqlite-tg version: %s\n"
+                       "sqlite-tg date: %s\n"
+                       "sqlite-tg commit: %s"
+                       "tg version: %s\n"
+                       "tg date: %s\n"
+                       "tg commit: %s"),
+                      SQLITE_TG_VERSION, SQLITE_TG_DATE, SQLITE_TG_SOURCE,
+                      TG_VERSION, TG_DATE, TG_COMMIT);
 
   static const struct {
 

@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import json
 import unittest
@@ -311,7 +312,7 @@ def test_tg_point():
     ] == ["POINT(1 1)", "POINT(1 1)"]
 
     if SUPPORTS_SUBTYPE:
-        assert db.execute("select subtype(tg_point(1, 1)").fetchone()[0] == 4
+        assert db.execute("select subtype(tg_point(1, 1))").fetchone()[0] == 4
 
     with pytest.raises(
         sqlite3.OperationalError, match="point X value must be an integer or float"
@@ -374,7 +375,7 @@ def test_tg_group_multipoint():
 
     with pytest.raises(
         sqlite3.OperationalError,
-        match="parameters to tg_group_multipoint\(\) must be Point gemetries",
+        match=re.escape("parameters to tg_group_multipoint() must be Point gemetries"),
     ):
         db.execute("select tg_group_multipoint('MULTIPOINT EMPTY')")
 
@@ -393,19 +394,19 @@ def test_tg_multipoint():
 
     with pytest.raises(
         sqlite3.OperationalError,
-        match="argument to tg_multipoint\(\) at index 0 is an invalid geometry",
+        match=re.escape("argument to tg_multipoint() at index 0 is an invalid geometry"),
     ):
         tg_multipoint("invalid")
 
     with pytest.raises(
         sqlite3.OperationalError,
-        match="argument to tg_multipoint\(\) at index 1 is an invalid geometry",
+        match=re.escape("argument to tg_multipoint() at index 1 is an invalid geometry"),
     ):
         tg_multipoint("point(1 1)", "invalid")
 
     with pytest.raises(
         sqlite3.OperationalError,
-        match="argument to tg_multipoint\(\) at index 0 expected a point, found MultiPoint",
+        match=re.escape("argument to tg_multipoint() at index 0 expected a point, found MultiPoint"),
     ):
         tg_multipoint("multipoint(1 1)")
 
@@ -461,7 +462,7 @@ tg_demo1 = [
 # fmt: on
 
 
-def test_tg0():
+def test_tg0(snapshot):
     db.execute("create virtual table tg_demo1 using tg0();")
     assert execute_all(
         db, "select name from pragma_table_list where name like 'tg%'"
@@ -481,58 +482,11 @@ def test_tg0():
 
     assert execute_all(
         db, "select rowid, typeof(_shape), tg_to_wkt(_shape) from tg_demo1"
-    ) == [
-        {
-            "rowid": 0,
-            "typeof(_shape)": "blob",
-            "tg_to_wkt(_shape)": "POLYGON((-117.23818620800527 32.881627962039275,-117.23803891594858 32.881627962039275,-117.23803891594858 32.88150426716983,-117.23818620800527 32.88150426716983,-117.23818620800527 32.881627962039275))",
-        },
-        {
-            "rowid": 1,
-            "typeof(_shape)": "blob",
-            "tg_to_wkt(_shape)": "POLYGON((-117.23794407791227 32.88163023398593,-117.23779678585558 32.88163023398593,-117.23779678585558 32.88150653911649,-117.23794407791227 32.88150653911649,-117.23794407791227 32.88163023398593))",
-        },
-        {
-            "rowid": 2,
-            "typeof(_shape)": "blob",
-            "tg_to_wkt(_shape)": "POLYGON((-117.23818630582224 32.881454314415976,-117.23803901376554 32.881454314415976,-117.23803901376554 32.88133061954653,-117.23818630582224 32.88133061954653,-117.23818630582224 32.881454314415976))",
-        },
-        {
-            "rowid": 3,
-            "typeof(_shape)": "blob",
-            "tg_to_wkt(_shape)": "POLYGON((-117.2379432340281 32.881454247902326,-117.2377959419714 32.881454247902326,-117.2377959419714 32.88133055303288,-117.2379432340281 32.88133055303288,-117.2379432340281 32.881454247902326))",
-        },
-    ]
-    assert execute_all(db, "select id, minX, maxX, minY, maxY from tg_demo1_rtree") == [
-        {
-            "id": 0,
-            "minX": -117.23818969726562,
-            "maxX": -117.238037109375,
-            "minY": 32.88150405883789,
-            "maxY": 32.88163375854492,
-        },
-        {
-            "id": 1,
-            "minX": -117.23794555664062,
-            "maxX": -117.23778533935547,
-            "minY": 32.88150405883789,
-            "maxY": 32.88163375854492,
-        },
-        {
-            "id": 2,
-            "minX": -117.23818969726562,
-            "maxX": -117.238037109375,
-            "minY": 32.88132858276367,
-            "maxY": 32.88145446777344,
-        },
-        {
-            "id": 3,
-            "minX": -117.23794555664062,
-            "maxX": -117.23779296875,
-            "minY": 32.881324768066406,
-            "maxY": 32.88145446777344,
-        },
-    ]
+    ) == snapshot(name="tg_demo1 fullscan")
+
+    assert execute_all(
+        db, "select id, minX, maxX, minY, maxY from tg_demo1_rtree"
+    ) == snapshot(name="tg_demo1 rtree")
 
     assert (
         explain_query_plan("select * from tg_demo1")
@@ -626,7 +580,10 @@ def test_tg0():
 def test_tg0_with_aux():
     db.execute("create virtual table tg_demo2 using tg0(a,b,c);")
     db.execute(
-        "insert into tg_demo2(rowid, _shape, a, b, c) values (1, 'POLYGON ((0 0, 2 2, 4 0, 0 0))', 1, 'text', X'00')"
+        """
+        insert into tg_demo2(rowid, _shape, a, b, c)
+        values (1, 'POLYGON ((0 0, 2 2, 4 0, 0 0))', 1, 'text', X'00')
+        """
     )
     assert execute_all(
         db, "select rowid, tg_to_wkt(_shape), a, b, c from tg_demo2"
