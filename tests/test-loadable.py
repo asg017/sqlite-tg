@@ -490,16 +490,16 @@ def test_tg0(snapshot):
 
     assert (
         explain_query_plan("select * from tg_demo1")
-        == "SCAN tg_demo1 VIRTUAL TABLE INDEX 0:fullscan"
+        == "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 0:fullscan"
     )
 
     assert (
         explain_query_plan("select * from tg_demo1 where tg_intersects(_shape, '')")
-        == "SCAN tg_demo1 VIRTUAL TABLE INDEX 150:predicate"
+        == "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 150:predicate"
     )
     assert (
         explain_query_plan("select * from tg_demo1 where tg_contains(_shape, '')")
-        == "SCAN tg_demo1 VIRTUAL TABLE INDEX 152:predicate"
+        == "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 152:predicate"
     )
     # TODO rest of predicates?
 
