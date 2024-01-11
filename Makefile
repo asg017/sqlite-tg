@@ -51,14 +51,14 @@ loadable: $(TARGET_LOADABLE)
 static: $(TARGET_STATIC)
 test-memory: $(TARGET_TEST_MEMORY)
 
-$(TARGET_LOADABLE): sqlite-tg.c vendor/tg/tg.c $(prefix)
+$(TARGET_LOADABLE): sqlite-tg.c sqlite-tg.h vendor/tg/tg.c $(prefix)
 	gcc -fPIC -shared \
 	-Ivendor/sqlite -Ivendor/tg \
 	-O3 \
 	$(CFLAGS) \
 	$< vendor/tg/tg.c -o $@
 
-$(TARGET_STATIC): sqlite-tg.c $(prefix)
+$(TARGET_STATIC): sqlite-tg.c sqlite-tg.h $(prefix)
 	gcc -Ivendor/sqlite -Ivendor/tg $(CFLAGS) -DSQLITE_CORE \
 	-O3 -c  $< vendor/tg/tg.c -o $(prefix)/tg.o
 	ar rcs $@ $(prefix)/tg.o

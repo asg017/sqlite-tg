@@ -465,13 +465,13 @@ tg_demo1 = [
 def test_tg0(snapshot):
     db.execute("create virtual table tg_demo1 using tg0();")
     assert execute_all(
-        db, "select name from sqlite_master where name like 'tg%'"
+        db, "select name from sqlite_master where name like 'tg%' order by 1"
     ) == [
-        {"name": "tg_demo1_rtree_parent"},
-        {"name": "tg_demo1_rtree_node"},
-        {"name": "tg_demo1_rtree_rowid"},
-        {"name": "tg_demo1_rtree"},
         {"name": "tg_demo1"},
+        {"name": "tg_demo1_rtree"},
+        {"name": "tg_demo1_rtree_node"},
+        {"name": "tg_demo1_rtree_parent"},
+        {"name": "tg_demo1_rtree_rowid"},
     ]
 
     db.execute(
