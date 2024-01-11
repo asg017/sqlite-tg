@@ -465,7 +465,7 @@ tg_demo1 = [
 def test_tg0(snapshot):
     db.execute("create virtual table tg_demo1 using tg0();")
     assert execute_all(
-        db, "select name from pragma_table_list where name like 'tg%'"
+        db, "select name from sqlite_master where name like 'tg%'"
     ) == [
         {"name": "tg_demo1_rtree_parent"},
         {"name": "tg_demo1_rtree_node"},
@@ -572,7 +572,7 @@ def test_tg0(snapshot):
 
     db.execute("drop table tg_demo1;")
     assert (
-        execute_all(db, "select name from pragma_table_list where name like 'tg%'")
+        execute_all(db, "select name from sqlite_master where name like 'tg%'")
         == []
     )
 
