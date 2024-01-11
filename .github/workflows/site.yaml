@@ -25,11 +25,10 @@ jobs:
       - uses: mymindstorm/setup-emsdk@v12
         with:
           version: "latest"
-      - run: make -f wasm.mk all
-      - run: make wasm-playground
+      - run: make site
       - uses: actions/configure-pages@v2
       - uses: actions/upload-pages-artifact@v1
         with:
-          path: dist/wasm-playground
+          path: dist/site
       - id: deployment
         uses: actions/deploy-pages@v1

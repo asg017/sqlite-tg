@@ -1240,7 +1240,6 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
         op == TG0_FUNC_CONTAINS || op == TG0_FUNC_WITHIN ||
         op == TG0_FUNC_COVERS || op == TG0_FUNC_COVEREDBY) {
       if (iPredicateTerm >= 0) {
-        // TODO err msg, only 1 predicate at a time for now?
         sqlite3_free(pVtab->zErrMsg);
         pVtab->zErrMsg = sqlite3_mprintf(
             "only 1 predicate is allowed on tg0 WHERE clauses.");
@@ -1274,8 +1273,6 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
   tg0_cursor *pCur = (tg0_cursor *)pVtabCursor;
   tg0_vtab *p = (tg0_vtab *)pVtabCursor->pVtab;
 
-  // TODO need to check if there's a lingering pCur->stmt that needs finalizing,
-  // or a lingering pCur->queryGeom that needs freeing
   if (pCur->stmt) {
     sqlite3_finalize(pCur->stmt);
     pCur->stmt = 0;

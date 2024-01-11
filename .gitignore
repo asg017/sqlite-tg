@@ -21,4 +21,5 @@ __pycache__
 
 node_modules
 
-examples/
+examples/*
+!examples/wasm

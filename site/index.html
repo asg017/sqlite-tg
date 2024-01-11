@@ -1,0 +1,30 @@
+<html>
+  <body>
+    <h1>sqlite-tg</h1>
+    <div id="target">
+
+    </div>
+    <link rel="stylesheet" href="./slim.css"/>
+    <script type="module" src="www/app.js"></script>
+    <script type="module">
+      /*
+      import {attach} from "./slim.js";
+      import {default as init} from "./sqlite3.mjs";
+      const sqlite3 = await init();
+      attach(document.body.querySelector('#target'), sqlite3,
+`select
+  rowid,
+  tg_to_wkt(geometry),
+  tg_to_wkb(geometry),
+  tg_to_geojson(geometry)
+from tg_geometries_each('
+  GEOMETRYCOLLECTION (
+    POINT (40 10),
+    LINESTRING (10 10, 20 20, 10 40),
+    POLYGON ((40 40, 20 45, 45 30, 40 40))
+  )
+');`);*/
+    </script>
+  </body>
+</html>
+
