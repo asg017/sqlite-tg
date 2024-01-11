@@ -394,19 +394,25 @@ def test_tg_multipoint():
 
     with pytest.raises(
         sqlite3.OperationalError,
-        match=re.escape("argument to tg_multipoint() at index 0 is an invalid geometry"),
+        match=re.escape(
+            "argument to tg_multipoint() at index 0 is an invalid geometry"
+        ),
     ):
         tg_multipoint("invalid")
 
     with pytest.raises(
         sqlite3.OperationalError,
-        match=re.escape("argument to tg_multipoint() at index 1 is an invalid geometry"),
+        match=re.escape(
+            "argument to tg_multipoint() at index 1 is an invalid geometry"
+        ),
     ):
         tg_multipoint("point(1 1)", "invalid")
 
     with pytest.raises(
         sqlite3.OperationalError,
-        match=re.escape("argument to tg_multipoint() at index 0 expected a point, found MultiPoint"),
+        match=re.escape(
+            "argument to tg_multipoint() at index 0 expected a point, found MultiPoint"
+        ),
     ):
         tg_multipoint("multipoint(1 1)")
 
@@ -488,18 +494,18 @@ def test_tg0(snapshot):
         db, "select id, minX, maxX, minY, maxY from tg_demo1_rtree"
     ) == snapshot(name="tg_demo1 rtree")
 
-    assert (
-        explain_query_plan("select * from tg_demo1")
-        == "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 0:fullscan"
+    assert re.match(
+        "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 0:fullscan",
+        explain_query_plan("select * from tg_demo1"),
     )
 
-    assert (
-        explain_query_plan("select * from tg_demo1 where tg_intersects(_shape, '')")
-        == "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 150:predicate"
+    assert re.match(
+        "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 150:predicate",
+        explain_query_plan("select * from tg_demo1 where tg_intersects(_shape, '')"),
     )
-    assert (
-        explain_query_plan("select * from tg_demo1 where tg_contains(_shape, '')")
-        == "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 152:predicate"
+    assert re.match(
+        "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 152:predicate",
+        explain_query_plan("select * from tg_demo1 where tg_contains(_shape, '')"),
     )
     # TODO rest of predicates?
 
@@ -571,10 +577,7 @@ def test_tg0(snapshot):
     assert db.execute("select count(*) from tg_demo1").fetchone()[0] == 3
 
     db.execute("drop table tg_demo1;")
-    assert (
-        execute_all(db, "select name from sqlite_master where name like 'tg%'")
-        == []
-    )
+    assert execute_all(db, "select name from sqlite_master where name like 'tg%'") == []
 
 
 def test_tg0_with_aux():
