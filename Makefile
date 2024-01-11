@@ -41,12 +41,6 @@ prefix=dist
 $(prefix):
 	mkdir -p $(prefix)
 
-
-DEFINE_SQLITE_TG_DATE=-DSQLITE_TG_DATE="\"$(DATE)\""
-DEFINE_SQLITE_TG_VERSION=-DSQLITE_TG_VERSION="\"v$(VERSION)\""
-DEFINE_SQLITE_TG_SOURCE=-DSQLITE_TG_SOURCE="\"$(COMMIT)\""
-DEFINE_SQLITE_TG=$(DEFINE_SQLITE_TG_DATE) $(DEFINE_SQLITE_TG_VERSION) $(DEFINE_SQLITE_TG_SOURCE)
-
 TARGET_LOADABLE=$(prefix)/tg0.$(LOADABLE_EXTENSION)
 TARGET_STATIC=$(prefix)/libsqlite_tg0.a
 TARGET_STATIC_H=$(prefix)/sqlite-tg.h
@@ -61,13 +55,16 @@ $(TARGET_LOADABLE): sqlite-tg.c vendor/tg/tg.c $(prefix)
 	gcc -fPIC -shared \
 	-Ivendor/sqlite -Ivendor/tg \
 	-O3 \
-	$(DEFINE_SQLITE_TG) $(CFLAGS) \
+	$(CFLAGS) \
 	$< vendor/tg/tg.c -o $@
 
 $(TARGET_STATIC): sqlite-tg.c $(prefix)
-	gcc -Ivendor/sqlite -Ivendor/tg $(DEFINE_SQLITE_TG) $(CFLAGS) -DSQLITE_CORE \
+	gcc -Ivendor/sqlite -Ivendor/tg $(CFLAGS) -DSQLITE_CORE \
 	-O3 -c  $< vendor/tg/tg.c -o $(prefix)/tg.o
 	ar rcs $@ $(prefix)/tg.o
+
+sqlite-tg.h: sqlite-tg.h.tmpl VERSION
+	VERSION=$(shell cat VERSION) DATE=$(shell date -r VERSION +'%FT%TZ%z') SOURCE=$(shell git log -n 1 --pretty=format:%H -- VERSION) envsubst < $< > $@
 
 $(TARGET_STATIC_H): sqlite-tg.h $(prefix)
 	cp $< $@
@@ -76,7 +73,7 @@ $(TARGET_TEST_MEMORY): tests/test-memory.c sqlite-tg.c vendor/tg/tg.c $(prefix)
 	gcc \
 	-Ivendor/sqlite -Ivendor/tg -I./ \
 	-O3 \
-	$(DEFINE_SQLITE_TG) $(CFLAGS) \
+	$(CFLAGS) \
 	-lsqlite3 \
 	-DSQLITE_CORE \
 	$< sqlite-tg.c vendor/tg/tg.c -o $@

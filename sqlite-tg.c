@@ -8,6 +8,7 @@ SQLITE_EXTENSION_INIT1
 #include <stdlib.h>
 #include <string.h>
 #include <tg.h>
+#include "sqlite-tg.h"
 
 // https://github.com/sqlite/sqlite/blob/2d3c5385bf168c85875c010bbaa79c6712eab214/src/json.c#L125-L126
 #define JSON_SUBTYPE 74
