@@ -1,0 +1,265 @@
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+  </head>
+  <body>
+    <h1>sqlite-tg</h1>
+    <div id="target"></div>
+    <div><h1><a id="user-content-sqlite-tg-documentation" class="anchor" aria-hidden="true" tabindex="-1" href="#sqlite-tg-documentation"><span aria-hidden="true" class="octicon octicon-link"></span></a>
+<code>sqlite-tg</code> Documentation</h1>
+<p>As a reminder, <code>sqlite-tg</code> is still young, so breaking changes should be expected while <code>sqlite-tg</code> is in a pre-v1 stage.</p>
+<h2 name="user-content-supported-formats"><a id="user-content-supported-formats" class="anchor" aria-hidden="true" tabindex="-1" href="#supported-formats"><span aria-hidden="true" class="octicon octicon-link"></span></a>Supported Formats</h2>
+<p><code>tg</code> and <code>sqlite-tg</code> can accept geometries in <a href="https://en.wikipedia.org/wiki/Well-known_text_representation_of_geometry" rel="nofollow">Well-known Text (WKT)</a>, <a href="https://en.wikipedia.org/wiki/Well-known_text_representation_of_geometry#Well-known_binary" rel="nofollow">Well-known Binary(WKB)</a>, and <a href="https://geojson.org/" rel="nofollow">GeoJSON</a> formats.</p>
+<p><code>sqlite-tg</code> functions will infer which format to use based on the following rules:</p>
+<ol>
+<li>If a provided argument is a <code>BLOB</code>, then it is assumed the blob is valid WKB.</li>
+<li>If the provided argument is <code>TEXT</code> and is the return value of a <a href="https://www.sqlite.org/json1.html" rel="nofollow">JSON SQL function</a>, or if it starts with <code>"{"</code>, then it is assumed the string is valid GeoJSON.</li>
+<li>If the provided argument is still <code>TEXT</code>, then it is assumed the text is valid WKT.</li>
+<li>If the provided argument is the return value of a <code>sqlite-tg</code> function that <a href="#pointer-functions">returns a geometry pointer</a>,</li>
+</ol>
+<h2><a id="user-content-pointer-functions" class="anchor" aria-hidden="true" tabindex="-1" href="#pointer-functions"><span aria-hidden="true" class="octicon octicon-link"></span></a>Pointer functions</h2>
+<p>Some functions in <code>sqlite-tg</code> use SQLite's <a href="https://www.sqlite.org/bindptr.html" rel="nofollow">Pointer Passsing Interface</a> to return special objects. This is mainly done for performance benefits in specific queries, to avoid the overhead serializing/de-serializing the same geometric object multiple times.</p>
+<p>When using one of these functions it may appear to return <code>NULL</code>. Technically it is not null, but user-facing SQL queries can't directly access the real value. Instead, other <code>sqlite-tg</code> functions can read the underlying data in their own functions. For example:</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_point(<span class="pl-c1">1</span>, <span class="pl-c1">2</span>); <span class="pl-c"><span class="pl-c">--</span> appears to be NULL</span>
+
+<span class="pl-k">select</span> tg_to_wkt(tg_point(<span class="pl-c1">1</span>, <span class="pl-c1">2</span>)); <span class="pl-c"><span class="pl-c">--</span> returns 'POINT(1 2)'</span></pre></div>
+<p><a href="#tg-point"><code>tg_point</code></a> is a pointer function, which appears to return <code>NULL</code> when directly accessing in a query. However, it can be passed into other <code>sqlite-tg</code> functions, such as <code>tg_to_wkt()</code>, which access the underlying geometric object and serializes it to WKT.</p>
+<p>Keep in mind, SQLite pointer values don't exist past CTE boundaries.</p>
+<div class="highlight highlight-source-sql"><pre>with step1 <span class="pl-k">as</span> (
+  <span class="pl-k">select</span> tg_point(<span class="pl-c1">1</span>,<span class="pl-c1">1</span>) <span class="pl-k">as</span> point1
+),
+step2 <span class="pl-k">as</span> (
+  <span class="pl-k">select</span> tg_to_wkt(point1) <span class="pl-k">from</span> step1
+)
+<span class="pl-k">select</span> <span class="pl-k">*</span> <span class="pl-k">from</span> step2;
+
+<span class="pl-c"><span class="pl-c">--</span> Runtime error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).</span></pre></div>
+<p>The above query returns an error because the "pointer" returned from <code>tg_point()</code> inside <code>step1</code> doesn't exist outside the <code>step1</code> CTE boundary. When accessed in <code>step2</code>, the <code>point1</code> return is <code>NULL</code>, so <code>tg_to_wkt()</code> throws the error.</p>
+<p>The solution is to "serialize" the point with <code>tg_to_wkt</code> inside of <code>step1</code>. This ensure that <code>point1</code> will be a normal SQL <code>TEXT</code> value, and can be queries in other table expressions like normal.</p>
+<div class="highlight highlight-source-sql"><pre>with step1 <span class="pl-k">as</span> (
+  <span class="pl-k">select</span> tg_to_wkt(tg_point(<span class="pl-c1">1</span>,<span class="pl-c1">1</span>)) <span class="pl-k">as</span> point1
+),
+step2 <span class="pl-k">as</span> (
+  <span class="pl-k">select</span> point1 <span class="pl-k">from</span> step1
+)
+<span class="pl-k">select</span> <span class="pl-k">*</span> <span class="pl-k">from</span> step2;
+<span class="pl-c"><span class="pl-c">/*</span></span>
+<span class="pl-c">┌────────────┐</span>
+<span class="pl-c">│   point1   │</span>
+<span class="pl-c">├────────────┤</span>
+<span class="pl-c">│ POINT(1 1) │</span>
+<span class="pl-c">└────────────┘</span>
+<span class="pl-c"><span class="pl-c">*/</span></span></pre></div>
+<h2><a id="user-content-api-reference" class="anchor" aria-hidden="true" tabindex="-1" href="#api-reference"><span aria-hidden="true" class="octicon octicon-link"></span></a>API Reference</h2>
+<p>All functions offered by <code>sqlite-tg</code>.</p>
+<h3><a id="user-content-meta-functions" class="anchor" aria-hidden="true" tabindex="-1" href="#meta-functions"><span aria-hidden="true" class="octicon octicon-link"></span></a>Meta Functions</h3>
+<h4 name="user-content-tg_version"><a id="user-content-tg_version" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_version"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_version()</code></h4>
+<p>Returns the version string of <code>sqlite-tg</code>.</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_version(); <span class="pl-c"><span class="pl-c">--</span> "v0...."</span></pre></div>
+<h4 name="user-content-tg_debug"><a id="user-content-tg_debug" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_debug"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_debug()</code></h4>
+<p>Returns fuller debug information of <code>sqlite-tg</code>.</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_debug(); <span class="pl-c"><span class="pl-c">--</span> "Version...Date...Commit..."</span></pre></div>
+<h3><a id="user-content-constructors" class="anchor" aria-hidden="true" tabindex="-1" href="#constructors"><span aria-hidden="true" class="octicon octicon-link"></span></a>Constructors</h3>
+<h4 name="user-content-tg_point"><a id="user-content-tg_pointx-y" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_pointx-y"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_point(x, y)</code></h4>
+<p>A <a href="#pointer-functions">pointer function</a> that returns a point geometry with the given <code>x</code> and <code>y</code> values. This value will appear to be <code>NULL</code> on direct access, and is meant for performance critical SQL queries where you want to avoid serializing/de-serializing.</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_point(<span class="pl-c1">1</span>, <span class="pl-c1">2</span>); <span class="pl-c"><span class="pl-c">--</span> appears to be NULL</span>
+
+<span class="pl-k">select</span> tg_to_wkt(tg_point(<span class="pl-c1">1</span>, <span class="pl-c1">2</span>)); <span class="pl-c"><span class="pl-c">--</span> 'POINT(1 2)'</span></pre></div>
+<h4 name="user-content-tg_multipoint"><a id="user-content-tg_multipointp1-p2-" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_multipointp1-p2-"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_multipoint(p1, p2, ...)</code></h4>
+<p>A <a href="#pointer-functions">pointer function</a> that returns a MultiPoint geometry with the given points. This value will appear to be <code>NULL</code> on direct access, so consider wr</p>
+<p>Input arguments must be Point geometries, which can be WKT, WKB, or GeoJSON.</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_multipoint(tg_point());</pre></div>
+<h4 name="user-content-tg_group_multipoint"><a id="user-content-tg_group_multipoint" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_group_multipoint"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_group_multipoint()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_group_multipoint();</pre></div>
+<h3><a id="user-content-conversions" class="anchor" aria-hidden="true" tabindex="-1" href="#conversions"><span aria-hidden="true" class="octicon octicon-link"></span></a>Conversions</h3>
+<h4 name="user-content-tg_to_geojson"><a id="user-content-tg_to_geojsongeometry" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_to_geojsongeometry"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_to_geojson(geometry)</code></h4>
+<p>Converts the given geometry into a GeoJSON string. Inputs can be in <a href="#supported-formats">any supported formats</a>, including WKT, WKB, and GeoJSON. Based on <a href="https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_geojson"><code>tg_geom_geojson()</code></a>.</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_to_geojson(<span class="pl-s"><span class="pl-pds">'</span>POINT(0 1)<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> '{"type":"Point","coordinates":[0,1]}'</span>
+
+<span class="pl-k">select</span> tg_to_geojson(X<span class="pl-s"><span class="pl-pds">'</span>01010000000000000000000000000000000000f03f<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> '{"type":"Point","coordinates":[0,1]}'</span>
+
+<span class="pl-k">select</span> tg_to_geojson(<span class="pl-s"><span class="pl-pds">'</span>{"type":"Point","coordinates":[0,1]}<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> '{"type":"Point","coordinates":[0,1]}'</span>
+
+<span class="pl-k">select</span> tg_to_geojson(tg_point(<span class="pl-c1">0</span>, <span class="pl-c1">1</span>));
+<span class="pl-c"><span class="pl-c">--</span> '{"type":"Point","coordinates":[0,1]}'</span></pre></div>
+<h4 name="user-content-tg_to_wkb"><a id="user-content-tg_to_wkbgeometry" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_to_wkbgeometry"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_to_wkb(geometry)</code></h4>
+<p>Converts the given geometry into a WKB blob. Inputs can be in <a href="#supported-formats">any supported formats</a>, including WKT, WKB, and GeoJSON. Based on <a href="https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_wkb"><code>tg_geom_wkb()</code></a>.</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_to_wkb(<span class="pl-s"><span class="pl-pds">'</span>POINT(0 1)<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> X'01010000000000000000000000000000000000f03f'</span>
+
+<span class="pl-k">select</span> tg_to_wkb(X<span class="pl-s"><span class="pl-pds">'</span>01010000000000000000000000000000000000f03f<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> X'01010000000000000000000000000000000000f03f'</span>
+
+<span class="pl-k">select</span> tg_to_wkb(<span class="pl-s"><span class="pl-pds">'</span>{"type":"Point","coordinates":[0,1]}<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> X'01010000000000000000000000000000000000f03f'</span>
+
+<span class="pl-k">select</span> tg_to_wkb(tg_point(<span class="pl-c1">0</span>, <span class="pl-c1">1</span>));
+<span class="pl-c"><span class="pl-c">--</span> X'01010000000000000000000000000000000000f03f'</span></pre></div>
+<h4 name="user-content-tg_to_wkt"><a id="user-content-tg_to_wktgeometry" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_to_wktgeometry"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_to_wkt(geometry)</code></h4>
+<p>Converts the given geometry into a WKT blob. Inputs can be in <a href="#supported-formats">any supported formats</a>, including WKT, WKB, and GeoJSON. Based on <a href="https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_wkt"><code>tg_geom_wkt()</code></a>.</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_to_wkt(<span class="pl-s"><span class="pl-pds">'</span>POINT(0 1)<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> 'POINT(0 1)'</span>
+
+<span class="pl-k">select</span> tg_to_wkt(X<span class="pl-s"><span class="pl-pds">'</span>01010000000000000000000000000000000000f03f<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> 'POINT(0 1)'</span>
+
+<span class="pl-k">select</span> tg_to_wkt(<span class="pl-s"><span class="pl-pds">'</span>{"type":"Point","coordinates":[0,1]}<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> 'POINT(0 1)'</span>
+
+<span class="pl-k">select</span> tg_to_wkt(tg_point(<span class="pl-c1">0</span>, <span class="pl-c1">1</span>));
+<span class="pl-c"><span class="pl-c">--</span> 'POINT(0 1)'</span></pre></div>
+<h3><a id="user-content-misc" class="anchor" aria-hidden="true" tabindex="-1" href="#misc"><span aria-hidden="true" class="octicon octicon-link"></span></a>Misc.</h3>
+<h4 name="user-content-tg_type"><a id="user-content-tg_typegeometry" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_typegeometry"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_type(geometry)</code></h4>
+<p>Returns a string describing the type of the provided <code>geometry</code>. Inputs can be in <a href="#supported-formats">any supported formats</a>, including WKT, WKB, and GeoJSON. Based on <a href="https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_type_string"><code>tg_geom_type_string()</code></a>.</p>
+<p>Possible values:</p>
+<ul>
+<li><code>"Point"</code></li>
+<li><code>"LineString"</code></li>
+<li><code>"Polygon"</code></li>
+<li><code>"MultiPoint"</code></li>
+<li><code>"MultiLineString"</code></li>
+<li><code>"MultiPolygon"</code></li>
+<li><code>"GeometryCollection"</code></li>
+<li><code>"Unknown"</code></li>
+</ul>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_type(<span class="pl-s"><span class="pl-pds">'</span>POINT (30 10)<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> 'Point'</span>
+select tg_type(<span class="pl-s"><span class="pl-pds">'</span>LINESTRING (30 10, 10 30, 40 40)<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> 'LineString'</span>
+select tg_type(<span class="pl-s"><span class="pl-pds">'</span>POLYGON ((30 10, 40 40, 20 40, 10 20, 30 10))<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> 'Polygon'</span>
+select tg_type(<span class="pl-s"><span class="pl-pds">'</span>MULTIPOINT (10 40, 40 30, 20 20, 30 10)<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> 'MultiPoint'</span>
+select tg_type(<span class="pl-s"><span class="pl-pds">'</span>MULTIPOLYGON (((30 20, 45 40, 10 40, 30 20)),((15 5, 40 10, 10 20, 5 10, 15 5)))<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> 'MultiPolygon'</span>
+select tg_type(<span class="pl-s"><span class="pl-pds">'</span>GEOMETRYCOLLECTION (POINT (40 10),LINESTRING (10 10, 20 20, 10 40),POLYGON ((40 40, 20 45, 45 30, 40 40)))<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> 'GeometryCollection'</span></pre></div>
+<h4 name="user-content-tg_extra_json"><a id="user-content-tg_extra_jsongeometry" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_extra_jsongeometry"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_extra_json(geometry)</code></h4>
+<p>If the original geometry is a GeoJSON with extra fields such as <code>id</code> or <code>property</code>, those extra fields will be returned in a JSON object.</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_extra_json(<span class="pl-s"><span class="pl-pds">'</span>{</span>
+<span class="pl-s">  "type": "Point",</span>
+<span class="pl-s">  "coordinates": [-118.2097812,34.0437074]</span>
+<span class="pl-s">}<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> NULL</span>
+
+<span class="pl-k">select</span> tg_extra_json(<span class="pl-s"><span class="pl-pds">'</span>{</span>
+<span class="pl-s">  "id": "ASG0017",</span>
+<span class="pl-s">  "type": "Point",</span>
+<span class="pl-s">  "coordinates": [-118.2097812,34.0437074],</span>
+<span class="pl-s">  "properties": {"color": "red"}</span>
+<span class="pl-s">}<span class="pl-pds">'</span></span>);
+<span class="pl-c"><span class="pl-c">--</span> '{"id":"ASG0017","properties":{"color": "red"}}'</span></pre></div>
+<h3><a id="user-content-operations" class="anchor" aria-hidden="true" tabindex="-1" href="#operations"><span aria-hidden="true" class="octicon octicon-link"></span></a>Operations</h3>
+<h4 name="user-content-tg_intersects"><a id="user-content-tg_intersectsa-b" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_intersectsa-b"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_intersects(a, b)</code></h4>
+<p>Returns <code>1</code> if the <code>a</code> geometry intersects the <code>b</code> geometry, otherwise returns <code>0</code>. Will raise an error if either <code>a</code> or <code>b</code> are not valid geometries. Based on <a href="https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_intersects"><code>tg_geom_intersects()</code></a>.</p>
+<p>The <code>a</code> and <code>b</code> geometries can be in any <a href="#supported-formats">supported format</a>, including WKT, WKB, and GeoJSON.</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_intersects(
+  <span class="pl-s"><span class="pl-pds">'</span>LINESTRING (0 0, 2 2)<span class="pl-pds">'</span></span>,
+  <span class="pl-s"><span class="pl-pds">'</span>LINESTRING (1 0, 1 2)<span class="pl-pds">'</span></span>
+); <span class="pl-c"><span class="pl-c">--</span> 1</span>
+
+<span class="pl-k">select</span> tg_intersects(
+  <span class="pl-s"><span class="pl-pds">'</span>LINESTRING (0 0, 0 2)<span class="pl-pds">'</span></span>,
+  <span class="pl-s"><span class="pl-pds">'</span>LINESTRING (2 0, 2 2)<span class="pl-pds">'</span></span>
+); <span class="pl-c"><span class="pl-c">--</span> 0</span></pre></div>
+<p>Consider this rough bounding box for San Francisco:</p>
+<pre><code>POLYGON((
+  -122.51610563264538 37.81424532146113,
+  -122.51610563264538 37.69618409220847,
+  -122.35290547288255 37.69618409220847,
+  -122.35290547288255 37.81424532146113,
+  -122.51610563264538 37.81424532146113
+))
+</code></pre>
+<p>The following SQL query, for a point within the city, returns <code>1</code>:</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_intersects(<span class="pl-s"><span class="pl-pds">'</span>POLYGON((</span>
+<span class="pl-s">  -122.51610563264538 37.81424532146113,</span>
+<span class="pl-s">  -122.51610563264538 37.69618409220847,</span>
+<span class="pl-s">  -122.35290547288255 37.69618409220847,</span>
+<span class="pl-s">  -122.35290547288255 37.81424532146113,</span>
+<span class="pl-s">  -122.51610563264538 37.81424532146113</span>
+<span class="pl-s">))<span class="pl-pds">'</span></span>, <span class="pl-s"><span class="pl-pds">'</span>POINT(-122.4075 37.787994)<span class="pl-pds">'</span></span>)</pre></div>
+<p>With a point outside the city it returns <code>0</code>:</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_intersects(<span class="pl-s"><span class="pl-pds">'</span>POLYGON((</span>
+<span class="pl-s">  -122.51610563264538 37.81424532146113,</span>
+<span class="pl-s">  -122.51610563264538 37.69618409220847,</span>
+<span class="pl-s">  -122.35290547288255 37.69618409220847,</span>
+<span class="pl-s">  -122.35290547288255 37.81424532146113,</span>
+<span class="pl-s">  -122.51610563264538 37.81424532146113</span>
+<span class="pl-s">))<span class="pl-pds">'</span></span>, <span class="pl-s"><span class="pl-pds">'</span>POINT(-73.985130 40.758896)<span class="pl-pds">'</span></span>)</pre></div>
+<h4 name="user-content-tg_contains"><a id="user-content-tg_contains" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_contains"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_contains()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_contains();</pre></div>
+<h4 name="user-content-tg_coveredby"><a id="user-content-tg_coveredby" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_coveredby"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_coveredby()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_coveredby();</pre></div>
+<h4 name="user-content-tg_covers"><a id="user-content-tg_covers" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_covers"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_covers()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_covers();</pre></div>
+<h4 name="user-content-tg_disjoint"><a id="user-content-tg_disjoint" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_disjoint"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_disjoint()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_disjoint();</pre></div>
+<h4 name="user-content-tg_touches"><a id="user-content-tg_touches" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_touches"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_touches()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_touches();</pre></div>
+<h4 name="user-content-tg_within"><a id="user-content-tg_within" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_within"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_within()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_within();</pre></div>
+
+<h4 name="user-content-tg0"><a id="user-content-tg0" class="anchor" aria-hidden="true" tabindex="-1" href="#tg0"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg0()</code></h4>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_XXX();</pre></div>
+<h4 name="user-content-tg_geom"><a id="user-content-tg_geom" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_geom"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_geom()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_geom();</pre></div>
+<h4 name="user-content-tg_valid_geojson"><a id="user-content-tg_valid_geojson" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_valid_geojson"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_valid_geojson()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_valid_geojson();</pre></div>
+<h4 name="user-content-tg_valid_wkb"><a id="user-content-tg_valid_wkb" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_valid_wkb"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_valid_wkb()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_valid_wkb();</pre></div>
+<h4 name="user-content-tg_valid_wkt"><a id="user-content-tg_valid_wkt" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_valid_wkt"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_valid_wkt()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_valid_wkt();</pre></div>
+<h4 name="user-content-tg_geometries_each"><a id="user-content-tg_geometries_each" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_geometries_each"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_geometries_each()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_geometries_each();</pre></div>
+<h4 name="user-content-tg_lines_each"><a id="user-content-tg_lines_each" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_lines_each"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_lines_each()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_lines_each();</pre></div>
+<h4 name="user-content-tg_points_each"><a id="user-content-tg_points_each" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_points_each"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_points_each()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_points_each();</pre></div>
+<h4 name="user-content-tg_polygons_each"><a id="user-content-tg_polygons_each" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_polygons_each"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_polygons_each()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_polygons_each();</pre></div>
+<h4 name="user-content-tg_bbox"><a id="user-content-tg_bbox" class="anchor" aria-hidden="true" tabindex="-1" href="#tg_bbox"><span aria-hidden="true" class="octicon octicon-link"></span></a><code>tg_bbox()</code></h4>
+<p>TODO</p>
+<div class="highlight highlight-source-sql"><pre><span class="pl-k">select</span> tg_bbox();</pre></div>
+</div>
+    <link rel="stylesheet" href="./slim.css"/>
+    <script type="module">
+      import {attach} from "./slim.js";
+      import {default as init} from "./sqlite3.mjs";
+      const sqlite3 = await init();
+      attach(document.body.querySelector('#target'), sqlite3,
+`select
+  rowid,
+  tg_to_wkt(geometry),
+  tg_to_wkb(geometry),
+  tg_to_geojson(geometry)
+from tg_geometries_each('
+  GEOMETRYCOLLECTION (
+    POINT (40 10),
+    LINESTRING (10 10, 20 20, 10 40),
+    POLYGON ((40 40, 20 45, 45 30, 40 40))
+  )
+');`);
+    </script>
+  </body>
+</html>
+
