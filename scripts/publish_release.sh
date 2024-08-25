@@ -11,8 +11,7 @@ VERSION="$(cat VERSION)"
 
 echo "Publishing version v$VERSION..."
 
-make version
-git add --all
+git add VERSION
 git commit -m "v$VERSION"
 git tag v$VERSION
 git push origin main v$VERSION
