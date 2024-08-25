@@ -1,0 +1,22 @@
+[package]
+name = "sqlite-tg"
+license = "MIT OR Apache"
+homepage = "https://github.com/asg017/sqlite-vec"
+repo = "https://github.com/asg017/sqlite-vec"
+description = "A SQLite extension for limited geospatial work."
+authors = ["Alex Garcia"]
+git_tag_format = "v$VERSION"
+
+[targets]
+github_releases = {}
+sqlpkg = {}
+spm = {}
+#amalgamation = {include=["sqlite-tg.c", "sqlite-tg.h"]}
+
+pip = {}
+datasette = {}
+sqlite_utils = {}
+
+npm = {}
+
+gem = { module_name = "SqliteTg" }
