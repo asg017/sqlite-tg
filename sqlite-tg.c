@@ -612,10 +612,15 @@ static void tg_group_geometrycollection_final(sqlite3_context *context) {
 #pragma region each table functions
 
 struct control {
+  // resulting column name in the table function
   char *name;
+  // extract a target value from a single input sqlite3_value (in xFilter)
   void *(*xValue)(sqlite3_value *value, int *needsFree, int *invalid);
+  // free the target
   void (*xFree)(void *p);
+  // determine if the table function has completed
   int (*xEof)(void *p, sqlite3_int64 iRowid);
+  // result the column value at the given rowid
   void (*xResult)(sqlite3_context *context, void *p, sqlite3_int64 iRowid);
 };
 
@@ -1677,6 +1682,11 @@ static sqlite3_module tg0Module = {
 
 #pragma region entrypoint
 
+// SQLITE_RESULT_SUBTYPE was introduced in SQLite 3.45
+#ifndef SQLITE_RESULT_SUBTYPE
+#define SQLITE_RESULT_SUBTYPE 0x001000000
+#endif
+
 #ifdef _WIN32
 __declspec(dllexport)
 #endif
@@ -1723,7 +1733,7 @@ __declspec(dllexport)
       {(char *)"tg_geom",           2, tg_geom,                 NULL,             NULL,         DEFAULT_FLAGS},
 
       {(char *)"tg_type",           1, tg_type,                 NULL,             NULL,         DEFAULT_FLAGS},
-      {(char *)"tg_extra_json",     1, tg_extra_json,           NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_extra_json",     1, tg_extra_json,           NULL,             NULL,         DEFAULT_FLAGS | SQLITE_RESULT_SUBTYPE},
 
       {(char *)"tg_valid_geojson",  1, tg_valid_geojson,       NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_valid_wkb",      1, tg_valid_wkb,           NULL,             NULL,         DEFAULT_FLAGS},
@@ -1737,7 +1747,7 @@ __declspec(dllexport)
 
       {(char *)"tg_to_wkt",         1, tg_to_wkt,     NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_to_wkb",         1, tg_to_wkb,     NULL,             NULL,         DEFAULT_FLAGS},
-      {(char *)"tg_to_geojson",     1, tg_to_geojson, NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_to_geojson",     1, tg_to_geojson, NULL,             NULL,         DEFAULT_FLAGS | SQLITE_RESULT_SUBTYPE},
 
       {(char *)"tg_multipoint",    -1, tg_multipoint, NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_point",          2, tg_point,      NULL,             NULL,         DEFAULT_FLAGS},

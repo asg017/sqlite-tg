@@ -12,4 +12,9 @@ Deno.test("sqlite-tg wasm", () => {
   })[0][0];
   assert(typeof version === "string");
   assert(version.length > 0);
+
+  let stmt = db.prepare("select json('[x]')");
+  while (stmt.step()) {
+    console.log(sqlite3.capi.sqlite3_column_text(stmt, 0));
+  }
 });

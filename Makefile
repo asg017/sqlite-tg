@@ -168,8 +168,8 @@ test-loadable-watch:
 
 # ███████████████████████████████ WASM SECTION ███████████████████████████████
 
-SQLITE_WASM_VERSION=3440000
-SQLITE_WASM_YEAR=2023
+SQLITE_WASM_VERSION=3450000
+SQLITE_WASM_YEAR=2024
 SQLITE_WASM_SRCZIP=$(prefix)/sqlite-src.zip
 SQLITE_WASM_COMPILED_SQLITE3C=$(prefix)/sqlite-src-$(SQLITE_WASM_VERSION)/sqlite3.c
 SQLITE_WASM_COMPILED_MJS=$(prefix)/sqlite-src-$(SQLITE_WASM_VERSION)/ext/wasm/jswasm/sqlite3.mjs

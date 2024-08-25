@@ -1,0 +1,457 @@
+sections:
+  meta: Meta functions
+  constructors: Constructors
+  validate: Validation
+  convertors: Convertors
+  predicates: Predicates
+
+functions:
+  tg_version:
+    desc: Returns the version string of `sqlite-tg`.
+    example: select tg_version();
+  tg_debug:
+    desc: Returns fuller debug information of `sqlite-tg`.
+    example: select tg_debug();
+  tg_point:
+    params: [x, y]
+    desc: |
+      A [pointer function](#pointer-functions) that returns a point geometry
+      with the given `x` and `y` values. This value will appear to be `NULL`
+      on direct access, and is meant for performance critical SQL queries
+      where you want to avoid serializing/de-serializing.
+    example: |
+      select
+        tg_point(1, 2) as p1,
+        tg_to_wkt(tg_point(1, 2)) as p2;
+  tg_multipoint:
+    params: [p1, p2, ...]
+    desc: |
+      A [pointer function](#pointer-functions) that returns a MultiPoint
+      geometry with the given points. This value will appear to be `NULL` on
+      direct access, so consider TODO
+
+      Input arguments must be Point geometries, which can be WKT, WKB, or GeoJSON.
+
+    example: |
+      select
+        tg_multipoint(
+          tg_point(0, 0),
+          tg_point(1, 1),
+          tg_point(2, 2)
+        ) as p1,
+        tg_to_wkt(
+          tg_multipoint(
+            tg_point(0, 0),
+            tg_point(1, 1),
+            tg_point(2, 2)
+          )
+        ) as p2;
+  tg_group_multipoint:
+    desc: |
+      An aggregate function that returns a MuliPoint geometry with the given
+      points.
+
+      Input arguments must be Point geometries in WKT, WKB, or GeoJSON format.
+    example: |
+      select
+        tg_to_wkt(
+          tg_group_multipoint(
+            tg_point(column1, column2)
+          )
+        ) as p1
+      from (
+        values (0, 0), (1, 1), (2, 2)
+      )
+  tg_to_geojson:
+    params: [geometry]
+    desc: |
+      Converts the given geometry into a GeoJSON string. Inputs can be in
+      [any supported formats](#supported-formats), including WKT, WKB, and
+      GeoJSON. Based on [`tg_geom_geojson()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_geojson).
+    example: |
+      select
+        tg_to_geojson('POINT(0 1)') as src_wkt,
+        tg_to_geojson(X'01010000000000000000000000000000000000f03f') as src_wkb,
+        tg_to_geojson('{"type":"Point","coordinates":[0,1]}') as src_geojson,
+        tg_to_geojson(tg_point(0, 1)) as src_pointer;
+  tg_to_wkb:
+    params: [geometry]
+    desc: |
+      Converts the given geometry into a WKB blob. Inputs can be in
+      [any supported formats](#supported-formats), including WKT, WKB, and
+      GeoJSON. Based on [`tg_geom_wkb()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_wkb).
+    example: |
+      select
+        tg_to_wkb('POINT(0 1)') as src_wkt,
+        tg_to_wkb(X'01010000000000000000000000000000000000f03f') as src_wkb,
+        tg_to_wkb('{"type":"Point","coordinates":[0,1]}') as src_geojson,
+        tg_to_wkb(tg_point(0, 1)) as src_pointer;
+  tg_to_wkt:
+    params: [geometry]
+    desc: |
+      Converts the given geometry into a WKT blob. Inputs can be in
+      [any supported formats](#supported-formats), including WKT, WKB, and
+      GeoJSON. Based on [`tg_geom_wkt()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_wkt).
+
+    example: |
+      select
+        tg_to_wkt('POINT(0 1)') as src_wkt,
+
+        tg_to_wkt(X'01010000000000000000000000000000000000f03f') as src_wkb,
+        tg_to_wkt('{"type":"Point","coordinates":[0,1]}') as src_geojson,
+        tg_to_wkt(tg_point(0, 1)) as src_pointer;
+  tg_geom:
+    params: [geometry, "[index]"]
+    desc: |
+      Creates a new geometry pointer object with the given `index`. The `index` parameter can be one of:
+
+      - `"none"` (default)
+      - `"natural"`
+      - `"ystripes"`
+
+      See [tg's Polygon Indexing documentation](https://github.com/tidwall/tg/blob/main/docs/POLYGON_INDEXING.md)
+      for more info.
+
+      This function is mainly meant for corner-case performance gains.
+
+      TODO more examples
+    example: |
+      SELECT tg_geom('POINT(1 1)');
+  tg_type:
+    params: [geometry]
+    desc: |
+      Returns a string describing the type of the provided `geometry`. Inputs
+      can be in [any supported formats](#supported-formats), including WKT,
+      WKB, and GeoJSON. Based on [`tg_geom_type_string()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_type_string).
+
+      Possible values:
+
+      - `"Point"`
+      - `"LineString"`
+      - `"Polygon"`
+      - `"MultiPoint"`
+      - `"MultiLineString"`
+      - `"MultiPolygon"`
+      - `"GeometryCollection"`
+      - `"Unknown"`
+
+    example: |
+      select
+        tg_type('POINT (1 1)') as p,
+        tg_type('LINESTRING (1 1, 2 2, 3 3)') as ls,
+        tg_type('POLYGON ((3 1, 4 4, 2 4, 1 2, 3 1))') as poly,
+        tg_type('MULTIPOINT (1 4, 4 3, 2 2, 3 1)') as mp,
+        tg_type(
+          'MULTIPOLYGON (
+            ((3 2, 4.5 4, 1 4, 3 2)),
+            ((15 5, 40 10, 10 20, 5 10, 15 5))
+          )'
+        ) as mpoly,
+        tg_type(
+          'GEOMETRYCOLLECTION (
+            POINT (1 1),
+            POINT (1 1)
+          )'
+        ) as gc;
+      ```
+  tg_extra_json:
+    params: ["geometry"]
+    desc: |
+      If the original geometry is a GeoJSON with extra fields such as `id` or
+      `property`, those extra fields will be returned in a JSON object.
+
+    example: |
+      select
+        tg_extra_json('{
+          "type": "Point",
+          "coordinates": [-118.2097812,34.0437074]
+        }') as no_extra,
+        tg_extra_json('{
+          "id": "ASG0017",
+          "type": "Point",
+          "coordinates": [-118.2097812,34.0437074],
+          "properties": {"color": "red"}
+        }') as some_extra;
+  tg_intersects:
+    params: [a, b]
+    desc: |
+      Returns `1` if the `a` geometry intersects the `b` geometry, otherwise returns `0`.
+      Will raise an error if either `a` or `b` are not valid geometries.
+      Based on [`tg_geom_intersects()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_intersects).
+
+      The `a` and `b` geometries can be in any [supported format](#supported-formats), including WKT, WKB, and GeoJSON.
+    example: |
+      select
+        tg_intersects(
+          'LINESTRING (0 0, 2 2)',
+          'LINESTRING (1 0, 1 2)'
+        ) as result1,
+        tg_intersects(
+          'LINESTRING (0 0, 0 2)',
+          'LINESTRING (2 0, 2 2)'
+        ) as result2;
+  tg_disjoint:
+    params: [a, b]
+    desc: |
+      Returns `1` if the `a` and `b` geometries, have no points in common, otherwise `0`.
+      This is the inverse of [`tg_intersects()`](#tg_intersects).
+      Will raise an error if either `a`  or `b` are not valid geometries.
+      Based on [`tg_geom_covers()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_covers).
+
+      The `a` and `b` geometries can be in any [supported format](#supported-formats), including WKT, WKB, and GeoJSON.
+    example: |
+      SELECT
+      tg_disjoint(
+          'POINT (0 0)',
+          'LINESTRING (1 1, 2 2)'
+        ) as disjoint,
+        tg_disjoint(
+          'POINT (0 0)',
+          'LINESTRING (0 0, 1 1)'
+        ) as not_disjoint;
+  tg_contains:
+    params: [a, b]
+    desc: |
+      Returns `1` if the `a` geometry contains the `b` geometry AND the `b` geometry is not touching the boundary of `a`, or `0` if not.
+      Will raise an error if either `a`  or `b` are not valid geometries.
+
+      This works the same as [`tg_within(b, a)`](#tg_within), with the arguments switched.
+
+      Note that this will return `0` if `b` is on or touching the boundary of `a`.
+      If you want to test full coverage, see [`tg_covers()`](#tg_covers).
+
+      Based on [`tg_geom_contains()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_contains).
+
+      The `a` and `b` geometries can be in any [supported format](#supported-formats), including WKT, WKB, and GeoJSON.
+    example: |
+      SELECT
+        tg_contains(
+          'POLYGON((0 0, 0 4, 4 4, 4 0, 0 0))',
+          'POINT(1 1)'
+        ) as contains,
+        tg_contains(
+          'POLYGON((0 0, 0 4, 4 4, 4 0, 0 0))',
+          'POINT(0 0)'
+        ) as not_contains;
+  tg_within:
+    params: [a, b]
+    desc: |
+      Returns `1` if the `a` geometry contains the `b` geometry AND the `a` geometry is not touching the boundary of `b`, or `0` if not.
+      Works the same as [`tg_within()`](#tg_within).
+      Will raise an error if either `a`  or `b` are not valid geometries.
+
+      This works the same as [`tg_contains(b, a)`](#tg_contains), with the arguments switched.
+
+      Note that this will return `0` if `a` is on or touching the boundary of `b`.
+      If you want to test full coverage, see [`tg_coveredby()`](#tg_coveredby).
+
+      Based on [`tg_geom_within()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_within).
+
+      The `a` and `b` geometries can be in any [supported format](#supported-formats), including WKT, WKB, and GeoJSON.
+    example: |
+      SELECT
+        tg_within(
+          'POINT(1 1)',
+          'POLYGON((0 0, 0 4, 4 4, 4 0, 0 0))'
+        ) as within,
+        tg_within(
+          'POINT(0 0)',
+          'POLYGON((0 0, 0 4, 4 4, 4 0, 0 0))'
+        ) as not_within;
+  tg_coveredby:
+    params: [a, b]
+    desc: |
+      Returns `1` if the `a` geometry is full contained inside the `b` geometry, or `0` if not.
+      Will raise an error if either `a`  or `b` are not valid geometries.
+      Based on [`tg_geom_coveredby()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_coveredby).
+
+      This works the same as [`tg_covers(b, a)`](#tg_covers), with the arguments switched.
+
+
+      The `a` and `b` geometries can be in any [supported format](#supported-formats), including WKT, WKB, and GeoJSON.
+    example: |
+      SELECT
+        tg_coveredby(
+          'POLYGON((0 0, 140 0, 140 140, 0 140, 0 0))',
+          'POLYGON((140 0, 0 0, 0 140, 140 140, 140 0))'
+        ) as is_covered,
+        tg_coveredby(
+          'POLYGON((40 60, 420 60, 420 320, 40 320, 40 60), (200 140, 160 220, 260 200, 200 140))',
+          'POLYGON((80 100, 360 100, 360 280, 80 280, 80 100))'
+        ) as not_covered;
+  tg_covers:
+    params: [a, b]
+    desc: |
+      Returns `1` if the `a` geometry is full contained inside the `b` geometry, or `0` if not.
+      Will raise an error if either `a`  or `b` are not valid geometries.
+      Based on [`tg_geom_covers()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_covers).
+
+      This works the same as [`tg_coveredby(b, a)`](#tg_coveredby), with the arguments switched.
+
+      The `a` and `b` geometries can be in any [supported format](#supported-formats), including WKT, WKB, and GeoJSON.
+    example: |
+      SELECT
+        tg_covers(
+          'POLYGON((0 0, 140 0, 140 140, 0 140, 0 0))',
+          'POLYGON((140 0, 0 0, 0 140, 140 140, 140 0))'
+        ) as covers,
+        tg_covers(
+          'POLYGON((40 60, 420 60, 420 320, 40 320, 40 60), (200 140, 160 220, 260 200, 200 140))',
+          'POLYGON((80 100, 360 100, 360 280, 80 280, 80 100))'
+        ) as not_covers;
+  tg_touches:
+    params: [a, b]
+    desc: |
+      Returns `1` if the `a` geometry touches the `b` geometry, or `0` if not.
+      Will raise an error if either `a`  or `b` are not valid geometries.
+
+      Based on [`tg_geom_touches()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_touches).
+
+      The `a` and `b` geometries can be in any [supported format](#supported-formats), including WKT, WKB, and GeoJSON.
+    example: |
+      SELECT
+        tg_touches(
+          'LINESTRING(0 0, 2 2)',
+          'POINT(2 2)'
+        ) as touches,
+        tg_touches(
+          'LINESTRING(0 0, 2 2)',
+          'POINT(3 3)'
+        ) as not_touches;
+  tg_valid_geojson:
+    params: ["geometry"]
+    desc: Returns `1` if the given geometry is a valid GeoJSON object, `0` otherwise.
+    example: |
+      SELECT
+        tg_valid_geojson('{
+          "type": "Point",
+          "coordinates": [125.6, 10.1]
+        }') as valid1,
+        tg_valid_geojson(
+          json_object(
+            'type', 'Point',
+            'coordinates', json_array(125.6, 10.1)
+          )
+        ) as valid2,
+        tg_valid_geojson(
+          json_object('type', 'Unknown')
+        ) as invalid;
+  tg_valid_wkb:
+    params: ["geometry"]
+    desc: Returns `1` if the given geometry is a valid WKB blob, `0` otherwise.
+    example: |
+      SELECT
+        tg_valid_wkb(X'01010000000000000000000000000000000000f03f') as valid,
+        tg_valid_wkb(X'00') as invalid1,
+        tg_valid_wkb('POINT(1 1)') as invalid2;
+  tg_valid_wkt:
+    params: ["geometry"]
+    desc: Returns `1` if the given geometry is valid WKT text, `0` otherwise.
+    example: |
+      SELECT
+        tg_valid_wkt('POINT(1 1)') as valid,
+        tg_valid_wkt('POINT()') as invalid1,
+        tg_valid_wkt(X'00') as invalid2;
+table_functions:
+  tg_geometries_each:
+    columns: [rowid, geometry]
+    inputs: ["geometry_collection"]
+    desc: |
+      A table function that iterates over each geometry inside a
+      GeometryCollection. The input *must* be a GeometryCollection.
+    example: |
+      select
+        rowid,
+        tg_to_wkt(geometry)
+      from tg_geometries_each(
+        'GEOMETRYCOLLECTION (
+          POINT (40 10),
+          LINESTRING (10 10, 20 20, 10 40),
+          POLYGON ((40 40, 20 45, 45 30, 40 40))
+        )'
+      );
+  tg_lines_each:
+    columns: [rowid, line]
+    inputs: ["multilinestring"]
+    desc: |
+      A table function that iterates over each linestring inside a
+      MultiLinestring.
+    example: |
+      select
+        rowid,
+        tg_to_wkt(line)
+      from tg_lines_each(
+        'MULTILINESTRING (
+          (10 10, 20 20, 10 40),
+          (40 40, 30 30, 40 20, 30 10)
+        )'
+      );
+  tg_points_each:
+    columns: [rowid, point]
+    inputs: [multipoint]
+    desc: |
+      A table function that iterates over each point inside a MultiPoint.
+    example: |
+      select
+        rowid,
+        tg_to_wkt(point)
+      from tg_points_each(
+        'MULTIPOINT (
+          (10 10),
+          (20 20),
+          (30 30)
+        )'
+      );
+  tg_polygons_each:
+    columns: [rowid, polygon]
+    inputs: [multipolygon]
+    desc: ~
+    example: |
+      select
+        rowid,
+        tg_to_wkt(polygon)
+      from tg_polygons_each(
+        'MULTIPOLYGON (
+          ((40 40, 20 45, 45 30, 40 40)),
+          ((20 35, 10 30, 10 10, 30 5, 45 20, 20 35)),
+          ((30 20, 20 15, 20 25, 30 20))
+        )'
+      );
+
+  tg_bbox:
+    columns: [minX, maxX, minY, maxY]
+    inputs: [geometry]
+    desc: |
+      Computes the bounding bound of the given input. Each bounding
+      box value is returned as separate columns: `minX`, `maxX`,
+      `minY`, `maxY`.
+
+      This is useful for manually inserting geometries
+      into an [R*Tree index](https://www.sqlite.org/rtree.html),
+      though the [`tg0`](#tg0) module does this for your automatically.
+    example: |
+      with examples as (
+        select
+          value as example
+        from json_each('[
+          "POINT(1 1)",
+          "LINESTRING(-1 -2, 4 5)",
+          "POLYGON((0 0, 0 2, 1 2, 1 0, 0 0))",
+        ]')
+      )
+      select
+        example,
+        tg_bbox.*
+      from examples
+      join tg_bbox(examples.example);
+virtual_tables:
+  tg0:
+    desc: |
+      A virtual table that simplifies querying a large geospatial dataset.
+      A `tg0` table will automatically create a [SQLite R-Tree index](https://www.sqlite.org/rtree.html)
+      for geometries
+
+      ```sql
+      create virtual table tg_places();
+      ```
+    example: " "

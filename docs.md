@@ -91,9 +91,11 @@ select tg_debug(); -- "Version...Date...Commit..."
 A [pointer function](#pointer-functions) that returns a point geometry with the given `x` and `y` values. This value will appear to be `NULL` on direct access, and is meant for performance critical SQL queries where you want to avoid serializing/de-serializing.
 
 ```sql
-select tg_point(1, 2); -- appears to be NULL
-
-select tg_to_wkt(tg_point(1, 2)); -- 'POINT(1 2)'
+select
+  -- appears to be NULL,
+  tg_point(1, 2) as p1,
+  -- convert a point to a real value
+  tg_to_wkt(tg_point(1, 2)) as p2;
 ```
 
 <h4 name="tg_multipoint"><code>tg_multipoint(p1, p2, ...)</code></h4>
@@ -121,17 +123,11 @@ select tg_group_multipoint();
 Converts the given geometry into a GeoJSON string. Inputs can be in [any supported formats](#supported-formats), including WKT, WKB, and GeoJSON. Based on [`tg_geom_geojson()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_geojson).
 
 ```sql
-select tg_to_geojson('POINT(0 1)');
--- '{"type":"Point","coordinates":[0,1]}'
-
-select tg_to_geojson(X'01010000000000000000000000000000000000f03f');
--- '{"type":"Point","coordinates":[0,1]}'
-
-select tg_to_geojson('{"type":"Point","coordinates":[0,1]}');
--- '{"type":"Point","coordinates":[0,1]}'
-
-select tg_to_geojson(tg_point(0, 1));
--- '{"type":"Point","coordinates":[0,1]}'
+select
+  tg_to_geojson('POINT(0 1)') as src_wkt,
+  tg_to_geojson(X'01010000000000000000000000000000000000f03f') as src_wkb,
+  tg_to_geojson('{"type":"Point","coordinates":[0,1]}') as src_geojson,
+  tg_to_geojson(tg_point(0, 1)) as src_pointer;
 ```
 
 <h4 name="tg_to_wkb"><code>tg_to_wkb(geometry)</code></h4>
@@ -207,19 +203,18 @@ select tg_type('GEOMETRYCOLLECTION (POINT (40 10),LINESTRING (10 10, 20 20, 10 4
 If the original geometry is a GeoJSON with extra fields such as `id` or `property`, those extra fields will be returned in a JSON object.
 
 ```sql
-select tg_extra_json('{
-  "type": "Point",
-  "coordinates": [-118.2097812,34.0437074]
-}');
--- NULL
+select
+  tg_extra_json('{
+    "type": "Point",
+    "coordinates": [-118.2097812,34.0437074]
+  }') as no_extra,
+  tg_extra_json('{
+    "id": "ASG0017",
+    "type": "Point",
+    "coordinates": [-118.2097812,34.0437074],
+    "properties": {"color": "red"}
+  }') as some_extra;
 
-select tg_extra_json('{
-  "id": "ASG0017",
-  "type": "Point",
-  "coordinates": [-118.2097812,34.0437074],
-  "properties": {"color": "red"}
-}');
--- '{"id":"ASG0017","properties":{"color": "red"}}'
 ```
 
 ### Operations
@@ -231,15 +226,15 @@ Returns `1` if the `a` geometry intersects the `b` geometry, otherwise returns `
 The `a` and `b` geometries can be in any [supported format](#supported-formats), including WKT, WKB, and GeoJSON.
 
 ```sql
-select tg_intersects(
-  'LINESTRING (0 0, 2 2)',
-  'LINESTRING (1 0, 1 2)'
-); -- 1
-
-select tg_intersects(
-  'LINESTRING (0 0, 0 2)',
-  'LINESTRING (2 0, 2 2)'
-); -- 0
+select
+  tg_intersects(
+    'LINESTRING (0 0, 2 2)',
+    'LINESTRING (1 0, 1 2)'
+  ) as result1,
+  tg_intersects(
+    'LINESTRING (0 0, 0 2)',
+    'LINESTRING (2 0, 2 2)'
+  ) as result2;
 ```
 
 Consider this rough bounding box for San Francisco:
@@ -257,25 +252,35 @@ POLYGON((
 The following SQL query, for a point within the city, returns `1`:
 
 ```sql
-select tg_intersects('POLYGON((
-  -122.51610563264538 37.81424532146113,
-  -122.51610563264538 37.69618409220847,
-  -122.35290547288255 37.69618409220847,
-  -122.35290547288255 37.81424532146113,
-  -122.51610563264538 37.81424532146113
-))', 'POINT(-122.4075 37.787994)')
+select tg_intersects(
+  '
+    POLYGON((
+      -122.51610563264538 37.81424532146113,
+      -122.51610563264538 37.69618409220847,
+      -122.35290547288255 37.69618409220847,
+      -122.35290547288255 37.81424532146113,
+      -122.51610563264538 37.81424532146113
+    ))
+  ',
+  'POINT(-122.4075 37.787994)'
+) as result;
 ```
 
 With a point outside the city it returns `0`:
 
 ```sql
-select tg_intersects('POLYGON((
-  -122.51610563264538 37.81424532146113,
-  -122.51610563264538 37.69618409220847,
-  -122.35290547288255 37.69618409220847,
-  -122.35290547288255 37.81424532146113,
-  -122.51610563264538 37.81424532146113
-))', 'POINT(-73.985130 40.758896)')
+select tg_intersects(
+  '
+    POLYGON((
+      -122.51610563264538 37.81424532146113,
+      -122.51610563264538 37.69618409220847,
+      -122.35290547288255 37.69618409220847,
+      -122.35290547288255 37.81424532146113,
+      -122.51610563264538 37.81424532146113
+    ))
+  ',
+  'POINT(-73.985130 40.758896)'
+) as result;
 ```
 
 <h4 name="tg_contains"><code>tg_contains()</code></h4>

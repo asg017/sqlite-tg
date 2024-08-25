@@ -207,7 +207,6 @@ def test_tg_geom():
         )
     with pytest.raises(sqlite3.OperationalError, match="ParseError: invalid text"):
         db.execute("select tg_geom(?)", ["POINT(1 1"]).fetchone()
-    # self.skipTest("TODO")
 
 
 def test_tg_valid_geojson():
@@ -250,14 +249,16 @@ def test_tg_geometries_each(snapshot):
     #    tg_geometries_each(1)
 
 
-@pytest.mark.skip(reason="TODO")
-def test_tg_lines_each():
+def test_tg_lines_each(snapshot):
     tg_lines_each = lambda *args: execute_all(
-        db, "select rowid, * from tg_lines_each(?)", args
+        db, "select rowid, tg_to_wkt(line) as line_wkt from tg_lines_each(?)", args
     )
-    assert tg_lines_each() == []
-    with pytest.raises(sqlite3.OperationalError):
-        tg_lines_each()
+    assert tg_lines_each('MULTILINESTRING ()') == []
+    assert tg_lines_each('MULTILINESTRING ((10 10, 20 20, 10 40), (40 40, 30 30, 40 20, 30 10))') == snapshot()
+
+    # TODO: should this throw, since the input isn't a MULTILINESTRING?
+    # tg_lines_each('LINESTRING(10 10,20 20,10 40)')
+
 
 
 @pytest.mark.skip(reason="TODO")
@@ -609,6 +610,33 @@ def test_coverage():
         if member[0].startswith("test_")
     ]
     funcs_with_tests = set([x.replace("test_", "") for x in test_methods])
+    README = (Path(__file__).parent.parent / "docs.md").read_text()
+    for func in [*FUNCTIONS, *MODULES]:
+        assert func in funcs_with_tests, f"{func} is not tested"
+        assert func in README, f"{func} is not documented"
+        assert f'name="{func}"' in README, f"{func} is not documented"
+        assert f"{func}(" in README, f"{func} missing code sample"
+def test_coverage_new():
+    current_module = inspect.getmodule(inspect.currentframe())
+    test_methods = [
+        member[0]
+        for member in inspect.getmembers(current_module)
+        if member[0].startswith("test_")
+    ]
+    funcs_with_tests = set([x.replace("test_", "") for x in test_methods])
+    import yaml
+    ref = yaml.safe_load((Path(__file__).parent.parent / "reference.yaml").read_text())
+    for func in FUNCTIONS:
+        func_ref =  ref.get("functions").get(func)
+        assert func_ref, f"{func} is not in reference.yaml"
+        for field in ["desc", "example"]:
+          assert field in func_ref and func_ref.get(field), f"{func} reference is missing {field}"
+    for module in MODULES:
+        m_ref = ref.get("table_functions").get(module) or ref.get("virtual_tables").get(module)
+        print(ref.get("virtual_tables").get(module))
+        assert m_ref, f"{module} is not in reference.yaml"
+        for field in ["desc", "example"]:
+          assert field in m_ref and m_ref.get(field), f"{module} reference is missing {field}"
     README = (Path(__file__).parent.parent / "docs.md").read_text()
     for func in [*FUNCTIONS, *MODULES]:
         assert func in funcs_with_tests, f"{func} is not tested"
