@@ -1108,6 +1108,14 @@ struct tg0_cursor {
   int queryGeomNeedsFree;
 };
 
+void vtab_set_error(sqlite3_vtab *pVTab, const char *zFormat, ...) {
+  va_list args;
+  sqlite3_free(pVTab->zErrMsg);
+  va_start(args, zFormat);
+  pVTab->zErrMsg = sqlite3_vmprintf(zFormat, args);
+  va_end(args);
+}
+
 static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
                     sqlite3_vtab **ppVtab, char **pzErr, bool isCreate) {
   tg0_vtab *pNew;
@@ -1126,6 +1134,7 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
   rc = sqlite3_declare_vtab(db, zSchema);
   sqlite3_free((void *)zSchema);
   if (rc != SQLITE_OK) {
+    *pzErr = sqlite3_mprintf("Error declaring vtab schema for tg0 virtual table.");
     return rc;
   }
   pNew = sqlite3_malloc(sizeof(*pNew));
@@ -1161,10 +1170,12 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     sqlite3_free((void *)zCreate);
 
     if (rc != SQLITE_OK) {
+      *pzErr = sqlite3_mprintf("Error preparing rtree shadow table for tg0 table.");
       return SQLITE_ERROR;
     }
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
+      *pzErr = sqlite3_mprintf("Error creating rtree shadow table for tg0 table.");
       return SQLITE_ERROR;
     }
     sqlite3_finalize(stmt);
