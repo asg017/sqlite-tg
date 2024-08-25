@@ -1116,10 +1116,26 @@ void vtab_set_error(sqlite3_vtab *pVTab, const char *zFormat, ...) {
   va_end(args);
 }
 
+int db_supports_rtree(sqlite3*db) {
+  sqlite3_stmt * stmt;
+  int rc = sqlite3_prepare_v2(db, "select name from pragma_module_list where name = 'rtree';", -1, &stmt, NULL);
+  // TODO could be that PRAGMA module_list is not allowed
+  if(rc != SQLITE_OK) {
+    return 0;
+  }
+  rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  return rc == SQLITE_ROW;
+}
+
 static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
                     sqlite3_vtab **ppVtab, char **pzErr, bool isCreate) {
   tg0_vtab *pNew;
   int rc;
+  if(!db_supports_rtree(db)) {
+    *pzErr = sqlite3_mprintf("The current SQLite connection does not include the R-Tree extension, which is required by tg0.");
+    return SQLITE_ERROR;
+  }
   sqlite3_str *strSchema = sqlite3_str_new(NULL);
   sqlite3_str_appendall(strSchema, "CREATE TABLE x(_shape");
   for (int i = 3; i < argc; i++) {
