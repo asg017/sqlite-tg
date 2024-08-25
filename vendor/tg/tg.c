@@ -453,13 +453,7 @@ static double length(double x1, double y1, double x2, double y2) {
 #endif
 
 static size_t grow_cap(size_t cap, size_t init_cap) {
-    if (cap == 0) {
-        return init_cap;
-    }
-    if (cap < 1000) {
-        return cap * 2;
-    }
-    return cap * 1.25;
+    return cap == 0 ? init_cap : cap < 1000 ? cap * 2 : cap * 1.25;
 }
 
 #define print_segment(s) { \
@@ -10268,7 +10262,8 @@ static void write_string_double(struct writer *wr, double f) {
         return;
     }
     size_t dstsz = wr->count < wr->n ? wr->n - wr->count : 0;
-    wr->count += ryu_string(f, 'f', (char*)wr->dst+wr->count, dstsz);
+    char *dst = wr->dst ? (char*)wr->dst+wr->count : 0;
+    wr->count += ryu_string(f, 'f', dst, dstsz);
 }
 
 static void write_posn_geojson(struct writer *wr, struct tg_point posn) {
@@ -12794,9 +12789,9 @@ static size_t parse_wkb(const uint8_t *wkb, size_t len, size_t i, int depth,
 
     // Set the 'swap' bool which indicates that the wkb numbers need swapping
     // to match the host endianness.
-#if BYTE_ORDER == BIG_ENDIAN
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
     bool swap = wkb[i] == 1;
-#elif BYTE_ORDER == LITTLE_ENDIAN
+#elif __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
     bool swap = wkb[i] == 0;
 #else
     #error "cannot determine byte order"
@@ -12904,7 +12899,7 @@ static void write_wkb_type(struct writer *wr, const struct head *head) {
 }
 
 static void write_posn_wkb(struct writer *wr, struct tg_point posn) {
-#if BYTE_ORDER == LITTLE_ENDIAN
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
     if (wr->count+16 < wr->n) {
         memcpy(wr->dst+wr->count, &posn, 16);
         wr->count += 16;
@@ -12917,7 +12912,7 @@ static void write_posn_wkb(struct writer *wr, struct tg_point posn) {
 
 static void write_posn_wkb_3(struct writer *wr, struct tg_point posn, double z)
 {
-#if BYTE_ORDER == LITTLE_ENDIAN
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
     if (wr->count+24 < wr->n) {
         memcpy(wr->dst+wr->count, ((double[3]){posn.x, posn.y, z}), 24);
         wr->count += 24;
@@ -12932,7 +12927,7 @@ static void write_posn_wkb_3(struct writer *wr, struct tg_point posn, double z)
 static void write_posn_wkb_4(struct writer *wr, struct tg_point posn, 
     double z, double m)
 {
-#if BYTE_ORDER == LITTLE_ENDIAN
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
     if (wr->count+32 < wr->n) {
         memcpy(wr->dst+wr->count, ((double[4]){posn.x, posn.y, z, m}), 32);
         wr->count += 32;
@@ -12949,7 +12944,7 @@ static int write_ring_points_wkb(struct writer *wr, const struct tg_ring *ring)
 {
     write_uint32le(wr, ring->npoints);
     size_t needed = ring->npoints*16;
-#if BYTE_ORDER == LITTLE_ENDIAN
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
     if (wr->count+needed <= wr->n) {
         memcpy(wr->dst+wr->count, ring->points, needed);
         wr->count += needed;
@@ -13511,13 +13506,15 @@ struct tg_geom *tg_parse_hex(const char *hex) {
     return tg_parse_hexn_ix(hex, hex?strlen(hex):0, TG_DEFAULT);
 }
 
-static double ring_area(const struct tg_ring *ring) {
+/// Calculate the area of a ring.
+double tg_ring_area(const struct tg_ring *ring) {
     if (tg_ring_empty(ring)) return 0;
     // The ring area has already been calculated by process_points.
     return ring->area;
 }
 
-static double ring_perimeter(const struct tg_ring *ring) {
+/// Calculate the perimeter length of a ring.
+double tg_ring_perimeter(const struct tg_ring *ring) {
     if (tg_ring_empty(ring)) return 0;
     int nsegs = tg_ring_num_segments(ring);
     double perim = 0;
@@ -13538,8 +13535,8 @@ double tg_ring_polsby_popper_score(const struct tg_ring *ring) {
     // and all other shapes will be smaller. Itty bitty scores mean the
     // polygon is really something nuts or has bad data.
     double score = 0.0;
-    double perim = ring_perimeter(ring);
-    double area = ring_area(ring);
+    double perim = tg_ring_perimeter(ring);
+    double area = tg_ring_area(ring);
     if (perim > 0) {
         score = (area * M_PI * 4) / (perim * perim);
     }
@@ -14262,4 +14259,9 @@ void tg_geom_search(const struct tg_geom *geom, struct tg_rect rect,
         // indexed search
         multi_index_search(multi, rect, 0, 0, iter, udata);
     }
+}
+
+/// Calculate the length of a line.
+double tg_line_length(const struct tg_line *line) {
+    return tg_ring_perimeter((struct tg_ring*)line);
 }

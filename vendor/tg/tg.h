@@ -1,13 +1,13 @@
 /**
-* Retrieved from https://raw.githubusercontent.com/tidwall/tg/5c505b9d68470a30ea3efd52fcc437ed438d6a93/tg.h
-* at 2023-10-03T20:46:20.043Z.
+* Retrieved from https://raw.githubusercontent.com/tidwall/tg/190f4a66d1a39b812425360c837acad30151a7ba/tg.h
+* at 2024-08-25T19:52:01.267Z.
 *
 * The following variables are defined for sqlite-tg debugging.
 */
 
-#define TG_VERSION "v0.2.1"
-#define TG_COMMIT "5c505b9d68470a30ea3efd52fcc437ed438d6a93"
-#define TG_DATE "2023-09-30T14:56:31Z"
+#define TG_VERSION "v0.4.0"
+#define TG_COMMIT "190f4a66d1a39b812425360c837acad30151a7ba"
+#define TG_DATE "undefined"
 
 // Everything after this comment is from the original tg source.
 // https://github.com/tidwall/tg
@@ -246,7 +246,7 @@ bool tg_rect_intersects_point(struct tg_rect a, struct tg_point b);
 /// must upcast the ring to a tg_geom, like such:
 ///
 /// ```
-/// tg_geom_interects((struct tg_geom*)ring, geom);
+/// tg_geom_intersects((struct tg_geom*)ring, geom);
 /// ```
 /// @{
 struct tg_ring *tg_ring_new(const struct tg_point *points, int npoints);
@@ -280,7 +280,8 @@ void tg_ring_ring_search(const struct tg_ring *a, const struct tg_ring *b,
     bool (*iter)(struct tg_segment aseg, int aidx, struct tg_segment bseg, 
         int bidx, void *udata),
     void *udata);
-
+double tg_ring_area(const struct tg_ring *ring);
+double tg_ring_perimeter(const struct tg_ring *ring);
 /// @}
 
 /// @defgroup LineFuncs Line functions
@@ -291,7 +292,7 @@ void tg_ring_ring_search(const struct tg_ring *a, const struct tg_ring *b,
 /// must upcast the line to a tg_geom, like such:
 ///
 /// ```
-/// tg_geom_interects((struct tg_geom*)line, geom);
+/// tg_geom_intersects((struct tg_geom*)line, geom);
 /// ```
 /// @{
 struct tg_line *tg_line_new(const struct tg_point *points, int npoints);
@@ -320,6 +321,7 @@ void tg_line_line_search(const struct tg_line *a, const struct tg_line *b,
     bool (*iter)(struct tg_segment aseg, int aidx, struct tg_segment bseg, 
         int bidx, void *udata),
     void *udata);
+double tg_line_length(const struct tg_line *line);
 /// @}
 
 /// @defgroup PolyFuncs Polygon functions
@@ -330,7 +332,7 @@ void tg_line_line_search(const struct tg_line *a, const struct tg_line *b,
 /// must upcast the poly to a tg_geom, like such:
 ///
 /// ```
-/// tg_geom_interects((struct tg_geom*)poly, geom);
+/// tg_geom_intersects((struct tg_geom*)poly, geom);
 /// ```
 /// @{
 struct tg_poly *tg_poly_new(const struct tg_ring *exterior, const struct tg_ring *const holes[], int nholes);
