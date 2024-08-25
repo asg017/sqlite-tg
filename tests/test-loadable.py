@@ -89,7 +89,7 @@ MODULES = [
 SUPPORTS_SUBTYPE = sqlite3.version_info[1] > 38
 SUPPORTS_RTREE = (
     sqlite3.connect(":memory:")
-    .execute("select name from pragma_module_list where name = 'rtreex';")
+    .execute("select name from pragma_module_list where name = 'rtree';")
     .fetchone()
     is None
 )
