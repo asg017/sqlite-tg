@@ -91,7 +91,7 @@ SUPPORTS_RTREE = (
     sqlite3.connect(":memory:")
     .execute("select name from pragma_module_list where name = 'rtree';")
     .fetchone()
-    is None
+    is not None
 )
 
 LINE_A = shapely.from_wkt("LINESTRING (0 0, 1 1)")
