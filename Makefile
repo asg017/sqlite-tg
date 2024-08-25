@@ -111,36 +111,45 @@ test-loadable-watch:
 
 
 
+
 # ███████████████████████████████ WASM SECTION ███████████████████████████████
 
-SQLITE_WASM_VERSION=3450000
-SQLITE_WASM_YEAR=2024
-SQLITE_WASM_SRCZIP=$(prefix)/sqlite-src.zip
-SQLITE_WASM_COMPILED_SQLITE3C=$(prefix)/sqlite-src-$(SQLITE_WASM_VERSION)/sqlite3.c
-SQLITE_WASM_COMPILED_MJS=$(prefix)/sqlite-src-$(SQLITE_WASM_VERSION)/ext/wasm/jswasm/sqlite3.mjs
-SQLITE_WASM_COMPILED_WASM=$(prefix)/sqlite-src-$(SQLITE_WASM_VERSION)/ext/wasm/jswasm/sqlite3.wasm
+WASM_DIR=$(prefix)/.wasm
 
-TARGET_WASM_LIB=$(prefix)/libsqlite_tg.wasm.a
-TARGET_WASM_MJS=$(prefix)/sqlite3.mjs
-TARGET_WASM_WASM=$(prefix)/sqlite3.wasm
+$(WASM_DIR): $(prefix)
+	mkdir -p $@
+
+SQLITE_WASM_VERSION=3450300
+SQLITE_WASM_YEAR=2024
+SQLITE_WASM_SRCZIP=$(BUILD_DIR)/sqlite-src.zip
+SQLITE_WASM_COMPILED_SQLITE3C=$(BUILD_DIR)/sqlite-src-$(SQLITE_WASM_VERSION)/sqlite3.c
+SQLITE_WASM_COMPILED_MJS=$(BUILD_DIR)/sqlite-src-$(SQLITE_WASM_VERSION)/ext/wasm/jswasm/sqlite3.mjs
+SQLITE_WASM_COMPILED_WASM=$(BUILD_DIR)/sqlite-src-$(SQLITE_WASM_VERSION)/ext/wasm/jswasm/sqlite3.wasm
+
+TARGET_WASM_LIB=$(WASM_DIR)/libsqlite_vec.wasm.a
+TARGET_WASM_MJS=$(WASM_DIR)/sqlite3.mjs
+TARGET_WASM_WASM=$(WASM_DIR)/sqlite3.wasm
 TARGET_WASM=$(TARGET_WASM_MJS) $(TARGET_WASM_WASM)
 
-$(SQLITE_WASM_SRCZIP):
+$(SQLITE_WASM_SRCZIP): $(BUILD_DIR)
 	curl -o $@ https://www.sqlite.org/$(SQLITE_WASM_YEAR)/sqlite-src-$(SQLITE_WASM_VERSION).zip
+	touch $@
 
-$(SQLITE_WASM_COMPILED_SQLITE3C): $(SQLITE_WASM_SRCZIP)
-	unzip -q -o $< -d $(prefix)
-	(cd $(prefix)/sqlite-src-$(SQLITE_WASM_VERSION)/ && ./configure --enable-all && make sqlite3.c)
+$(SQLITE_WASM_COMPILED_SQLITE3C): $(SQLITE_WASM_SRCZIP) $(BUILD_DIR)
+	rm -rf $(BUILD_DIR)/sqlite-src-$(SQLITE_WASM_VERSION)/ || true
+	unzip -q -o $< -d $(BUILD_DIR)
+	(cd $(BUILD_DIR)/sqlite-src-$(SQLITE_WASM_VERSION)/ && ./configure --enable-all && make sqlite3.c)
+	touch $@
 
-$(TARGET_WASM_LIB): examples/wasm/wasm.c sqlite-tg.c vendor/tg/tg.c
-	emcc -O3  -I./ -Ivendor/sqlite -Ivendor/tg $(CFLAGS) -DSQLITE_CORE -c examples/wasm/wasm.c -o $(prefix)/wasm.wasm.o
-	emcc -O3  -I./ -Ivendor/sqlite -Ivendor/tg $(CFLAGS) -DSQLITE_CORE -c sqlite-tg.c -o $(prefix)/sqlite-tg.wasm.o
-	emcc -O3  -I./ -Ivendor/sqlite -Ivendor/tg $(CFLAGS) -DSQLITE_CORE -c vendor/tg/tg.c  -o $(prefix)/tg.wasm.o
-	emar rcs $@ $(prefix)/tg.wasm.o $(prefix)/wasm.wasm.o $(prefix)/sqlite-tg.wasm.o
+$(TARGET_WASM_LIB): examples/wasm/wasm.c sqlite-tg.c $(BUILD_DIR) $(WASM_DIR)
+	emcc -O3  -I./ -Ivendor/sqlite -DSQLITE_CORE -c examples/wasm/wasm.c -o $(BUILD_DIR)/wasm.wasm.o
+	emcc -O3  -I./ -Ivendor/sqlite -Ivendor/tg -DSQLITE_CORE -c sqlite-tg.c vendor/tg.c -o $(BUILD_DIR)/sqlite-tg.wasm.o
+	emar rcs $@ $(BUILD_DIR)/wasm.wasm.o $(BUILD_DIR)/sqlite-vec.wasm.o
 
 $(SQLITE_WASM_COMPILED_MJS) $(SQLITE_WASM_COMPILED_WASM): $(SQLITE_WASM_COMPILED_SQLITE3C) $(TARGET_WASM_LIB)
-	(cd $(prefix)/sqlite-src-$(SQLITE_WASM_VERSION)/ext/wasm && \
-		make sqlite3_wasm_extra_init.c=../../../libsqlite_tg.wasm.a "emcc.flags=-s EXTRA_EXPORTED_RUNTIME_METHODS=['ENV'] -s FETCH")
+	(cd $(BUILD_DIR)/sqlite-src-$(SQLITE_WASM_VERSION)/ext/wasm && \
+		make sqlite3_wasm_extra_init.c=../../../../.wasm/libsqlite_vec.wasm.a jswasm/sqlite3.mjs jswasm/sqlite3.wasm \
+	)
 
 $(TARGET_WASM_MJS): $(SQLITE_WASM_COMPILED_MJS)
 	cp $< $@
@@ -151,28 +160,3 @@ $(TARGET_WASM_WASM): $(SQLITE_WASM_COMPILED_WASM)
 wasm: $(TARGET_WASM)
 
 # ███████████████████████████████   END WASM   ███████████████████████████████
-
-
-# ███████████████████████████████ SITE SECTION ███████████████████████████████
-
-WASM_TOOLKIT_NPM_TGZ=$(prefix)/sqlite-wasm-toolkit-npm.tgz
-
-TARGET_SITE_DIR=$(prefix)/site
-TARGET_SITE=$(prefix)/site/index.html
-
-$(WASM_TOOLKIT_NPM_TGZ):
-	curl -o $@ -q https://registry.npmjs.org/@alex.garcia/sqlite-wasm-toolkit/-/sqlite-wasm-toolkit-0.0.1-alpha.7.tgz
-
-$(TARGET_SITE_DIR)/slim.js $(TARGET_SITE_DIR)/slim.css: $(WASM_TOOLKIT_NPM_TGZ)
-	tar -xvzf $< -C $(TARGET_SITE_DIR) --strip-components=2 package/dist/slim.js package/dist/slim.css
-
-
-$(TARGET_SITE_DIR):
-	mkdir -p $(TARGET_SITE_DIR)
-
-$(TARGET_SITE): site/index.html $(TARGET_SITE_DIR) $(TARGET_WASM_MJS) $(TARGET_WASM_WASM) $(TARGET_SITE_DIR)/slim.js $(TARGET_SITE_DIR)/slim.css
-	cp $(TARGET_WASM_MJS) $(TARGET_SITE_DIR)
-	cp $(TARGET_WASM_WASM) $(TARGET_SITE_DIR)
-	cp $< $@
-site: $(TARGET_SITE)
-# ███████████████████████████████   END SITE   ███████████████████████████████

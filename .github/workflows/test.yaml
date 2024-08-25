@@ -46,3 +46,17 @@ jobs:
         with:
           name: sqlite-tg-windows-x86_64-extension
           path: dist/*
+  build-wasm32-emscripten:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v12
+        with:
+          version: "latest"
+      - run: ./scripts/vendor.sh
+      - run: make sqlite-tg.h
+      - run: make wasm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-tg-wasm32-emscripten
+          path: dist/*
