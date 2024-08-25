@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - run: make loadable
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: sqlite-tg-linux-x86_64-extension
           path: dist/*
@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - run: make loadable
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: sqlite-tg-macos-x86_64-extension
           path: dist/*
@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - run: make loadable
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: sqlite-tg-macos-aarch64-extension
           path: dist/*
@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - run: make loadable
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: sqlite-tg-windows-x86_64-extension
           path: dist/*
