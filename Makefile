@@ -51,6 +51,12 @@ loadable: $(TARGET_LOADABLE)
 static: $(TARGET_STATIC)
 test-memory: $(TARGET_TEST_MEMORY)
 
+BUILD_DIR=$(prefix)/.build
+
+$(BUILD_DIR): $(prefix)
+	mkdir -p $@
+
+
 $(TARGET_LOADABLE): sqlite-tg.c sqlite-tg.h vendor/tg/tg.c $(prefix)
 	gcc -fPIC -shared \
 	-Ivendor/sqlite -Ivendor/tg \
