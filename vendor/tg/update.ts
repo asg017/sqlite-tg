@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-write=tg.c,tg.h --allow-net=/api.github.com,raw.githubusercontent.com
+#!/usr/bin/env -S deno run --allow-write=tg.c,tg.h --allow-net=api.github.com,raw.githubusercontent.com
 
 /**
  *  An script to retrieve the specified version of the tg amalgamation.
@@ -26,7 +26,7 @@ const commit = await fetch(
 ).then((r) => r.json());
 
 const SHA = commit.sha;
-const DATE = commit.commit.author.date;
+const DATE = commit.author.date;
 
 const tgCUrl = `https://raw.githubusercontent.com/tidwall/tg/${SHA}/tg.c`;
 const tgHUrl = `https://raw.githubusercontent.com/tidwall/tg/${SHA}/tg.h`;
