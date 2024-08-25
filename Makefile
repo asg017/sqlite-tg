@@ -132,7 +132,7 @@ SQLITE_WASM_COMPILED_SQLITE3C=$(BUILD_DIR)/sqlite-src-$(SQLITE_WASM_VERSION)/sql
 SQLITE_WASM_COMPILED_MJS=$(BUILD_DIR)/sqlite-src-$(SQLITE_WASM_VERSION)/ext/wasm/jswasm/sqlite3.mjs
 SQLITE_WASM_COMPILED_WASM=$(BUILD_DIR)/sqlite-src-$(SQLITE_WASM_VERSION)/ext/wasm/jswasm/sqlite3.wasm
 
-TARGET_WASM_LIB=$(WASM_DIR)/libsqlite_vec.wasm.a
+TARGET_WASM_LIB=$(WASM_DIR)/libsqlite_tg.wasm.a
 TARGET_WASM_MJS=$(WASM_DIR)/sqlite3.mjs
 TARGET_WASM_WASM=$(WASM_DIR)/sqlite3.wasm
 TARGET_WASM=$(TARGET_WASM_MJS) $(TARGET_WASM_WASM)
@@ -149,12 +149,13 @@ $(SQLITE_WASM_COMPILED_SQLITE3C): $(SQLITE_WASM_SRCZIP) $(BUILD_DIR)
 
 $(TARGET_WASM_LIB): examples/wasm/wasm.c sqlite-tg.c $(BUILD_DIR) $(WASM_DIR)
 	emcc -O3  -I./ -Ivendor/sqlite -DSQLITE_CORE -c examples/wasm/wasm.c -o $(BUILD_DIR)/wasm.wasm.o
-	emcc -O3  -I./ -Ivendor/sqlite -Ivendor/tg -DSQLITE_CORE -c sqlite-tg.c vendor/tg/tg.c -o $(BUILD_DIR)/sqlite-tg.wasm.o
-	emar rcs $@ $(BUILD_DIR)/wasm.wasm.o $(BUILD_DIR)/sqlite-vec.wasm.o
+	emcc -O3  -I./ -Ivendor/tg -c vendor/tg/tg.c -o $(BUILD_DIR)/tg.wasm.o
+	emcc -O3  -I./ -Ivendor/sqlite -Ivendor/tg -DSQLITE_CORE -c sqlite-tg.c -o $(BUILD_DIR)/sqlite-tg.wasm.o
+	emar rcs $@ $(BUILD_DIR)/wasm.wasm.o $(BUILD_DIR)/sqlite-tg.wasm.o $(BUILD_DIR)/tg.wasm.o
 
 $(SQLITE_WASM_COMPILED_MJS) $(SQLITE_WASM_COMPILED_WASM): $(SQLITE_WASM_COMPILED_SQLITE3C) $(TARGET_WASM_LIB)
 	(cd $(BUILD_DIR)/sqlite-src-$(SQLITE_WASM_VERSION)/ext/wasm && \
-		make sqlite3_wasm_extra_init.c=../../../../.wasm/libsqlite_vec.wasm.a jswasm/sqlite3.mjs jswasm/sqlite3.wasm \
+		make sqlite3_wasm_extra_init.c=../../../../.wasm/libsqlite_tg.wasm.a jswasm/sqlite3.mjs jswasm/sqlite3.wasm \
 	)
 
 $(TARGET_WASM_MJS): $(SQLITE_WASM_COMPILED_MJS)
