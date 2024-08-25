@@ -87,6 +87,12 @@ MODULES = [
 ]
 
 SUPPORTS_SUBTYPE = sqlite3.version_info[1] > 38
+SUPPORTS_RTREE = (
+    sqlite3.connect(":memory:")
+    .execute("select name from pragma_module_list where name = 'rtreex';")
+    .fetchone()
+    is None
+)
 
 LINE_A = shapely.from_wkt("LINESTRING (0 0, 1 1)")
 LINE_B = shapely.from_wkt("LINESTRING (1 1, 2 2)")
@@ -473,6 +479,7 @@ tg_demo1 = [
 # fmt: on
 
 
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
 def test_tg0(snapshot):
     db.execute("create virtual table tg_demo1 using tg0();")
     assert execute_all(
@@ -585,6 +592,7 @@ def test_tg0(snapshot):
     assert execute_all(db, "select name from sqlite_master where name like 'tg%'") == []
 
 
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
 def test_tg0_with_aux():
     db.execute("create virtual table tg_demo2 using tg0(a,b,c);")
     db.execute(
