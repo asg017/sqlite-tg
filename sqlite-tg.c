@@ -2,13 +2,13 @@
 
 SQLITE_EXTENSION_INIT1
 
+#include "tg.h"
 #include "sqlite-tg.h"
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <tg.h>
 
 // https://github.com/sqlite/sqlite/blob/2d3c5385bf168c85875c010bbaa79c6712eab214/src/json.c#L125-L126
 #define JSON_SUBTYPE 74
@@ -21,37 +21,46 @@ static const char *TG_GEOM_POINTER_NAME = "tg0-tg_geom";
   "invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON "  \
   "(as text)."
 
-static struct tg_geom *geomValue(sqlite3_value *value, int *needsFree,
-                                 int *invalid) {
-  int n = sqlite3_value_bytes(value);
-  (*invalid) = 0;
-  (*needsFree) = 1;
+
+int geomValue(sqlite3_value *value, struct tg_geom ** out_geom, char ** errmsg) {
+  struct tg_geom * g;
   switch (sqlite3_value_type(value)) {
   case SQLITE_BLOB: {
-    return tg_parse_wkb_ix(sqlite3_value_blob(value), n, TG_NONE);
+    const void * b = sqlite3_value_blob(value);
+    int n = sqlite3_value_bytes(value);
+    g = tg_parse_wkb_ix(b, n, TG_NONE);
+    break;
   }
   case SQLITE_TEXT: {
     const char *text = (const char *)sqlite3_value_text(value);
-    if (sqlite3_value_subtype(value) == JSON_SUBTYPE ||
-        // JSON is many SQL queries don't have a subtype,
-        // so to distinguish between WKT/geojson, see if it
-        // starts with "{", which almost always is geojson
-        (n > 0 && text[0] == '{')) {
-      return tg_parse_geojsonn_ix(text, n, TG_NONE);
+    int n = sqlite3_value_bytes(value);
+    if (sqlite3_value_subtype(value) == JSON_SUBTYPE || (n > 0 && text[0] == '{')) {
+      g =  tg_parse_geojsonn_ix(text, n, TG_NONE);
     } else {
-      return tg_parse_wktn_ix(text, n, TG_NONE);
+      g = tg_parse_wktn_ix(text, n, TG_NONE);
     }
+    break;
   }
   case SQLITE_NULL: {
     void *p = sqlite3_value_pointer(value, TG_GEOM_POINTER_NAME);
     if (p) {
-      (*needsFree) = 0;
-      return (struct tg_geom *)p;
+      g = tg_geom_clone((struct tg_geom *) p);
+      break;
     }
+    *errmsg = sqlite3_mprintf("%s", INVALID_GEO_INPUT);
+    return SQLITE_ERROR;
   }
+  default:
+    *errmsg = sqlite3_mprintf("%s", INVALID_GEO_INPUT);
+    return SQLITE_ERROR;
   }
-  (*invalid) = 1;
-  return NULL;
+  if(tg_geom_error(g)) {
+    *errmsg = sqlite3_mprintf("%s", tg_geom_error(g));
+    tg_geom_free(g);
+    return SQLITE_ERROR;
+  }
+  *out_geom = g;
+  return SQLITE_OK;
 }
 
 #pragma endregion
@@ -117,53 +126,46 @@ static void tg_debug(sqlite3_context *context, int argc, sqlite3_value **arg) {
 
 static void tg_to_wkt(sqlite3_context *context, int argc,
                       sqlite3_value **argv) {
-  int needsFree, invalid;
-  struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if (invalid) {
-    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if(rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
     return;
   }
-  if (tg_geom_error(geom)) {
-    sqlite3_result_error(context, tg_geom_error(geom), -1);
-  } else {
-    resultGeomWkt(context, geom);
-  }
-  if (needsFree)
-    tg_geom_free(geom);
+  resultGeomWkt(context, geom);
+  tg_geom_free(geom);
 }
 
 static void tg_to_wkb(sqlite3_context *context, int argc,
                       sqlite3_value **argv) {
-  int needsFree, invalid;
-  struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if (invalid) {
-    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
     return;
   }
-  if (tg_geom_error(geom)) {
-    sqlite3_result_error(context, tg_geom_error(geom), -1);
-  } else {
-    resultGeomWkb(context, geom);
-  }
-  if (needsFree)
-    tg_geom_free(geom);
+
+  resultGeomWkb(context, geom);
+  tg_geom_free(geom);
 }
 
 static void tg_to_geojson(sqlite3_context *context, int argc,
                           sqlite3_value **argv) {
-  int needsFree, invalid;
-  struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if (invalid) {
-    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
     return;
   }
-  if (tg_geom_error(geom)) {
-    sqlite3_result_error(context, tg_geom_error(geom), -1);
-  } else {
-    resultGeomGeojson(context, geom);
-  }
-  if (needsFree)
-    tg_geom_free(geom);
+
+  resultGeomGeojson(context, geom);
+  tg_geom_free(geom);
 }
 
 #pragma endregion
@@ -175,38 +177,31 @@ typedef bool (*GeomPredicateFunc)(const struct tg_geom *a,
 
 static void tg_predicate_impl(sqlite3_context *context, int argc,
                               sqlite3_value **argv) {
-  int needsFreeA = 0;
-  int needsFreeB = 0;
-  int invalid;
-  struct tg_geom *a = geomValue(argv[0], &needsFreeA, &invalid);
-  if (invalid) {
-    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
-    return;
-  }
-  if (tg_geom_error(a)) {
-    sqlite3_result_error(context, tg_geom_error(a), -1);
-    if (needsFreeA)
-      tg_geom_free(a);
-    return;
-  }
-  struct tg_geom *b = geomValue(argv[1], &needsFreeB, &invalid);
-  if (invalid) {
-    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
-    if (needsFreeA)
-      tg_geom_free(a);
-    return;
-  }
-  if (tg_geom_error(b)) {
-    sqlite3_result_error(context, tg_geom_error(b), -1);
-  } else {
-    GeomPredicateFunc func = sqlite3_user_data(context);
-    sqlite3_result_int(context, func(a, b));
+  struct tg_geom *a = NULL;
+  struct tg_geom *b = NULL;
+  char * errmsg;
+  int rc;
+
+  rc = geomValue(argv[0], &a, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    goto cleanup;
   }
 
-  if (needsFreeA)
-    tg_geom_free(a);
-  if (needsFreeB)
-    tg_geom_free(b);
+  rc = geomValue(argv[1], &b, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    goto cleanup;
+  }
+
+  GeomPredicateFunc func = sqlite3_user_data(context);
+  sqlite3_result_int(context, func(a, b));
+
+  cleanup:
+  tg_geom_free(a);
+  tg_geom_free(b);
 }
 
 #pragma endregion
@@ -216,8 +211,8 @@ static void tg_predicate_impl(sqlite3_context *context, int argc,
 static void tg_valid_geojson(sqlite3_context *context, int argc,
                              sqlite3_value **argv) {
   // TODO it's text/blob?
-  int n = sqlite3_value_bytes(argv[0]);
   const char *s = (const char *)sqlite3_value_text(argv[0]);
+  int n = sqlite3_value_bytes(argv[0]);
   struct tg_geom *geom = tg_parse_geojsonn_ix(s, n, TG_NONE);
   if (tg_geom_error(geom)) {
     sqlite3_result_int(context, 0);
@@ -229,8 +224,8 @@ static void tg_valid_geojson(sqlite3_context *context, int argc,
 static void tg_valid_wkt(sqlite3_context *context, int argc,
                          sqlite3_value **argv) {
   // TODO it's text/blob?
-  int n = sqlite3_value_bytes(argv[0]);
   const char *s = (const char *)sqlite3_value_text(argv[0]);
+  int n = sqlite3_value_bytes(argv[0]);
   struct tg_geom *geom = tg_parse_wktn_ix(s, n, TG_NONE);
   if (tg_geom_error(geom)) {
     sqlite3_result_int(context, 0);
@@ -242,8 +237,8 @@ static void tg_valid_wkt(sqlite3_context *context, int argc,
 static void tg_valid_wkb(sqlite3_context *context, int argc,
                          sqlite3_value **argv) {
   // TODO ensure blob?
-  int n = sqlite3_value_bytes(argv[0]);
   const void *b = sqlite3_value_blob(argv[0]);
+  int n = sqlite3_value_bytes(argv[0]);
   struct tg_geom *geom = tg_parse_wkb_ix(b, n, TG_NONE);
   if (tg_geom_error(geom)) {
     sqlite3_result_int(context, 0);
@@ -309,48 +304,42 @@ static void tg_geom(sqlite3_context *context, int argc, sqlite3_value **argv) {
                          (void (*)(void *))tg_geom_free);
 }
 static void tg_type(sqlite3_context *context, int argc, sqlite3_value **argv) {
-  int needsFree = 0;
-  int invalid;
-  struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if (invalid) {
-    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
     return;
   }
-  if (tg_geom_error(geom)) {
-    sqlite3_result_error(context, tg_geom_error(geom), -1);
-  } else {
+
     sqlite3_result_text(context, tg_geom_type_string(tg_geom_typeof(geom)), -1,
                         SQLITE_STATIC);
-  }
 
-  if (needsFree)
-    tg_geom_free(geom);
+  tg_geom_free(geom);
 }
 
 static void tg_extra_json(sqlite3_context *context, int argc,
                           sqlite3_value **argv) {
-  int needsFree = 0;
-  int invalid;
-  struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if (invalid) {
-    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
     return;
   }
-  if (tg_geom_error(geom)) {
-    sqlite3_result_error(context, tg_geom_error(geom), -1);
+
+  const char *result = tg_geom_extra_json(geom);
+  if (result) {
+    // TODO what if null character in json?
+    sqlite3_result_text(context, result, -1, SQLITE_TRANSIENT);
+    sqlite3_result_subtype(context, JSON_SUBTYPE);
   } else {
-    const char *result = tg_geom_extra_json(geom);
-    if (result) {
-      // TODO what if null character in json?
-      sqlite3_result_text(context, result, -1, SQLITE_TRANSIENT);
-      sqlite3_result_subtype(context, JSON_SUBTYPE);
-    } else {
-      sqlite3_result_null(context);
-    }
+    sqlite3_result_null(context);
   }
 
-  if (needsFree)
-    tg_geom_free(geom);
+  tg_geom_free(geom);
 }
 #pragma endregion
 
@@ -401,35 +390,26 @@ static void tg_multipoint(sqlite3_context *context, int argc,
   memset(points, 0, argc * sizeof(struct tg_point));
 
   for (int i = 0; i < argc; i++) {
-    int needsFree;
-    int invalid;
-    struct tg_geom *geom = geomValue(argv[i], &needsFree, &invalid);
-    if (invalid) {
-      sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
-      sqlite3_free(points);
-      return;
-    }
-    if (tg_geom_error(geom)) {
+    struct tg_geom *geom;
+    char * errmsg;
+    int rc = geomValue(argv[i], &geom, &errmsg);
+    if (rc != SQLITE_OK) {
       const char *zErr = sqlite3_mprintf(
-          "argument to tg_multipoint() at index %i is an invalid geometry", i);
+          "argument to tg_multipoint() at index %i is an invalid geometry: %z",
+          i, errmsg);
       sqlite3_result_error(context, zErr, -1);
       sqlite3_free((void *)zErr);
-
-      if (needsFree) {
-        tg_geom_free(geom);
-      }
       sqlite3_free(points);
       return;
     }
+
     if (tg_geom_typeof(geom) != TG_POINT) {
       const char *zErr = sqlite3_mprintf(
           "argument to tg_multipoint() at index %i expected a point, found %s",
           i, tg_geom_type_string(tg_geom_typeof(geom)));
       sqlite3_result_error(context, zErr, -1);
       sqlite3_free((void *)zErr);
-      if (needsFree) {
-        tg_geom_free(geom);
-      }
+      tg_geom_free(geom);
       sqlite3_free(points);
       return;
     }
@@ -437,9 +417,7 @@ static void tg_multipoint(sqlite3_context *context, int argc,
     struct tg_point *dest = &points[i];
     dest->x = src.x;
     dest->y = src.y;
-    if (needsFree) {
-      tg_geom_free(geom);
-    }
+    tg_geom_free(geom);
   }
   struct tg_geom *geom = tg_geom_new_multipoint(points, argc);
   if (!geom) {
@@ -482,16 +460,15 @@ static void tg_multipoint_step(sqlite3_context *context, int argc,
 
   int needsFree;
   int invalid;
-  struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if (invalid) {
-    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
     return;
   }
-  if (tg_geom_error(geom)) {
-    sqlite3_result_error(context, tg_geom_error(geom), -1);
-    tg_geom_free(geom);
-    return;
-  }
+
   if (tg_geom_typeof(geom) != TG_POINT) {
     sqlite3_result_error(
         context, "parameters to tg_group_multipoint() must be Point gemetries",
@@ -560,28 +537,17 @@ static void tg_group_geometrycollection_step(sqlite3_context *context, int argc,
     pContext->array = a;
   }
 
-  int needsFree;
-  int invalid;
-  struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if (invalid) {
-    sqlite3_result_error(context, INVALID_GEO_INPUT, -1);
-    return;
-  }
-  if (tg_geom_error(geom)) {
-    sqlite3_result_error(context, tg_geom_error(geom), -1);
-    tg_geom_free(geom);
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
     return;
   }
 
-  if (needsFree) {
-    // printf("adding i=%d geom=%p\n", pContext->length, geom);
-    pContext->array[pContext->length++] = tg_geom_copy(geom);
-    tg_geom_free(geom);
-  } else {
-    // struct tg_geom * t = tg_geom_clone(geom);
-    // printf("adding i=%d geom=%p (clone)\n", pContext->length, t);
-    pContext->array[pContext->length++] = tg_geom_copy(geom);
-  }
+  pContext->array[pContext->length++] = tg_geom_copy(geom);
+  tg_geom_free(geom);
 }
 
 static void tg_group_geometrycollection_final(sqlite3_context *context) {
@@ -614,8 +580,6 @@ static void tg_group_geometrycollection_final(sqlite3_context *context) {
 struct control {
   // resulting column name in the table function
   char *name;
-  // extract a target value from a single input sqlite3_value (in xFilter)
-  void *(*xValue)(sqlite3_value *value, int *needsFree, int *invalid);
   // free the target
   void (*xFree)(void *p);
   // determine if the table function has completed
@@ -625,10 +589,6 @@ struct control {
 };
 
 #pragma region tg_points_each
-void *pointsEachValue(sqlite3_value *value, int *needsFree, int *invalid) {
-  struct tg_geom *geom = geomValue(value, needsFree, invalid);
-  return (void *)geom;
-}
 int pointsEachEof(void *p, sqlite3_int64 iRowid) {
   return iRowid >= tg_geom_num_points((struct tg_geom *)p);
 }
@@ -643,10 +603,6 @@ void pointsEachFree(void *p) { tg_geom_free((struct tg_geom *)p); }
 #pragma endregion
 
 #pragma region tg_lines_each
-void *linesEachValue(sqlite3_value *value, int *needsFree, int *invalid) {
-  struct tg_geom *geom = geomValue(value, needsFree, invalid);
-  return (void *)geom;
-}
 int linesEachEof(void *p, sqlite3_int64 iRowid) {
   return iRowid >= tg_geom_num_lines((struct tg_geom *)p);
 }
@@ -659,10 +615,6 @@ void linesEachFree(void *p) { tg_geom_free((struct tg_geom *)p); }
 #pragma endregion
 
 #pragma region tg_geometries_each
-void *geometriesEachValue(sqlite3_value *value, int *needsFree, int *invalid) {
-  struct tg_geom *geom = geomValue(value, needsFree, invalid);
-  return (void *)geom;
-}
 int geometriesEachEof(void *p, sqlite3_int64 iRowid) {
   return iRowid >= tg_geom_num_geometries((struct tg_geom *)p);
 }
@@ -676,10 +628,6 @@ void geometriesEachFree(void *p) { tg_geom_free((struct tg_geom *)p); }
 #pragma endregion
 
 #pragma region tg_polygons_each
-void *polygonsEachValue(sqlite3_value *value, int *needsFree, int *invalid) {
-  struct tg_geom *geom = geomValue(value, needsFree, invalid);
-  return (void *)geom;
-}
 int polygonsEachEof(void *p, sqlite3_int64 iRowid) {
   return iRowid >= tg_geom_num_polys((struct tg_geom *)p);
 }
@@ -707,7 +655,6 @@ struct template_each_cursor {
   sqlite3_vtab_cursor base;
   sqlite3_int64 iRowid;
   void *target;
-  int targetNeedsFree;
 };
 
 static int template_eachConnect(sqlite3 *db, void *pAux, int argc,
@@ -752,9 +699,10 @@ static int template_eachOpen(sqlite3_vtab *p, sqlite3_vtab_cursor **ppCursor) {
 
 static int template_eachClose(sqlite3_vtab_cursor *cur) {
   template_each_cursor *pCur = (template_each_cursor *)cur;
-  if (pCur->target && pCur->targetNeedsFree) {
+  if (pCur->target) {
     struct control *pControl = ((template_each_vtab *)cur->pVtab)->pControl;
     pControl->xFree(pCur->target);
+    pCur->target = NULL;
   }
   sqlite3_free(pCur);
   return SQLITE_OK;
@@ -794,26 +742,20 @@ static int template_eachFilter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
   pCur->iRowid = 0;
   struct control *pControl =
       ((template_each_vtab *)pVtabCursor->pVtab)->pControl;
-  if (pCur->target && pCur->targetNeedsFree) {
+  if (pCur->target) {
     pControl->xFree(pCur->target);
-    pCur->targetNeedsFree = 0;
     pCur->target = 0;
   }
-  int invalid;
-  pCur->target = pControl->xValue(argv[0], &pCur->targetNeedsFree, &invalid);
-  if (invalid) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
     sqlite3_free(pVtabCursor->pVtab->zErrMsg);
-    pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("%s", INVALID_GEO_INPUT);
+    pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("%s", errmsg);
+    sqlite3_free(errmsg);
     return SQLITE_ERROR;
   }
-  // TODO need to generalize it if line/ring support?
-  if (tg_geom_error(pCur->target)) {
-    sqlite3_free(pVtabCursor->pVtab->zErrMsg);
-    pVtabCursor->pVtab->zErrMsg =
-        sqlite3_mprintf("%s", tg_geom_error(pCur->target));
-    // No need to free pCur->target here, the xClose method will do taht
-    return SQLITE_ERROR;
-  }
+  pCur->target = geom;
   return SQLITE_OK;
 }
 
@@ -964,23 +906,17 @@ static int tg_bboxFilter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
                          const char *idxStr, int argc, sqlite3_value **argv) {
   tg_bbox_cursor *pCur = (tg_bbox_cursor *)pVtabCursor;
   pCur->iRowid = 0;
-  int needsFree, invalid;
-  struct tg_geom *geom = geomValue(argv[0], &needsFree, &invalid);
-  if (invalid) {
-    pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("%s", INVALID_GEO_INPUT);
-    return SQLITE_ERROR;
-  }
-  if (tg_geom_error(geom)) {
-    sqlite3_free(pVtabCursor->pVtab->zErrMsg);
-    pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("%s", tg_geom_error(geom));
-    tg_geom_free(geom);
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("%s", errmsg);
+    sqlite3_free(errmsg);
     return SQLITE_ERROR;
   }
 
   pCur->rect = tg_geom_rect(geom);
-
-  if (needsFree)
-    tg_geom_free(geom);
+  tg_geom_free(geom);
   return SQLITE_OK;
 }
 
@@ -1105,7 +1041,6 @@ struct tg0_cursor {
   enum TG0_PLAN plan;
   // the "query geometry" in predicate-style queries.
   struct tg_geom *queryGeom;
-  int queryGeomNeedsFree;
 };
 
 void vtab_set_error(sqlite3_vtab *pVTab, const char *zFormat, ...) {
@@ -1249,9 +1184,8 @@ static int tg0Close(sqlite3_vtab_cursor *cur) {
   if (pCur->stmt) {
     sqlite3_finalize(pCur->stmt);
   }
-  if (pCur->queryGeomNeedsFree) {
-    tg_geom_free(pCur->queryGeom);
-  }
+  tg_geom_free(pCur->queryGeom);
+  pCur->queryGeom = NULL;
   sqlite3_free(pCur);
   return SQLITE_OK;
 }
@@ -1308,9 +1242,9 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
     sqlite3_finalize(pCur->stmt);
     pCur->stmt = 0;
   }
-  if (pCur->queryGeomNeedsFree) {
+  if (pCur->queryGeom) {
     tg_geom_free(pCur->queryGeom);
-    pCur->queryGeomNeedsFree = 0;
+    pCur->queryGeom = NULL;
   }
 
   if (strcmp(idxStr, "fullscan") == 0) {
@@ -1340,12 +1274,14 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
   } else if (strcmp(idxStr, "predicate") == 0) {
     switch (idxNum) {
     case TG0_FUNC_INTERSECTS: {
-      int invalid;
       pCur->plan = INTERSECT;
-      pCur->queryGeom = geomValue(argv[0], &pCur->queryGeomNeedsFree, &invalid);
-      if (invalid) {
+
+      char * errmsg;
+      int rc = geomValue(argv[0], &pCur->queryGeom, &errmsg);
+      if (rc != SQLITE_OK) {
         sqlite3_free(pVtabCursor->pVtab->zErrMsg);
-        pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("%s", INVALID_GEO_INPUT);
+        pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("%s", errmsg);
+        sqlite3_free(errmsg);
         return SQLITE_ERROR;
       }
       struct tg_rect rect = tg_geom_rect(pCur->queryGeom);
@@ -1368,7 +1304,7 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
         return SQLITE_NOMEM;
       }
 
-      int rc = sqlite3_prepare_v2(p->db, zSql, -1, &pCur->stmt, NULL);
+      rc = sqlite3_prepare_v2(p->db, zSql, -1, &pCur->stmt, NULL);
       sqlite3_free((void *)zSql);
 
       if (rc != SQLITE_OK) {
@@ -1436,28 +1372,23 @@ static int tg0Next(sqlite3_vtab_cursor *cur) {
     }
     case INTERSECT: {
 
-      int needsFree, invalid;
-      struct tg_geom *geom =
-          geomValue(sqlite3_column_value(pCur->stmt, 1), &needsFree, &invalid);
-      if (invalid) {
+      struct tg_geom *geom;
+      char * errmsg;
+      int rc = geomValue(sqlite3_column_value(pCur->stmt, 1), &geom, &errmsg);
+      if (rc != SQLITE_OK) {
         sqlite3_free(cur->pVtab->zErrMsg);
-        cur->pVtab->zErrMsg = sqlite3_mprintf("%s", INVALID_GEO_INPUT);
+        cur->pVtab->zErrMsg = sqlite3_mprintf("%s", errmsg);
+
+        sqlite3_free(errmsg);
         return SQLITE_ERROR;
       }
-      if (tg_geom_error(geom)) {
-        sqlite3_free(cur->pVtab->zErrMsg);
-        cur->pVtab->zErrMsg = sqlite3_mprintf("%s", tg_geom_error(geom));
-        tg_geom_free(geom);
-        return SQLITE_ERROR;
-      }
+
       if (tg_geom_intersects(geom, pCur->queryGeom)) {
         stop = 1;
       } else {
         stop = 0;
       }
-      if (needsFree) {
-        tg_geom_free(geom);
-      }
+      tg_geom_free(geom);
       break;
     }
     }
@@ -1515,19 +1446,13 @@ static int tg0Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
   else if (argc > 1 && sqlite3_value_type(argv[0]) == SQLITE_NULL) {
     // TODO assert argc == 3
 
-    int needsFree, invalid;
-    struct tg_geom *geom =
-        geomValue(argv[2 + TG0_COLUMN_SHAPE], &needsFree, &invalid);
-    if (invalid) {
+    struct tg_geom *geom;
+    char * errmsg;
+    int rc = geomValue(argv[2 + TG0_COLUMN_SHAPE], &geom, &errmsg);
+    if (rc != SQLITE_OK) {
       sqlite3_free(pVTab->zErrMsg);
-      pVTab->zErrMsg = sqlite3_mprintf("%s", INVALID_GEO_INPUT);
-      return SQLITE_ERROR;
-    }
-    if (tg_geom_error(geom)) {
-      sqlite3_free(pVTab->zErrMsg);
-      pVTab->zErrMsg = sqlite3_mprintf("%s", tg_geom_error(geom));
-      if (needsFree)
-        tg_geom_free(geom);
+      pVTab->zErrMsg = sqlite3_mprintf("%s", errmsg);
+      sqlite3_free(errmsg);
       return SQLITE_ERROR;
     }
     struct tg_rect rect = tg_geom_rect(geom);
@@ -1570,7 +1495,7 @@ static int tg0Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
       // TODO what needs to be freed here
       return SQLITE_NOMEM;
     }
-    int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+    rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
     sqlite3_free((void *)zSql);
 
     if (rc != SQLITE_OK) {
@@ -1578,8 +1503,7 @@ static int tg0Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
       pVTab->zErrMsg = sqlite3_mprintf(
           "tgoUpdate Error while preparing rtree insert statement:  %s",
           sqlite3_errmsg(p->db));
-      if (needsFree)
-        tg_geom_free(geom);
+      tg_geom_free(geom);
       return rc;
     }
 
@@ -1588,8 +1512,7 @@ static int tg0Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
     size_t size = tg_geom_wkb(geom, 0, 0);
     void *buffer = sqlite3_malloc(size + 1);
     if (buffer == 0) {
-      if (needsFree)
-        tg_geom_free(geom);
+      tg_geom_free(geom);
       return SQLITE_NOMEM;
     }
     tg_geom_wkb(geom, buffer, size + 1);
@@ -1612,14 +1535,12 @@ static int tg0Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
       sqlite3_free(pVTab->zErrMsg);
       pVTab->zErrMsg =
           sqlite3_mprintf("stepping not done? %s", sqlite3_errmsg(p->db));
-      if (needsFree)
-        tg_geom_free(geom);
+      tg_geom_free(geom);
       sqlite3_finalize(stmt);
       return SQLITE_ERROR;
     }
     sqlite3_finalize(stmt);
-    if (needsFree)
-      tg_geom_free(geom);
+    tg_geom_free(geom);
     return SQLITE_OK;
   }
   // some sort of UPDATE operation
@@ -1793,28 +1714,24 @@ __declspec(dllexport)
 
   static struct control pointsEach = {
       .name = "point",
-      .xValue = &pointsEachValue,
       .xEof = &pointsEachEof,
       .xResult = &pointsEachResult,
       .xFree = &pointsEachFree,
   };
   static struct control linesEach = {
       .name = "line",
-      .xValue = &linesEachValue,
       .xEof = &linesEachEof,
       .xResult = &linesEachResult,
       .xFree = &linesEachFree,
   };
   static struct control geometriesEach = {
       .name = "geometry",
-      .xValue = &geometriesEachValue,
       .xEof = &geometriesEachEof,
       .xResult = &geometriesEachResult,
       .xFree = &geometriesEachFree,
   };
   static struct control polygonsEach = {
       .name = "polygon",
-      .xValue = &polygonsEachValue,
       .xEof = &polygonsEachEof,
       .xResult = &polygonsEachResult,
       .xFree = &polygonsEachFree,
