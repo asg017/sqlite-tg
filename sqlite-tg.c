@@ -458,8 +458,6 @@ static void tg_multipoint_step(sqlite3_context *context, int argc,
     pContext->array = a;
   }
 
-  int needsFree;
-  int invalid;
   struct tg_geom *geom;
   char * errmsg;
   int rc = geomValue(argv[0], &geom, &errmsg);
@@ -476,14 +474,13 @@ static void tg_multipoint_step(sqlite3_context *context, int argc,
     tg_geom_free(geom);
     return;
   }
+
   struct tg_point src = tg_geom_point(geom);
   struct tg_point *dest = &pContext->array[pContext->length++];
   dest->x = src.x;
   dest->y = src.y;
 
-  if (needsFree) {
-    tg_geom_free(geom);
-  }
+  tg_geom_free(geom);
 }
 
 static void tg_multipoint_final(sqlite3_context *context) {
