@@ -67,7 +67,9 @@ int geomValue(sqlite3_value *value, struct tg_geom ** out_geom, char ** errmsg) 
 
 #pragma region resulting
 
-static void destroy_geom(void *p) { tg_geom_free(p); }
+static void destroy_geom(void *p) {
+  tg_geom_free(p);
+}
 
 static void resultGeomPointer(sqlite3_context *context, struct tg_geom *geom) {
   sqlite3_result_pointer(context, geom, TG_GEOM_POINTER_NAME, destroy_geom);
@@ -428,39 +430,76 @@ static void tg_multipoint(sqlite3_context *context, int argc,
   sqlite3_free(points);
 }
 
-#pragma region tg_group_multipoint
-typedef struct MultiPointContext MultiPointContext;
-struct MultiPointContext {
-  unsigned capacity;
-  unsigned length;
-  struct tg_point *array;
+struct Array {
+  size_t element_size;
+  size_t length;
+  size_t capacity;
+  void *z;
 };
 
+int array_init(struct Array *array, size_t element_size, size_t init_capacity) {
+  int sz = element_size * init_capacity;
+  void *z = sqlite3_malloc(sz);
+  if (!z) {
+    return SQLITE_NOMEM;
+  }
+  memset(z, 0, sz);
+
+  array->element_size = element_size;
+  array->length = 0;
+  array->capacity = init_capacity;
+  array->z = z;
+  return SQLITE_OK;
+}
+
+int array_append(struct Array *array, const void *element) {
+  if (array->length == array->capacity) {
+    size_t new_capacity = array->capacity * 2 + 100;
+    void *z = sqlite3_realloc64(array->z, array->element_size * new_capacity);
+    if (z) {
+      array->capacity = new_capacity;
+      array->z = z;
+    } else {
+      return SQLITE_NOMEM;
+    }
+  }
+  memcpy(&((unsigned char *)array->z)[array->length * array->element_size],
+         element, array->element_size);
+  array->length++;
+  return SQLITE_OK;
+}
+
+void array_cleanup(struct Array *array) {
+  if (!array)
+    return;
+  array->element_size = 0;
+  array->length = 0;
+  array->capacity = 0;
+  sqlite3_free(array->z);
+  array->z = NULL;
+}
+
+#pragma region tg_group_multipoint
 static void tg_multipoint_step(sqlite3_context *context, int argc,
                                sqlite3_value *argv[]) {
 
-  MultiPointContext *pContext = (MultiPointContext *)sqlite3_aggregate_context(
-      context, sizeof(MultiPointContext));
-  if (!pContext) {
+  int rc;
+  struct Array *array;
+  array = (struct Array *)sqlite3_aggregate_context(context, sizeof(*array));
+  if (!array) {
     return;
   }
-  if (pContext->length >= pContext->capacity) {
-    unsigned newCapacity = pContext->capacity * 2 + 250;
-    struct tg_point *a = sqlite3_realloc64(
-        pContext->array, sizeof(struct tg_point) * newCapacity);
-    if (a == 0) {
-      sqlite3_free(pContext->array);
-      memset(pContext, 0, sizeof(*pContext));
+  if(!array->z) {
+    rc = array_init(array, sizeof(struct tg_point), 128);
+    if(rc!=SQLITE_OK) {
       sqlite3_result_error_nomem(context);
       return;
     }
-    pContext->capacity = newCapacity;
-    pContext->array = a;
   }
 
   struct tg_geom *geom;
   char * errmsg;
-  int rc = geomValue(argv[0], &geom, &errmsg);
+  rc = geomValue(argv[0], &geom, &errmsg);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, errmsg, -1);
     sqlite3_free(errmsg);
@@ -476,99 +515,81 @@ static void tg_multipoint_step(sqlite3_context *context, int argc,
   }
 
   struct tg_point src = tg_geom_point(geom);
-  struct tg_point *dest = &pContext->array[pContext->length++];
-  dest->x = src.x;
-  dest->y = src.y;
-
+  array_append(array, &src);
   tg_geom_free(geom);
 }
 
 static void tg_multipoint_final(sqlite3_context *context) {
-  MultiPointContext *p;
-  p = (MultiPointContext *)sqlite3_aggregate_context(context, 0);
-  if (p == 0)
+  struct Array *a;
+  a = (struct Array *)sqlite3_aggregate_context(context, sizeof(*a));
+  if (a == 0)
     return;
-  if (p->array == 0)
+  if (a->z == 0)
     return;
-  if (p->length) {
-    struct tg_geom *geom = tg_geom_new_multipoint(p->array, p->length);
+  if (a->length) {
+    struct tg_geom *geom = tg_geom_new_multipoint((struct tg_point *) a->z, a->length);
     if (!geom) {
       sqlite3_result_error_nomem(context);
     } else {
       resultGeomPointer(context, geom);
     }
   }
-  sqlite3_free(p->array);
-  memset(p, 0, sizeof(*p));
+  array_cleanup(a);
 }
-#pragma endregion
+static void tg_geometry_collection_step(sqlite3_context *context, int argc,
+                               sqlite3_value *argv[]) {
 
-#pragma region tg_group_geometrycollection
-typedef struct GeometryCollectionContext GeometryCollectionContext;
-struct GeometryCollectionContext {
-  unsigned capacity;
-  unsigned length;
-  struct tg_geom **array;
-};
-
-static void tg_group_geometrycollection_step(sqlite3_context *context, int argc,
-                                             sqlite3_value *argv[]) {
-
-  GeometryCollectionContext *pContext =
-      (GeometryCollectionContext *)sqlite3_aggregate_context(
-          context, sizeof(GeometryCollectionContext));
-  if (!pContext) {
+  int rc;
+  struct Array *array;
+  array = (struct Array *)sqlite3_aggregate_context(context, sizeof(*array));
+  if (!array) {
     return;
   }
-  if (pContext->length >= pContext->capacity) {
-    unsigned newCapacity = pContext->capacity * 2 + 250;
-    struct tg_geom **a = sqlite3_realloc64(
-        pContext->array, sizeof(struct tg_geom *) * newCapacity);
-    if (a == 0) {
-      sqlite3_free(pContext->array);
-      memset(pContext, 0, sizeof(*pContext));
+  if(!array->z) {
+    rc = array_init(array, sizeof(struct tg_geom*), 128);
+    if(rc!=SQLITE_OK) {
       sqlite3_result_error_nomem(context);
       return;
     }
-    pContext->capacity = newCapacity;
-    pContext->array = a;
   }
 
   struct tg_geom *geom;
   char * errmsg;
-  int rc = geomValue(argv[0], &geom, &errmsg);
+  rc = geomValue(argv[0], &geom, &errmsg);
   if (rc != SQLITE_OK) {
     sqlite3_result_error(context, errmsg, -1);
     sqlite3_free(errmsg);
     return;
   }
 
-  pContext->array[pContext->length++] = tg_geom_copy(geom);
+  struct tg_geom *x = tg_geom_clone(geom);
+  array_append(array, &x);
   tg_geom_free(geom);
 }
 
-static void tg_group_geometrycollection_final(sqlite3_context *context) {
-  GeometryCollectionContext *p;
-  p = (GeometryCollectionContext *)sqlite3_aggregate_context(context, 0);
-  if (p == 0)
+static void tg_geometry_collection_final(sqlite3_context *context) {
+  struct Array *a;
+  a = (struct Array *)sqlite3_aggregate_context(context, sizeof(*a));
+  if (a == 0)
     return;
-  if (p->array == 0)
+  if (a->z == 0)
     return;
-  if (p->length) {
-    struct tg_geom *geom = tg_geom_new_geometrycollection(p->array, p->length);
+  if (a->length) {
+    struct tg_geom *geom = tg_geom_new_geometrycollection( (const struct tg_geom *const*) a->z, a->length);
     if (!geom) {
       sqlite3_result_error_nomem(context);
     } else {
       resultGeomPointer(context, geom);
     }
   }
-  for (int i = 0; i < p->length; i++) {
-    tg_geom_free(p->array[i]);
+  for(int i = 0; i < a->length; i++) {
+    tg_geom_free( ( (struct tg_geom**) a->z)[i]);
   }
-  sqlite3_free(p->array);
-  memset(p, 0, sizeof(*p));
+  array_cleanup(a);
 }
+
 #pragma endregion
+
 
 #pragma endregion
 
@@ -1758,12 +1779,12 @@ __declspec(dllexport)
   rc = sqlite3_create_function(db, "tg_group_multipoint", 1,
                                SQLITE_UTF8 | SQLITE_INNOCUOUS, 0, 0,
                                tg_multipoint_step, tg_multipoint_final);
-  /*
-  rc = sqlite3_create_function(db, "tg_group_geometrycollection", 1,
+
+  rc = sqlite3_create_function(db, "tg_group_geometry_collection", 1,
                                SQLITE_UTF8 | SQLITE_INNOCUOUS, 0, 0,
-                               tg_group_geometrycollection_step,
-  tg_group_geometrycollection_final);
-  */
+                               tg_geometry_collection_step,
+  tg_geometry_collection_final);
+
   rc = sqlite3_create_module(db, "tg_bbox", &tg_bboxModule, NULL);
   if (rc != SQLITE_OK)
     return rc;
