@@ -567,14 +567,95 @@ static void tg_geometry_collection_step(sqlite3_context *context, int argc,
   tg_geom_free(geom);
 }
 
+
+struct feature_collection_context {
+  sqlite3_str * s;
+  int n;
+};
+static void tg_feature_collection_step(sqlite3_context *context, int argc,
+                               sqlite3_value *argv[]) {
+  int rc;
+  struct feature_collection_context *ctx;
+  ctx = sqlite3_aggregate_context(context, sizeof(*ctx));
+  if(!ctx) {
+    return;
+  }
+  if(!ctx->s) {
+    ctx->s = sqlite3_str_new(NULL);
+    if(!ctx->s) {
+      return;
+    }
+    sqlite3_str_appendall(ctx->s, "{\"type\":\"FeatureCollection\", \"features\": [");
+  }
+  if(ctx->n) {
+    sqlite3_str_appendchar(ctx->s, 1, ',');
+  }
+
+  struct tg_geom *geom;
+  char * errmsg;
+  rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  struct tg_geom *x = tg_geom_clone(geom);
+
+  size_t size = tg_geom_geojson(geom, NULL, 0);
+  void *buffer = sqlite3_malloc(size + 1);
+  if (buffer == 0) {
+    sqlite3_result_error_nomem(context);
+    return;
+  }
+  tg_geom_geojson(geom, buffer, size + 1);
+  sqlite3_str_appendf(ctx->s, "{\"type\": \"Feature\", \"geometry\": %.*s, ", size+1, buffer);
+  if(argc > 1 && sqlite3_value_subtype(argv[1]) == JSON_SUBTYPE) {
+    const char * s = sqlite3_value_text(argv[1]);
+    int n = sqlite3_value_bytes(argv[1]);
+    sqlite3_str_appendf(ctx->s, "\"properties\": %.*s", n, s);
+  } else {
+    sqlite3_str_appendall(ctx->s, "\"properties\": {}");
+  }
+  sqlite3_str_appendall(ctx->s, "}");
+  sqlite3_free(buffer);
+  ctx->n++;
+
+  tg_geom_free(geom);
+
+
+}
+
+static void tg_feature_collection_final(sqlite3_context *context) {
+  struct feature_collection_context *ctx;
+  ctx = sqlite3_aggregate_context(context, sizeof(*ctx));
+  if(!ctx) {
+    return;
+  }
+  if(!ctx->s) {
+    return;
+  }
+  sqlite3_str_appendall(ctx->s, "]}");
+  int n = sqlite3_str_length(ctx->s);
+  const char * z = sqlite3_str_finish(ctx->s);
+  sqlite3_result_text(context, z, n, sqlite3_free);
+  sqlite3_result_subtype(context, JSON_SUBTYPE);
+}
+
 static void tg_geometry_collection_final(sqlite3_context *context) {
   struct Array *a;
   a = (struct Array *)sqlite3_aggregate_context(context, sizeof(*a));
   if (a == 0)
     return;
-  if (a->z == 0)
-    return;
-  if (a->length) {
+  if (a->z == 0) {
+    struct tg_geom * g = tg_geom_new_geometrycollection_empty();
+    if(!g) {
+      sqlite3_result_error_nomem(context);
+    }else {
+      resultGeomPointer(context, g);
+    }
+  }
+  else if (a->length) {
     struct tg_geom *geom = tg_geom_new_geometrycollection( (const struct tg_geom *const*) a->z, a->length);
     if (!geom) {
       sqlite3_result_error_nomem(context);
@@ -1784,6 +1865,14 @@ __declspec(dllexport)
                                SQLITE_UTF8 | SQLITE_INNOCUOUS, 0, 0,
                                tg_geometry_collection_step,
   tg_geometry_collection_final);
+  rc = sqlite3_create_function(db, "tg_group_feature_collection_geojson", 1,
+                               SQLITE_UTF8 | SQLITE_INNOCUOUS, 0, 0,
+                               tg_feature_collection_step,
+  tg_feature_collection_final);
+  rc = sqlite3_create_function(db, "tg_group_feature_collection_geojson", 2,
+                               SQLITE_UTF8 | SQLITE_INNOCUOUS, 0, 0,
+                               tg_feature_collection_step,
+  tg_feature_collection_final);
 
   rc = sqlite3_create_module(db, "tg_bbox", &tg_bboxModule, NULL);
   if (rc != SQLITE_OK)
