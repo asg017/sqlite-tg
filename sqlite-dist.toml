@@ -1,8 +1,8 @@
 [package]
 name = "sqlite-tg"
 license = "MIT OR Apache"
-homepage = "https://github.com/asg017/sqlite-vec"
-repo = "https://github.com/asg017/sqlite-vec"
+homepage = "https://github.com/asg017/sqlite-tg"
+repo = "https://github.com/asg017/sqlite-tg"
 description = "A SQLite extension for limited geospatial work."
 authors = ["Alex Garcia"]
 git_tag_format = "v$VERSION"
