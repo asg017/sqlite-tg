@@ -611,7 +611,7 @@ static void tg_feature_collection_step(sqlite3_context *context, int argc,
   tg_geom_geojson(geom, buffer, size + 1);
   sqlite3_str_appendf(ctx->s, "{\"type\": \"Feature\", \"geometry\": %.*s, ", size+1, buffer);
   if(argc > 1 && sqlite3_value_subtype(argv[1]) == JSON_SUBTYPE) {
-    const char * s = sqlite3_value_text(argv[1]);
+    const unsigned char * s = sqlite3_value_text(argv[1]);
     int n = sqlite3_value_bytes(argv[1]);
     sqlite3_str_appendf(ctx->s, "\"properties\": %.*s", n, s);
   } else {
