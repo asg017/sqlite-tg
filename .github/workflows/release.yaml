@@ -138,3 +138,18 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+  upload-crate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - run: ./scripts/vendor.sh
+      - run: make sqlite-vec.h
+      - run: make deps
+        working-directory: ./bindings/rust
+      - run: cargo publish --no-verify
+        working-directory: ./bindings/rust
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

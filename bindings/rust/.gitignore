@@ -1,0 +1,8 @@
+target/
+Cargo.toml
+sqlite-tg.c
+sqlite-tg.h
+tg.c
+tg.h
+sqlite3.h
+sqlite3ext.h
