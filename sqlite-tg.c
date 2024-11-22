@@ -24,36 +24,43 @@ static const char *TG_GEOM_POINTER_NAME = "tg0-tg_geom";
 
 int geomValue(sqlite3_value *value, struct tg_geom ** out_geom, char ** errmsg) {
   struct tg_geom * g;
-  switch (sqlite3_value_type(value)) {
-  case SQLITE_BLOB: {
-    const void * b = sqlite3_value_blob(value);
-    int n = sqlite3_value_bytes(value);
-    g = tg_parse_wkb_ix(b, n, TG_NONE);
-    break;
-  }
-  case SQLITE_TEXT: {
+
+  if(
+    (sqlite3_value_subtype(value) == JSON_SUBTYPE)
+    || ((sqlite3_value_bytes(value) > 0) && ((char *)sqlite3_value_blob(value))[0] == '{')
+  ) {
     const char *text = (const char *)sqlite3_value_text(value);
     int n = sqlite3_value_bytes(value);
-    if (sqlite3_value_subtype(value) == JSON_SUBTYPE || (n > 0 && text[0] == '{')) {
-      g =  tg_parse_geojsonn_ix(text, n, TG_NONE);
-    } else {
-      g = tg_parse_wktn_ix(text, n, TG_NONE);
-    }
-    break;
-  }
-  case SQLITE_NULL: {
-    void *p = sqlite3_value_pointer(value, TG_GEOM_POINTER_NAME);
-    if (p) {
-      g = tg_geom_clone((struct tg_geom *) p);
+    g =  tg_parse_geojsonn_ix(text, n, TG_NONE);
+  }else {
+  switch (sqlite3_value_type(value)) {
+    case SQLITE_BLOB: {
+      const void * b = sqlite3_value_blob(value);
+      int n = sqlite3_value_bytes(value);
+      g = tg_parse_wkb_ix(b, n, TG_NONE);
       break;
     }
-    *errmsg = sqlite3_mprintf("%s", INVALID_GEO_INPUT);
-    return SQLITE_ERROR;
+    case SQLITE_TEXT: {
+      const char *text = (const char *)sqlite3_value_text(value);
+      int n = sqlite3_value_bytes(value);
+      g = tg_parse_wktn_ix(text, n, TG_NONE);
+      break;
+    }
+    case SQLITE_NULL: {
+      void *p = sqlite3_value_pointer(value, TG_GEOM_POINTER_NAME);
+      if (p) {
+        g = tg_geom_clone((struct tg_geom *) p);
+        break;
+      }
+      *errmsg = sqlite3_mprintf("%s", INVALID_GEO_INPUT);
+      return SQLITE_ERROR;
+    }
+    default:
+      *errmsg = sqlite3_mprintf("%s", INVALID_GEO_INPUT);
+      return SQLITE_ERROR;
+    }
   }
-  default:
-    *errmsg = sqlite3_mprintf("%s", INVALID_GEO_INPUT);
-    return SQLITE_ERROR;
-  }
+
   if(tg_geom_error(g)) {
     *errmsg = sqlite3_mprintf("%s", tg_geom_error(g));
     tg_geom_free(g);
@@ -890,6 +897,56 @@ static int template_eachColumn(sqlite3_vtab_cursor *cur,
   return SQLITE_OK;
 }
 
+
+// overwrite `->>` on `tg_each()` to extract JSON path from `tg_geom_extra_json()`
+static void tg_each_arrow(sqlite3_context *context, int argc,
+                              sqlite3_value **argv) {
+  int rc;
+  sqlite3_stmt * stmt = NULL;
+  struct tg_geom *g = NULL;
+  char * errmsg = NULL;
+
+  rc = geomValue(argv[0], &g, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    goto cleanup;
+  }
+
+  const char * extra_json = tg_geom_extra_json(g);
+  if(!extra_json) {
+    goto cleanup;
+  }
+
+  rc = sqlite3_prepare_v2(sqlite3_context_db_handle(context), "select ?1 ->> ?2", -1, &stmt, NULL);
+  if(rc != SQLITE_OK) {
+    sqlite3_result_error(context, "error preparing", -1);
+    goto cleanup;
+  }
+  sqlite3_bind_text(stmt, 1, extra_json, -1, SQLITE_TRANSIENT);
+  sqlite3_bind_value(stmt, 2, argv[1]);
+  rc = sqlite3_step(stmt);
+  if(rc != SQLITE_ROW) {
+    sqlite3_result_error(context, sqlite3_errmsg(sqlite3_context_db_handle(context)), -1);
+    goto cleanup;
+  }
+  sqlite3_result_value(context, sqlite3_column_value(stmt, 0));
+
+  cleanup:
+    tg_geom_free(g);
+    sqlite3_finalize(stmt);
+}
+static int template_eachFindFunction(sqlite3_vtab *pVtab, int nArg, const char *zName,
+                           void (**pxFunc)(sqlite3_context *, int,
+                                           sqlite3_value **),
+                           void **ppArg) {
+  if (sqlite3_stricmp(zName, "->>") == 0 && nArg == 2) {
+    *pxFunc = tg_each_arrow;
+    return 1;
+  }
+  return 0;
+}
+
 static sqlite3_module template_eachModule = {
     /* iVersion    */ 0,
     /* xCreate     */ 0,
@@ -909,7 +966,7 @@ static sqlite3_module template_eachModule = {
     /* xSync       */ 0,
     /* xCommit     */ 0,
     /* xRollback   */ 0,
-    /* xFindMethod */ 0,
+    /* xFindMethod */ template_eachFindFunction,
     /* xRename     */ 0,
     /* xSavepoint  */ 0,
     /* xRelease    */ 0,
@@ -1846,6 +1903,7 @@ __declspec(dllexport)
       {(char *)"tg_lines_each",  &linesEach},
       {(char *)"tg_polygons_each",  &polygonsEach},
       {(char *)"tg_geometries_each",  &geometriesEach},
+      {(char *)"tg_each",  &geometriesEach},
       // clang-format on
   };
 
