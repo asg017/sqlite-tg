@@ -444,7 +444,7 @@ struct Array {
   void *z;
 };
 
-int array_init(struct Array *array, size_t element_size, size_t init_capacity) {
+int tg_array_init(struct Array *array, size_t element_size, size_t init_capacity) {
   int sz = element_size * init_capacity;
   void *z = sqlite3_malloc(sz);
   if (!z) {
@@ -459,7 +459,7 @@ int array_init(struct Array *array, size_t element_size, size_t init_capacity) {
   return SQLITE_OK;
 }
 
-int array_append(struct Array *array, const void *element) {
+int tg_array_append(struct Array *array, const void *element) {
   if (array->length == array->capacity) {
     size_t new_capacity = array->capacity * 2 + 100;
     void *z = sqlite3_realloc64(array->z, array->element_size * new_capacity);
@@ -476,7 +476,7 @@ int array_append(struct Array *array, const void *element) {
   return SQLITE_OK;
 }
 
-void array_cleanup(struct Array *array) {
+void tg_array_cleanup(struct Array *array) {
   if (!array)
     return;
   array->element_size = 0;
@@ -497,7 +497,7 @@ static void tg_multipoint_step(sqlite3_context *context, int argc,
     return;
   }
   if(!array->z) {
-    rc = array_init(array, sizeof(struct tg_point), 128);
+    rc = tg_array_init(array, sizeof(struct tg_point), 128);
     if(rc!=SQLITE_OK) {
       sqlite3_result_error_nomem(context);
       return;
@@ -522,7 +522,7 @@ static void tg_multipoint_step(sqlite3_context *context, int argc,
   }
 
   struct tg_point src = tg_geom_point(geom);
-  array_append(array, &src);
+  tg_array_append(array, &src);
   tg_geom_free(geom);
 }
 
@@ -541,7 +541,7 @@ static void tg_multipoint_final(sqlite3_context *context) {
       resultGeomPointer(context, geom);
     }
   }
-  array_cleanup(a);
+  tg_array_cleanup(a);
 }
 static void tg_geometry_collection_step(sqlite3_context *context, int argc,
                                sqlite3_value *argv[]) {
@@ -553,7 +553,7 @@ static void tg_geometry_collection_step(sqlite3_context *context, int argc,
     return;
   }
   if(!array->z) {
-    rc = array_init(array, sizeof(struct tg_geom*), 128);
+    rc = tg_array_init(array, sizeof(struct tg_geom*), 128);
     if(rc!=SQLITE_OK) {
       sqlite3_result_error_nomem(context);
       return;
@@ -570,7 +570,7 @@ static void tg_geometry_collection_step(sqlite3_context *context, int argc,
   }
 
   struct tg_geom *x = tg_geom_clone(geom);
-  array_append(array, &x);
+  tg_array_append(array, &x);
   tg_geom_free(geom);
 }
 
@@ -673,7 +673,7 @@ static void tg_geometry_collection_final(sqlite3_context *context) {
   for(int i = 0; i < a->length; i++) {
     tg_geom_free( ( (struct tg_geom**) a->z)[i]);
   }
-  array_cleanup(a);
+  tg_array_cleanup(a);
 }
 
 #pragma endregion
