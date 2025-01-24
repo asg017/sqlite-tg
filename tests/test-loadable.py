@@ -1,3 +1,13 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pytest",
+#     "shapely",
+#     "syrupy",
+# ]
+# ///
+
+
 import re
 import sqlite3
 import json
