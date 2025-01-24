@@ -24,7 +24,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           # avoids MacOS builtin Python w/ no SQLite extension support
-          python-version: 3.12
+          python-version: 3.11
+          pyproject-file: tests/pyproject.toml
       - run: make loadable
       - run: make test-loadable
       - uses: actions/upload-artifact@v3
