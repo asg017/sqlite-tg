@@ -28,6 +28,8 @@ jobs:
           pyproject-file: tests/pyproject.toml
       - run: make loadable
       - run: make test-loadable
+        env:
+          UV_PYTHON: /opt/homebrew/opt/python3/libexec/bin/python
       - uses: actions/upload-artifact@v3
         with:
           name: sqlite-tg-macos-x86_64-extension
