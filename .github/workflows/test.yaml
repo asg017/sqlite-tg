@@ -22,13 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: astral-sh/setup-uv@v5
-        with:
-          # avoids MacOS builtin Python w/ no SQLite extension support
-          python-version: 3.11
-          pyproject-file: tests/pyproject.toml
       - run: make loadable
       - run: make test-loadable
         env:
+          # MacOS Python block SQLite extension, so use homebrew's python (ez mode)
           UV_PYTHON: /usr/local/opt/python@3/libexec/bin/python
       - uses: actions/upload-artifact@v3
         with:
