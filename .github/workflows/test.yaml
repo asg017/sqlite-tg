@@ -17,6 +17,17 @@ jobs:
         with:
           name: sqlite-tg-linux-x86_64-extension
           path: dist/*
+  build-linux-aarch64-extension:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v3
+      - uses: astral-sh/setup-uv@v5
+      - run: make loadable
+      - run: make test-loadable
+      - uses: actions/upload-artifact@v3
+        with:
+          name: sqlite-tg-linux-aarch64-extension
+          path: dist/*
   build-macos-x86_64-extension:
     runs-on: macos-13
     steps:
