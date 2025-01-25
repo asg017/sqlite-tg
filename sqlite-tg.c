@@ -1199,7 +1199,7 @@ struct tg0_cursor {
   struct tg_geom *queryGeom;
 };
 
-void vtab_set_error(sqlite3_vtab *pVTab, const char *zFormat, ...) {
+void tg_vtab_set_error(sqlite3_vtab *pVTab, const char *zFormat, ...) {
   va_list args;
   sqlite3_free(pVTab->zErrMsg);
   va_start(args, zFormat);
