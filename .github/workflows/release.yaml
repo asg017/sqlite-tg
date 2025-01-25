@@ -14,6 +14,15 @@ jobs:
         with:
           name: sqlite-tg-linux-x86_64-extension
           path: dist/*
+  build-linux-aarch64-extension:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v3
+      - run: make loadable
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sqlite-tg-linux-aarch64-extension
+          path: dist/*
   build-macos-x86_64-extension:
     runs-on: macos-13
     steps:
@@ -60,6 +69,7 @@ jobs:
     needs:
       [
         build-linux-x86_64-extension,
+        build-linux-aarch64-extension,
         build-macos-x86_64-extension,
         build-macos-aarch64-extension,
         build-windows-x86_64-extension,
@@ -73,6 +83,10 @@ jobs:
         with:
           name: sqlite-tg-linux-x86_64-extension
           path: dist/linux-x86_64
+      - uses: actions/download-artifact@v4
+        with:
+          name: sqlite-tg-linux-aarch64-extension
+          path: dist/linux-aarch64
       - uses: actions/download-artifact@v4
         with:
           name: sqlite-tg-macos-x86_64-extension
@@ -113,6 +127,7 @@ jobs:
           npm publish --access public distx/npm/sqlite-tg-darwin-arm64.tar.gz
           npm publish --access public distx/npm/sqlite-tg-darwin-x64.tar.gz
           npm publish --access public distx/npm/sqlite-tg-linux-x64.tar.gz
+          npm publish --access public distx/npm/sqlite-tg-linux-arm64.tar.gz
           npm publish --access public distx/npm/sqlite-tg-windows-x64.tar.gz
           npm publish --access public distx/npm/sqlite-tg-wasm-demo.tar.gz
           npm publish --access public distx/npm/sqlite-tg.tar.gz
