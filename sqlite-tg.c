@@ -437,6 +437,64 @@ static void tg_multipoint(sqlite3_context *context, int argc,
   sqlite3_free(points);
 }
 
+static void tg_line(sqlite3_context *context, int argc,
+                          sqlite3_value **argv) {
+  if (argc == 0) {
+    struct tg_geom *geom = tg_geom_new_multipoint_empty();
+    if (!geom) {
+      sqlite3_result_error_nomem(context);
+    } else {
+      resultGeomPointer(context, geom);
+    }
+    return;
+  }
+
+  struct tg_point *points = sqlite3_malloc(argc * sizeof(struct tg_point));
+  if (!points) {
+    sqlite3_result_error_nomem(context);
+    return;
+  }
+  memset(points, 0, argc * sizeof(struct tg_point));
+
+  for (int i = 0; i < argc; i++) {
+    struct tg_geom *geom;
+    char * errmsg;
+    int rc = geomValue(argv[i], &geom, &errmsg);
+    if (rc != SQLITE_OK) {
+      const char *zErr = sqlite3_mprintf(
+          "argument to tg_line() at index %i is an invalid geometry: %z",
+          i, errmsg);
+      sqlite3_result_error(context, zErr, -1);
+      sqlite3_free((void *)zErr);
+      sqlite3_free(points);
+      return;
+    }
+
+    if (tg_geom_typeof(geom) != TG_POINT) {
+      const char *zErr = sqlite3_mprintf(
+          "argument to tg_line() at index %i expected a point, found %s",
+          i, tg_geom_type_string(tg_geom_typeof(geom)));
+      sqlite3_result_error(context, zErr, -1);
+      sqlite3_free((void *)zErr);
+      tg_geom_free(geom);
+      sqlite3_free(points);
+      return;
+    }
+    struct tg_point src = tg_geom_point(geom);
+    struct tg_point *dest = &points[i];
+    dest->x = src.x;
+    dest->y = src.y;
+    tg_geom_free(geom);
+  }
+  struct tg_geom *geom = (struct tg_geom *) tg_line_new(points, argc);
+  if (!geom) {
+    sqlite3_result_error_nomem(context);
+  } else {
+    resultGeomPointer(context, geom);
+  }
+  sqlite3_free(points);
+}
+
 struct Array {
   size_t element_size;
   size_t length;
@@ -1855,6 +1913,7 @@ __declspec(dllexport)
 
       {(char *)"tg_multipoint",    -1, tg_multipoint, NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_point",          2, tg_point,      NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_line",          -1, tg_line,      NULL,             NULL,         DEFAULT_FLAGS},
       // clang-format on
 
   };
