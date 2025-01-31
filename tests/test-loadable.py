@@ -75,6 +75,7 @@ FUNCTIONS = [
     "tg_group_geometry_collection",
     "tg_group_multipoint",
     "tg_intersects",
+    "tg_line",
     "tg_multipoint",
     "tg_point",
     "tg_to_geojson",
@@ -324,6 +325,10 @@ def test_tg_to_geojson():
     )
     # TODO more tests
 
+
+@pytest.mark.skip(reason="TODO")
+def test_tg_point():
+    pass
 
 def test_tg_point():
     assert db.execute("select tg_point(1, 1)").fetchone()[0] == None
