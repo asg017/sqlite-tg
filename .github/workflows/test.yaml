@@ -13,7 +13,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: make loadable
       - run: make test-loadable
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: sqlite-tg-linux-x86_64-extension
           path: dist/*
@@ -24,7 +24,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: make loadable
       - run: make test-loadable
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: sqlite-tg-linux-aarch64-extension
           path: dist/*
@@ -38,7 +38,7 @@ jobs:
         env:
           # MacOS Python block SQLite extension, so use homebrew's python (ez mode)
           UV_PYTHON: /usr/local/opt/python@3/libexec/bin/python
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: sqlite-tg-macos-x86_64-extension
           path: dist/*
@@ -49,7 +49,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: make loadable
       - run: make test-loadable
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: sqlite-tg-macos-aarch64-extension
           path: dist/*
@@ -60,7 +60,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: make loadable
       - run: make test-loadable
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
           name: sqlite-tg-windows-x86_64-extension
           path: dist/*
