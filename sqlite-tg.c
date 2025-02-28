@@ -379,6 +379,26 @@ static void tg_point(sqlite3_context *context, int argc, sqlite3_value **argv) {
   resultGeomPointer(context, geom);
 }
 
+static void tg_poly_exterior_(sqlite3_context *context, int argc,
+                          sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    return;
+  }
+  const struct tg_poly * p = tg_geom_poly(geom);
+  if(!p) {
+    sqlite3_result_error(context, "argument to tg_poly_exterior() is not a polygon", -1);
+    tg_geom_free(geom);
+    return;
+  }
+  const struct tg_ring *ring = tg_poly_exterior(p);
+  // "A tg_ring can always be safely upcasted to a tg_poly or tg_geom"
+  resultGeomPointer(context, (struct tg_geom*) ring);
+}
+
 static void tg_multipoint(sqlite3_context *context, int argc,
                           sqlite3_value **argv) {
   if (argc == 0) {
@@ -440,7 +460,7 @@ static void tg_multipoint(sqlite3_context *context, int argc,
 static void tg_line(sqlite3_context *context, int argc,
                           sqlite3_value **argv) {
   if (argc == 0) {
-    struct tg_geom *geom = tg_geom_new_multipoint_empty();
+    struct tg_geom *geom = tg_geom_new_linestring_empty();
     if (!geom) {
       sqlite3_result_error_nomem(context);
     } else {
@@ -587,10 +607,14 @@ static void tg_multipoint_step(sqlite3_context *context, int argc,
 static void tg_multipoint_final(sqlite3_context *context) {
   struct Array *a;
   a = (struct Array *)sqlite3_aggregate_context(context, sizeof(*a));
-  if (a == 0)
+  if (a == 0) {
     return;
-  if (a->z == 0)
+  }
+  if (a->z == 0) {
+    // TODO check if null?
+    resultGeomPointer(context, tg_geom_new_multipoint_empty());
     return;
+  }
   if (a->length) {
     struct tg_geom *geom = tg_geom_new_multipoint((struct tg_point *) a->z, a->length);
     if (!geom) {
@@ -601,6 +625,115 @@ static void tg_multipoint_final(sqlite3_context *context) {
   }
   tg_array_cleanup(a);
 }
+
+static void tg_bbox_step(sqlite3_context *context, int argc, sqlite3_value *argv[]) {
+  int rc;
+  struct tg_rect* rect;
+  rect = (struct tg_rect *)sqlite3_aggregate_context(context, sizeof(*rect));
+  if (!rect) {
+    return;
+  }
+
+  struct tg_geom *geom;
+  char * errmsg;
+  rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+  struct tg_rect current = tg_geom_rect(geom);
+  // See if this is the first geometry for the bbox, which would be zero'ed out
+  if(!rect->min.x && !rect->min.y && !rect->max.x && !rect->max.y) {
+    memcpy(rect, &current, sizeof(*rect));
+  }
+  else {
+    struct tg_rect result = tg_rect_expand(*rect, current);
+    memcpy(rect, &result, sizeof(*rect));
+  }
+  tg_geom_free(geom);  
+}
+
+static void tg_bbox_final(sqlite3_context *context) {
+  int rc;
+  struct tg_rect* rect;
+  rect = (struct tg_rect *)sqlite3_aggregate_context(context, sizeof(*rect));
+  if (rect == 0)
+    return;
+  struct tg_point points[] = {
+    {rect->min.x, rect->min.y},
+    {rect->max.x, rect->min.y},
+    {rect->max.x, rect->max.y},
+    {rect->min.x, rect->max.y},
+    {rect->min.x, rect->min.y},
+  };
+  struct tg_ring* ring = tg_ring_new(points, 5);
+  //assert(ring);
+  // TODO: this will call tg_geom_free() but should be sqlite3_free()?
+  resultGeomPointer(context, (struct tg_geom *) ring);
+}
+
+static void tg_multipolygon_step(sqlite3_context *context, int argc, sqlite3_value *argv[]) {
+  int rc;
+  struct Array *array;
+  array = (struct Array *)sqlite3_aggregate_context(context, sizeof(*array));
+  if (!array) {
+    return;
+  }
+  if(!array->z) {
+    rc = tg_array_init(array, sizeof(struct tg_poly *), 128);
+    if(rc!=SQLITE_OK) {
+      sqlite3_result_error_nomem(context);
+      return;
+    }
+  }
+
+  struct tg_geom *geom;
+  char * errmsg;
+  rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  const struct tg_poly * p = tg_geom_poly(geom);
+  if(!p) {
+    sqlite3_result_error(
+      context, "inputs to tg_group_multipolygon() must be Polygon gemetries",
+      -1);
+    tg_geom_free(geom);
+    return;
+  }
+
+  struct tg_poly * p2 = tg_poly_clone(p);
+  tg_array_append(array, &p2);
+  tg_geom_free(geom);
+}
+
+static void tg_multipolygon_final(sqlite3_context *context) {
+  struct Array *a;
+  a = (struct Array *)sqlite3_aggregate_context(context, sizeof(*a));
+  if (a == 0)
+    return;
+  if (a->z == 0) {
+    // TODO oom handle
+    //resultGeomPointer(context, tg_geom_new_multipolygon_empty());
+  }
+  if (a->length) {
+
+    struct tg_geom *geom = tg_geom_new_multipolygon((const struct tg_poly **) a->z, a->length);
+    if (!geom) {
+      sqlite3_result_error_nomem(context);
+    } else {
+      resultGeomPointer(context, geom);
+    }
+  }else {
+    resultGeomPointer(context, tg_geom_new_multipolygon_empty());
+  }
+  tg_array_cleanup(a);
+}
+
 static void tg_geometry_collection_step(sqlite3_context *context, int argc,
                                sqlite3_value *argv[]) {
 
@@ -674,15 +807,22 @@ static void tg_feature_collection_step(sqlite3_context *context, int argc,
     return;
   }
   tg_geom_geojson(geom, buffer, size + 1);
-  sqlite3_str_appendf(ctx->s, "{\"type\": \"Feature\", \"geometry\": %.*s, ", size+1, buffer);
-  if(argc > 1 && sqlite3_value_subtype(argv[1]) == JSON_SUBTYPE) {
-    const unsigned char * s = sqlite3_value_text(argv[1]);
-    int n = sqlite3_value_bytes(argv[1]);
-    sqlite3_str_appendf(ctx->s, "\"properties\": %.*s", n, s);
-  } else {
-    sqlite3_str_appendall(ctx->s, "\"properties\": {}");
+
+  // if geometry already has extra json ,it's already a Feature object
+  if(tg_geom_extra_json(geom)) {
+    sqlite3_str_appendf(ctx->s, "%.*s", size+1, buffer);
   }
-  sqlite3_str_appendall(ctx->s, "}");
+  else {
+    sqlite3_str_appendf(ctx->s, "{\"type\": \"Feature\", \"geometry\": %.*s, ", size+1, buffer);
+    if(argc > 1 && sqlite3_value_subtype(argv[1]) == JSON_SUBTYPE) {
+      const unsigned char * s = sqlite3_value_text(argv[1]);
+      int n = sqlite3_value_bytes(argv[1]);
+      sqlite3_str_appendf(ctx->s, "\"properties\": %.*s", n, s);
+    } else {
+      sqlite3_str_appendall(ctx->s, "\"properties\": {}");
+    }
+    sqlite3_str_appendall(ctx->s, "}");
+  }
   sqlite3_free(buffer);
   ctx->n++;
 
@@ -806,6 +946,22 @@ void polygonsEachResult(sqlite3_context *context, void *p,
 }
 
 void polygonsEachFree(void *p) { tg_geom_free((struct tg_geom *)p); }
+#pragma endregion
+
+#pragma region tg_holes_each
+int holesEachEof(void *p, sqlite3_int64 iRowid) {
+  return iRowid >= tg_poly_num_holes((struct tg_poly *)p);
+}
+void holesEachResult(sqlite3_context *context, void *p,
+                        sqlite3_int64 iRowid) {
+  const struct tg_ring *ring = tg_poly_hole_at((struct tg_poly *)p, iRowid);
+
+  // rationale: ???
+  sqlite3_result_pointer(context, (void *)(void *)ring, TG_GEOM_POINTER_NAME,
+                         NULL);
+}
+
+void holesEachFree(void *p) { tg_poly_free((struct tg_poly *)p); }
 #pragma endregion
 
 typedef struct template_each_vtab template_each_vtab;
@@ -1883,6 +2039,7 @@ __declspec(dllexport)
       // clang-format off
       {(char *)"tg_version",        0, tg_version,    NULL,             NULL,         DEFAULT_FLAGS},
 
+      // predicates
       {(char *)"tg_intersects",     2, tg_predicate_impl,   tg_geom_intersects, NULL,         DEFAULT_FLAGS},
       {(char *)"tg_disjoint",       2, tg_predicate_impl,   tg_geom_disjoint,   NULL,         DEFAULT_FLAGS},
       {(char *)"tg_contains",       2, tg_predicate_impl,   tg_geom_contains,   NULL,         DEFAULT_FLAGS},
@@ -1914,6 +2071,8 @@ __declspec(dllexport)
       {(char *)"tg_multipoint",    -1, tg_multipoint, NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_point",          2, tg_point,      NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_line",          -1, tg_line,      NULL,             NULL,         DEFAULT_FLAGS},
+
+      {(char *)"tg_poly_exterior", 1, tg_poly_exterior_,      NULL,             NULL,         DEFAULT_FLAGS},
       // clang-format on
 
   };
@@ -1951,6 +2110,13 @@ __declspec(dllexport)
       .xResult = &polygonsEachResult,
       .xFree = &polygonsEachFree,
   };
+  
+  static struct control holesEach = {
+      .name = "hole",
+      .xEof = &holesEachEof,
+      .xResult = &holesEachResult,
+      .xFree = &holesEachFree,
+  };
 
   static const struct {
     char *zModuleName;
@@ -1961,6 +2127,7 @@ __declspec(dllexport)
       {(char *)"tg_points_each",  &pointsEach},
       {(char *)"tg_lines_each",  &linesEach},
       {(char *)"tg_polygons_each",  &polygonsEach},
+      {(char *)"tg_holes_each",  &holesEach},
       {(char *)"tg_geometries_each",  &geometriesEach},
       {(char *)"tg_each",  &geometriesEach},
       // clang-format on
@@ -1973,10 +2140,34 @@ __declspec(dllexport)
       return rc;
     }
   }
+  
+  static const struct {
+
+    char *zFName;
+    int nArg;
+    void (*xStep)(sqlite3_context *, int, sqlite3_value **);
+    void (*xFinal)(sqlite3_context *);
+    int flags;
+
+  } aGroup[] = {
+    {"tg_group_bbox",                       1, tg_bbox_step,                tg_bbox_final},
+    {"tg_group_geometry_collection",        1, tg_geometry_collection_step, tg_geometry_collection_final},
+    {"tg_group_multipoint",                 1, tg_multipoint_step,          tg_multipolygon_final},
+    {"tg_group_multipolygon",               1, tg_multipolygon_step,        tg_multipolygon_final},
+    {"tg_group_feature_collection_geojson", 1, tg_feature_collection_step,  tg_feature_collection_final},
+    {"tg_group_feature_collection_geojson", 2, tg_feature_collection_step,  tg_feature_collection_final},
+  };
 
   rc = sqlite3_create_function(db, "tg_group_multipoint", 1,
                                SQLITE_UTF8 | SQLITE_INNOCUOUS, 0, 0,
                                tg_multipoint_step, tg_multipoint_final);
+  rc = sqlite3_create_function(db, "tg_group_multipolygon", 1,
+                               SQLITE_UTF8 | SQLITE_INNOCUOUS, 0, 0,
+                               tg_multipolygon_step, tg_multipolygon_final);
+  
+  rc = sqlite3_create_function(db, "tg_group_bbox", 1,
+                               SQLITE_UTF8 | SQLITE_INNOCUOUS, 0, 0,
+                               tg_bbox_step, tg_bbox_final);
 
   rc = sqlite3_create_function(db, "tg_group_geometry_collection", 1,
                                SQLITE_UTF8 | SQLITE_INNOCUOUS, 0, 0,
