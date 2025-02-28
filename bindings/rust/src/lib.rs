@@ -1,6 +1,7 @@
+use std::ffi::c_void;
 #[link(name = "sqlite_tg0")]
 extern "C" {
-    pub fn sqlite3_tg_init();
+    pub fn sqlite3_tg_init(a:*mut c_void);
 }
 
 #[cfg(test)]
@@ -11,11 +12,10 @@ mod tests {
 
     #[test]
     fn test_rusqlite_auto_extension() {
-        unsafe {
-            sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_tg_init as *const ())));
-        }
-
         let conn = Connection::open_in_memory().unwrap();
+        unsafe {
+          sqlite3_tg_init(conn.handle().cast());
+        }
 
         let result: String = conn
             .query_row("select tg_version()", [], |x| x.get(0))
