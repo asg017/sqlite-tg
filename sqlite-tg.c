@@ -2005,10 +2005,7 @@ static sqlite3_module tg0Module = {
 #define SQLITE_RESULT_SUBTYPE 0x001000000
 #endif
 
-#ifdef _WIN32
-__declspec(dllexport)
-#endif
-    int sqlite3_tg_init(sqlite3 *db, char **pzErrMsg,
+int sqlite3_tg_init(sqlite3 *db, char **pzErrMsg,
                         const sqlite3_api_routines *pApi) {
   int rc = SQLITE_OK;
   SQLITE_EXTENSION_INIT2(pApi);
