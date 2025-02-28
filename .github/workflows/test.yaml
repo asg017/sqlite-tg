@@ -78,3 +78,15 @@ jobs:
           name: sqlite-tg-wasm32-emscripten
           path: dist/*
           include-hidden-files: true
+  test-windows-rust:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - run: make sqlite-tg.h
+      - run: make deps
+        working-directory: ./bindings/rust
+      - run: cargo test
+        working-directory: ./bindings/rust
