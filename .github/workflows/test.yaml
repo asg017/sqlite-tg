@@ -96,4 +96,6 @@ jobs:
       - run: make deps
         working-directory: ./bindings/rust
       - run: cargo test
+        env: 
+            CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
         working-directory: ./bindings/rust
