@@ -41,6 +41,7 @@ prefix=dist
 $(prefix):
 	mkdir -p $(prefix)
 
+TARGET_SQLITE3=$(prefix)/sqlite3
 TARGET_LOADABLE=$(prefix)/tg0.$(LOADABLE_EXTENSION)
 TARGET_STATIC=$(prefix)/libsqlite_tg0.a
 TARGET_STATIC_H=$(prefix)/sqlite-tg.h
@@ -50,12 +51,25 @@ TARGET_TEST_MEMORY=$(prefix)/test-memory
 loadable: $(TARGET_LOADABLE)
 static: $(TARGET_STATIC)
 test-memory: $(TARGET_TEST_MEMORY)
+sqlite3: $(TARGET_SQLITE3)
 
 BUILD_DIR=$(prefix)/.build
 
 $(BUILD_DIR): $(prefix)
 	mkdir -p $@
 
+$(TARGET_SQLITE3): examples/sqlite3/core_init.c vendor/sqlite/shell.c vendor/sqlite/sqlite3.c sqlite-tg.c vendor/tg/tg.c $(prefix)
+	cc -g3\
+		-Ivendor/sqlite -Ivendor/tg -I./ \
+		-DSQLITE_EXTRA_INIT=core_init -DSQLITE_CORE \
+		-DSQLITE_ENABLE_RTREE \
+		-O3 \
+		examples/sqlite3/core_init.c \
+		vendor/sqlite/shell.c \
+		vendor/sqlite/sqlite3.c \
+		sqlite-tg.c \
+		vendor/tg/tg.c \
+		-o $@
 
 $(TARGET_LOADABLE): sqlite-tg.c sqlite-tg.h vendor/tg/tg.c $(prefix)
 	gcc -fPIC -shared \
