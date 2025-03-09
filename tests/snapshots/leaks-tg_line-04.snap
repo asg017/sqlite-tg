@@ -1,0 +1,5 @@
+Source: ../leaks.sql
+select tg_line('LINESTRING EMPTY');
+---
+ERROR[1] SQL logic error
+argument to tg_line() at index 0 expected a point, found LineString

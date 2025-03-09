@@ -1,0 +1,38 @@
+Source: ../leaks.sql
+select 
+    rowid, 
+    point, 
+    tg_to_wkb(point), 
+    tg_to_wkt(point), 
+    tg_to_geojson(point) 
+  from tg_points_each('MULTIPOINT ((10 40), (40 30), (20 20), (30 10))');
+---
+{
+	 rowid: 0
+	 point: pointer[]
+	 tg_to_wkb(point): X'010100000000000000000024400000000000004440'
+	 tg_to_wkt(point): 'POINT(10 40)'
+	 tg_to_geojson(point): (json) '{"type":"Point","coordinates":[10,40]}'
+}
+{
+	 rowid: 1
+	 point: pointer[]
+	 tg_to_wkb(point): X'010100000000000000000044400000000000003e40'
+	 tg_to_wkt(point): 'POINT(40 30)'
+	 tg_to_geojson(point): (json) '{"type":"Point","coordinates":[40,30]}'
+}
+{
+	 rowid: 2
+	 point: pointer[]
+	 tg_to_wkb(point): X'010100000000000000000034400000000000003440'
+	 tg_to_wkt(point): 'POINT(20 20)'
+	 tg_to_geojson(point): (json) '{"type":"Point","coordinates":[20,20]}'
+}
+{
+	 rowid: 3
+	 point: pointer[]
+	 tg_to_wkb(point): X'01010000000000000000003e400000000000002440'
+	 tg_to_wkt(point): 'POINT(30 10)'
+	 tg_to_geojson(point): (json) '{"type":"Point","coordinates":[30,10]}'
+}
+

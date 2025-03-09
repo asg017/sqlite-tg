@@ -1,0 +1,4 @@
+Source: ../leaks.sql
+select tg_to_wkb(tg_point(1, 2));
+---
+X'0101000000000000000000f03f0000000000000040'

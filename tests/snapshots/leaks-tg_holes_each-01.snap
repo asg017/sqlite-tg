@@ -1,0 +1,8 @@
+Source: ../leaks.sql
+select 
+    rowid,
+    *,
+    tg_to_wkt(hole)
+  from tg_holes_each('POLYGON ((1 2, 3 4, 5 6, 1 2))');
+---
+[no results]

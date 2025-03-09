@@ -1,0 +1,9 @@
+Source: ../leaks.sql
+select tg_to_wkt(
+  tg_group_multipoint(
+    tg_point(value, value)
+  )
+) 
+from json_each('[]');
+---
+'MULTIPOINT EMPTY'

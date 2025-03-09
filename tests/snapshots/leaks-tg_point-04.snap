@@ -1,0 +1,4 @@
+Source: ../leaks.sql
+select tg_to_geojson(tg_point(1, 2));
+---
+(json) '{"type":"Point","coordinates":[1,2]}'

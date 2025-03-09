@@ -1,0 +1,5 @@
+Source: ../leaks.sql
+select tg_point(1, 'a');
+---
+ERROR[1] SQL logic error
+point Y value must be an integer or float

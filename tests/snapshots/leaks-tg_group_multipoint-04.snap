@@ -1,0 +1,5 @@
+Source: ../leaks.sql
+select tg_group_multipoint('MULTIPOINT EMPTY');
+---
+ERROR[1] SQL logic error
+parameters to tg_group_multipoint() must be Point gemetries

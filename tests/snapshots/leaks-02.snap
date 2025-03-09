@@ -1,0 +1,8 @@
+Source: ../leaks.sql
+select tg_debug();
+---
+'sqlite-tg version: v0.0.1-alpha.19
+sqlite-tg date: 2025-01-31T13:05:59Z-0800
+sqlite-tg commit: e080c06ef486cad081d920aa28c6c56d8fa91e2btg version: v0.4.0
+tg date: undefined
+tg commit: 190f4a66d1a39b812425360c837acad30151a7ba'

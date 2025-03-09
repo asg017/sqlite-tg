@@ -1,0 +1,4 @@
+Source: ../leaks.sql
+select tg_to_wkt(tg_line());
+---
+'LINESTRING EMPTY'

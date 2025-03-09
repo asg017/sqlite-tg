@@ -1,0 +1,9 @@
+Source: ../leaks.sql
+select tg_to_wkt(
+    tg_line(
+      tg_point(1, 2),
+      tg_point(3, 4)
+    )
+  );
+---
+'LINESTRING(1 2,3 4)'

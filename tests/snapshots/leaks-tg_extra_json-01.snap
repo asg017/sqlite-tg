@@ -1,0 +1,4 @@
+Source: ../leaks.sql
+select tg_extra_json('{"id": "A", "type": "Point","coordinates": [-118.2097812,34.0437074]}');
+---
+(json) '{"id":"A"}'

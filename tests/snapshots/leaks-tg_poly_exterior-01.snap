@@ -1,0 +1,4 @@
+Source: ../leaks.sql
+select tg_to_wkt(tg_poly_exterior('POLYGON ((1 2, 3 4, 5 6, 1 2), (7 8, 9 10, 11 12, 7 8))'));
+---
+'POLYGON((1 2,3 4,5 6,1 2))'

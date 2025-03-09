@@ -1,0 +1,5 @@
+Source: ../leaks.sql
+select tg_line(tg_point(1, 1), 'not point');
+---
+ERROR[1] SQL logic error
+argument to tg_line() at index 1 is an invalid geometry: ParseError: invalid type specifier, expected 'Z', 'M', 'ZM', or 'EMPTY'
