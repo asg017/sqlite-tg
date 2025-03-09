@@ -23,5 +23,6 @@ node_modules
 
 examples/*
 !examples/wasm
+!examples/sqlite3
 
 sqlite-tg.h
