@@ -1,0 +1,4 @@
+Source: ../leaks.sql
+select tg_valid_geojson(X'0101000000000000000000E03F000000000000E03F');
+---
+0

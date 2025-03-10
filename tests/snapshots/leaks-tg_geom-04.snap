@@ -1,0 +1,5 @@
+Source: ../leaks.sql
+select tg_geom('POINT (1 1)', 'unknown');
+---
+ERROR[1] SQL logic error
+unrecognized index option. Should be one of none/natural/ystripes

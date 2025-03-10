@@ -1,0 +1,5 @@
+Source: ../leaks.sql
+select tg_group_multilinestring(NULL);
+---
+ERROR[1] SQL logic error
+invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).

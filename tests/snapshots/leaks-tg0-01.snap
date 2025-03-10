@@ -1,0 +1,4 @@
+Source: ../leaks.sql
+select count(*) from tg_demo1_rtree;
+---
+4

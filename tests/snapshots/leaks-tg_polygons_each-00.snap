@@ -1,0 +1,24 @@
+Source: ../leaks.sql
+select 
+    rowid, 
+    polygon, 
+    tg_to_wkb(polygon),
+    tg_to_wkt(polygon),
+    tg_to_geojson(polygon)
+  from tg_polygons_each('MULTIPOLYGON (((10 40, 40 30, 20 20, 10 40)), ((30 20, 20 10, 10 30, 30 20)))');
+---
+{
+	 rowid: 0
+	 polygon: pointer[]
+	 tg_to_wkb(polygon): X'010300000001000000040000000000000000002440000000000000444000000000000044400000000000003e400000000000003440000000000000344000000000000024400000000000004440'
+	 tg_to_wkt(polygon): 'POLYGON((10 40,40 30,20 20,10 40))'
+	 tg_to_geojson(polygon): (json) '{"type":"Polygon","coordinates":[[[10,40],[40,30],[20,20],[10,40]]]}'
+}
+{
+	 rowid: 1
+	 polygon: pointer[]
+	 tg_to_wkb(polygon): X'010300000001000000040000000000000000003e4000000000000034400000000000003440000000000000244000000000000024400000000000003e400000000000003e400000000000003440'
+	 tg_to_wkt(polygon): 'POLYGON((30 20,20 10,10 30,30 20))'
+	 tg_to_geojson(polygon): (json) '{"type":"Polygon","coordinates":[[[30,20],[20,10],[10,30],[30,20]]]}'
+}
+

@@ -1,0 +1,6 @@
+Source: ../leaks.sql
+select
+    tg_to_wkt(tg_group_multipolygon(value))
+  from json_each('[]');
+---
+'MULTIPOLYGON EMPTY'

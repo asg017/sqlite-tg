@@ -1,0 +1,10 @@
+Source: ../leaks.sql
+select
+    tg_to_wkt(tg_group_multipolygon(value))
+  from json_each('[
+    "POLYGON ((1 1, 2 2, 3 3, 1 1))",
+    "POLYGON ((4 4, 5 5, 6 6, 4 4))",
+    "POLYGON ((7 7, 8 8, 9 9, 7 7))",
+  ]');
+---
+'MULTIPOLYGON(((1 1,2 2,3 3,1 1)),((4 4,5 5,6 6,4 4)),((7 7,8 8,9 9,7 7)))'

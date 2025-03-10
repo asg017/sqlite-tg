@@ -1,6 +1,10 @@
 Source: ../leaks.sql
-select tg_to_wkt(
-  tg_group_multipoint(tg_point(1, 2))
-);
+select 
+    tg_to_wkt(tg_group_multipoint(value))
+  from json_each('[
+    "POINT(1 1)",
+    "POINT(2 2)",
+    "POINT(3 3)",
+  ]');
 ---
-'MULTIPOINT(1 2)'
+'MULTIPOINT(1 1,2 2,3 3)'

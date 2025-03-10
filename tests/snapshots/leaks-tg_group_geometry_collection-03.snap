@@ -1,0 +1,65 @@
+Source: ../leaks.sql
+select (
+  json_pretty(
+    tg_group_feature_collection_geojson(
+      tg_point(value ->> 1, value ->> 2),
+      json_object(
+        'name', value ->> 0,
+        'population', value ->> 3
+      )
+    )
+  )
+) as geo
+from json_each('[
+  ["New York", 40.7128, -74.0060, 8419600],
+  ["Los Angeles", 34.0522, -118.2437, 3980400],
+  ["Chicago", 41.8781, -87.6298, 2716000]
+]');
+---
+'{
+    "type": "FeatureCollection",
+    "features": [
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [
+                    40.7128,
+                    -74.006
+                ]
+            },
+            "properties": {
+                "name": "New York",
+                "population": 8419600
+            }
+        },
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [
+                    34.0522,
+                    -118.2437
+                ]
+            },
+            "properties": {
+                "name": "Los Angeles",
+                "population": 3980400
+            }
+        },
+        {
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [
+                    41.8781,
+                    -87.6298
+                ]
+            },
+            "properties": {
+                "name": "Chicago",
+                "population": 2716000
+            }
+        }
+    ]
+}'

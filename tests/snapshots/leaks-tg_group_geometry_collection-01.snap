@@ -1,0 +1,8 @@
+Source: ../leaks.sql
+select 
+    tg_to_wkt(
+      tg_group_geometry_collection(value)
+    )
+  from json_each('[]');
+---
+'GEOMETRYCOLLECTION EMPTY'

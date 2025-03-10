@@ -1,0 +1,4 @@
+Source: ../leaks.sql
+select tg_valid_geojson('{"type":"Point","coordinates":[0.5,0.5]}');
+---
+1

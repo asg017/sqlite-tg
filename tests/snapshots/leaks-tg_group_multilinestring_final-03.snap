@@ -1,0 +1,5 @@
+Source: ../leaks.sql
+select tg_group_multilinestring('POINT (1 1)');
+---
+ERROR[1] SQL logic error
+inputs to tg_group_multilinestring() must be LineString geometries

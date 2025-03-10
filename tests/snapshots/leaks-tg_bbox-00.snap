@@ -1,0 +1,10 @@
+Source: ../leaks.sql
+select * from tg_bbox('POINT (1 1)');
+---
+{
+	 minX: 1
+	 maxX: 1
+	 minY: 1
+	 maxY: 1
+}
+

@@ -1,0 +1,10 @@
+Source: ../leaks.sql
+select
+    tg_to_wkt(tg_group_multipolygon(value))
+  from json_each('[
+    "POLYGON ((1 1, 2 2, 3 3, 1 1))",
+    "POINT (3 3)",
+  ]');
+---
+ERROR[1] SQL logic error
+inputs to tg_group_multipolygon() must be Polygon geometries
