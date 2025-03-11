@@ -296,8 +296,7 @@ from json_each('[
 ]');
 -- #endregion
 
--- #region tg_group_multilinestring_final
--- TODO rename _final, w/ code that notices and flags
+-- #region tg_group_multilinestring
 select 
   tg_to_wkt(
     tg_group_multilinestring(value)
