@@ -1,14 +1,14 @@
 Source: ../leaks.sql
 select 
-    value, 
-    tg_bbox.*
-  from json_each('[
-    "POINT (1 1)",
-    "POLYGON ((1 1, 2 2, 3 3, 1 1))",
-    "MULTIPOLYGON (((1 1, 2 2, 3 3, 1 1)), ((4 4, 5 5, 6 6, 4 4)))",
-    "LINESTRING (4 4, 6 6, 7 7)",
-  ]')
-  join tg_bbox(value);
+  value, 
+  tg_bbox.*
+from json_each('[
+  "POINT (1 1)",
+  "POLYGON ((1 1, 2 2, 3 3, 1 1))",
+  "MULTIPOLYGON (((1 1, 2 2, 3 3, 1 1)), ((4 4, 5 5, 6 6, 4 4)))",
+  "LINESTRING (4 4, 6 6, 7 7)",
+]')
+join tg_bbox(value);
 ---
 {
 	 value: 'POINT (1 1)'

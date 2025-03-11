@@ -1,22 +1,22 @@
 Source: ../leaks.sql
 select
-    a,
-    b,
-    tg_contains(a, b),
-    tg_contains(b, a),
-    tg_coveredby(a, b),
-    tg_coveredby(b, a),
-    tg_covers(a, b),
-    tg_covers(b, a),
-    tg_disjoint(a, b),
-    tg_disjoint(b, a),
-    tg_intersects(a, b),
-    tg_intersects(b, a),
-    tg_touches(a, b),
-    tg_touches(b, a),
-    tg_within(a, b),
-    tg_within(b, a)
-  from predicate_test_cases;
+  a,
+  b,
+  tg_contains(a, b),
+  tg_contains(b, a),
+  tg_coveredby(a, b),
+  tg_coveredby(b, a),
+  tg_covers(a, b),
+  tg_covers(b, a),
+  tg_disjoint(a, b),
+  tg_disjoint(b, a),
+  tg_intersects(a, b),
+  tg_intersects(b, a),
+  tg_touches(a, b),
+  tg_touches(b, a),
+  tg_within(a, b),
+  tg_within(b, a)
+from predicate_test_cases;
 ---
 {
 	 a: 'POINT (1 1)'

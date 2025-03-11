@@ -1,6 +1,6 @@
---.load dist/tg0
+--.load dist/tg0 --snap-coverage
 
--- [ ] Converage (functions, vtabs)
+-- [x] Converage (functions, vtabs)
 -- [ ] authorizater deny
 -- [ ] shadow table contents?
 -- [ ] fuzzer?
@@ -8,7 +8,7 @@
 select tg_version();
 select tg_debug();
 
---- # tg_point
+-- #region tg_point
   select tg_point(1, 2);
   select subtype(tg_point(1, 2));
   select tg_to_wkt(tg_point(1, 3));
@@ -17,10 +17,10 @@ select tg_debug();
   -- errors
     select tg_point('a', 1);
     select tg_point(1, 'a');
+-- #endregion
 
 
-
---- # tg_points_each
+-- #region tg_points_each
   select 
     rowid, 
     point, 
@@ -42,8 +42,9 @@ select tg_debug();
     ]
   ')
   join tg_points_each(value);
+-- #endregion
 
---- # tg_lines_each
+-- #region tg_lines_each
   select 
     rowid, 
     line, 
@@ -66,8 +67,9 @@ select tg_debug();
   join tg_lines_each(value);
   
   select * from tg_lines_each(NULL);
+-- #endregion
 
---- # tg_polygons_each
+-- #region tg_polygons_each
   select 
     rowid, 
     polygon, 
@@ -89,8 +91,9 @@ select tg_debug();
     "POLYGON EMPTY"
    ]')
    join tg_polygons_each(value);
+-- #endregion
 
---- # tg_geometries_each
+-- #region tg_geometries_each
   select 
     rowid, 
     geometry, 
@@ -111,8 +114,9 @@ select tg_debug();
     "GEOMETRYCOLLECTION (POLYGON ((10 20, 30 40, 50 60, 10 20)))",
    ]')
    join tg_geometries_each(value);
+-- #endregion
 
---- # tg_mulitpoint
+-- #region tg_mulitpoint
   select tg_to_wkt(
     tg_multipoint(tg_point(1, 2))
   );
@@ -139,16 +143,16 @@ select tg_debug();
   -- errors
   select tg_multipoint(NULL);
   --select tg_multipoint(tg_line);
+-- #endregion
 
-
---- # tg_extra_json
+-- #region tg_extra_json
   select tg_extra_json('{"type": "Point","coordinates": [-118.2097812,34.0437074]}');
   
   select tg_extra_json('{"id": "A", "type": "Point","coordinates": [-118.2097812,34.0437074]}');
+-- #endregion
 
 
-
---- # tg_line
+-- #region tg_line
   select tg_line();
   select tg_to_wkt(tg_line());
   select tg_to_wkt(
@@ -160,9 +164,9 @@ select tg_debug();
   select tg_line(tg_point(1, 1), 'not point');
   select tg_line('LINESTRING EMPTY');
   --select t
+-- #endregion
 
-
---- # tg_type
+-- #region tg_type
   select 
     tg_type(value)
   from json_each('[
@@ -176,15 +180,15 @@ select tg_debug();
   ]');
 
   select tg_type(NULL); 
+-- #endregion
 
-
---- # tg_poly_exterior
+-- #region tg_poly_exterior
   select tg_to_wkt(tg_poly_exterior('POLYGON ((1 2, 3 4, 5 6, 1 2))'));
   select tg_to_wkt(tg_poly_exterior('POLYGON ((1 2, 3 4, 5 6, 1 2), (7 8, 9 10, 11 12, 7 8))'));
   --select tg_poly_exterior('POLYGON EMPTY');
+-- #endregion
 
-
---- # tg_holes_each
+-- #region tg_holes_each
   select 
     rowid,
     *,
@@ -208,9 +212,9 @@ select tg_debug();
     "POLYGON ((1 1, 2 2, 1 1), (5 5, 6 6, 5 5), (7 7, 8 8, 7 7))",
   ]')
   join tg_holes_each(json_each.value);
+-- #endregion
 
-
---- # tg_each
+-- #region tg_each
   select 
     rowid, 
     geometry, 
@@ -230,24 +234,27 @@ select tg_debug();
     "GEOMETRYCOLLECTION (POLYGON ((10 20, 30 40, 50 60, 10 20)))",
    ]')
    join tg_each(value);
+-- #endregion
 
-
-  --- # tg_valid_geojson
+-- #region tg_valid_geojson
   select tg_valid_geojson('{"type":"Point","coordinates":[0.5,0.5]}');
   select tg_valid_geojson('POINT(0.5 0.5)');
   select tg_valid_geojson(X'0101000000000000000000E03F000000000000E03F');
+-- #endregion
 
-  --- # tg_valid_wkt
+-- #region tg_valid_wkt
   select tg_valid_wkt('{"type":"Point","coordinates":[0.5,0.5]}');
   select tg_valid_wkt('POINT(0.5 0.5)');
   select tg_valid_wkt(X'0101000000000000000000E03F000000000000E03F');
-  
-  --- # tg_valid_wkb
+ -- #endregion
+
+-- #region tg_valid_wkb
   select tg_valid_wkb('{"type":"Point","coordinates":[0.5,0.5]}');
   select tg_valid_wkb('POINT(0.5 0.5)');
   select tg_valid_wkb(X'0101000000000000000000E03F000000000000E03F');
+-- #endregion
 
-  --- # tg_group_multipoint
+-- #region tg_group_multipoint
   select 
     tg_to_wkt(tg_group_multipoint(value))
   from json_each('[
@@ -266,69 +273,72 @@ select tg_debug();
     "POINT (1 1)",
     "LINESTRING (2 2, 3 3)",
   ]');
+-- #endregion
 
-  --- # tg_group_multipolygon
-  select
-    tg_to_wkt(tg_group_multipolygon(value))
-  from json_each('[
-    "POLYGON ((1 1, 2 2, 3 3, 1 1))",
-    "POLYGON ((4 4, 5 5, 6 6, 4 4))",
-    "POLYGON ((7 7, 8 8, 9 9, 7 7))",
-  ]');
+-- #region tg_group_multipolygon
+select
+  tg_to_wkt(tg_group_multipolygon(value))
+from json_each('[
+  "POLYGON ((1 1, 2 2, 3 3, 1 1))",
+  "POLYGON ((4 4, 5 5, 6 6, 4 4))",
+  "POLYGON ((7 7, 8 8, 9 9, 7 7))",
+]');
 
-  select
-    tg_to_wkt(tg_group_multipolygon(value))
-  from json_each('[]');
+select
+  tg_to_wkt(tg_group_multipolygon(value))
+from json_each('[]');
 
-  select
-    tg_to_wkt(tg_group_multipolygon(value))
-  from json_each('[
-    "POLYGON ((1 1, 2 2, 3 3, 1 1))",
-    "POINT (3 3)",
-  ]');
+select
+  tg_to_wkt(tg_group_multipolygon(value))
+from json_each('[
+  "POLYGON ((1 1, 2 2, 3 3, 1 1))",
+  "POINT (3 3)",
+]');
+-- #endregion
 
-  -- TODO rename _final, w/ code that notices and flags
-  --- # tg_group_multilinestring_final
-  select 
-    tg_to_wkt(
-      tg_group_multilinestring(value)
-    )
-  from json_each('[
-    "LINESTRING (1 1, 2 2)",
-    "LINESTRING (3 3, 4 4)",
-    "LINESTRING (5 5, 6 6)",
-  ]');
-  
-  select 
-    tg_to_wkt(
-      tg_group_multilinestring(value)
-    )
-  from json_each('[]');
-  
-  select tg_group_multilinestring(NULL);
-  select tg_group_multilinestring('POINT (1 1)');
+-- #region tg_group_multilinestring_final
+-- TODO rename _final, w/ code that notices and flags
+select 
+  tg_to_wkt(
+    tg_group_multilinestring(value)
+  )
+from json_each('[
+  "LINESTRING (1 1, 2 2)",
+  "LINESTRING (3 3, 4 4)",
+  "LINESTRING (5 5, 6 6)",
+]');
 
-    --- # tg_group_geometry_collection
-  select 
-    tg_to_wkt(
-      tg_group_geometry_collection(value)
-    )
-  from json_each('[
-    "POINT (1 1)",
-    "LINESTRING (2 2, 3 3)",
-    "POLYGON ((4 4, 5 5, 6 6, 4 4))",
-  ]');
-  
-  select 
-    tg_to_wkt(
-      tg_group_geometry_collection(value)
-    )
-  from json_each('[]');
+select 
+  tg_to_wkt(
+    tg_group_multilinestring(value)
+  )
+from json_each('[]');
 
-  select tg_group_geometry_collection(NULL);
+select tg_group_multilinestring(NULL);
+select tg_group_multilinestring('POINT (1 1)');
+-- #endregion
 
+-- #region tg_group_geometry_collection
+select 
+  tg_to_wkt(
+    tg_group_geometry_collection(value)
+  )
+from json_each('[
+  "POINT (1 1)",
+  "LINESTRING (2 2, 3 3)",
+  "POLYGON ((4 4, 5 5, 6 6, 4 4))",
+]');
 
---- tg_group_feature_collection_geojson
+select 
+  tg_to_wkt(
+    tg_group_geometry_collection(value)
+  )
+from json_each('[]');
+
+select tg_group_geometry_collection(NULL);
+-- #endregion
+
+-- #region tg_group_feature_collection_geojson
 select (
   json_pretty(
     tg_group_feature_collection_geojson(
@@ -345,72 +355,73 @@ from json_each('[
   ["Los Angeles", 34.0522, -118.2437, 3980400],
   ["Chicago", 41.8781, -87.6298, 2716000]
 ]');
+-- #endregion
 
---- # tg_group_bbox
+-- #region tg_group_bbox
 select 
   tg_to_wkt(tg_group_bbox(value))
 from json_each('[
   "POINT (1 1)",
   "LINESTRING (2 2, 3 3)"
 ]');
+-- #endregion
 
+-- #region tg_bbox
+select * from tg_bbox('POINT (1 1)');
+select * from tg_bbox('POLYGON ((1 1, 2 2, 3 3, 1 1))');
+select * from tg_bbox(NULL);
+select 
+  value, 
+  tg_bbox.*
+from json_each('[
+  "POINT (1 1)",
+  "POLYGON ((1 1, 2 2, 3 3, 1 1))",
+  "MULTIPOLYGON (((1 1, 2 2, 3 3, 1 1)), ((4 4, 5 5, 6 6, 4 4)))",
+  "LINESTRING (4 4, 6 6, 7 7)",
+]')
+join tg_bbox(value);
+-- #endregion
 
-  --- # tg_bbox
-  select * from tg_bbox('POINT (1 1)');
-  select * from tg_bbox('POLYGON ((1 1, 2 2, 3 3, 1 1))');
-  select * from tg_bbox(NULL);
+-- #region predicates
+-- TODO more predicate testing
+create table predicate_test_cases as 
   select 
-    value, 
-    tg_bbox.*
+    value ->> 0 as a, 
+    value ->> 1 as b
   from json_each('[
-    "POINT (1 1)",
-    "POLYGON ((1 1, 2 2, 3 3, 1 1))",
-    "MULTIPOLYGON (((1 1, 2 2, 3 3, 1 1)), ((4 4, 5 5, 6 6, 4 4)))",
-    "LINESTRING (4 4, 6 6, 7 7)",
-  ]')
-  join tg_bbox(value);
+    ["POINT (1 1)", "POINT (1 1)"],
+  ]');
 
+select
+  a,
+  b,
+  tg_contains(a, b),
+  tg_contains(b, a),
+  tg_coveredby(a, b),
+  tg_coveredby(b, a),
+  tg_covers(a, b),
+  tg_covers(b, a),
+  tg_disjoint(a, b),
+  tg_disjoint(b, a),
+  tg_intersects(a, b),
+  tg_intersects(b, a),
+  tg_touches(a, b),
+  tg_touches(b, a),
+  tg_within(a, b),
+  tg_within(b, a)
+from predicate_test_cases;
+-- #endregion
 
-  --- # predicates
-  -- TODO more predicate testing
-  create table predicate_test_cases as 
-    select 
-      value ->> 0 as a, 
-      value ->> 1 as b
-    from json_each('[
-      ["POINT (1 1)", "POINT (1 1)"],
-    ]');
-
-  select
-    a,
-    b,
-    tg_contains(a, b),
-    tg_contains(b, a),
-    tg_coveredby(a, b),
-    tg_coveredby(b, a),
-    tg_covers(a, b),
-    tg_covers(b, a),
-    tg_disjoint(a, b),
-    tg_disjoint(b, a),
-    tg_intersects(a, b),
-    tg_intersects(b, a),
-    tg_touches(a, b),
-    tg_touches(b, a),
-    tg_within(a, b),
-    tg_within(b, a)
-  from predicate_test_cases;
-
-
---- # tg_geom
+-- #region tg_geom
 select tg_geom('POINT (1 1)');
 select tg_geom('POINT (1 1)', 'none');
 select tg_geom('POINT (1 1)', 'natural');
 select tg_geom('POINT (1 1)', 'ystripes');
 select tg_geom('POINT (1 1)', 'unknown');
+-- #endregion
 
 
-
---- # tg0
+-- #region tg0
 create virtual table temp.tg_demo1 using tg0();
 select name from temp.sqlite_master where name like 'tg%' order by 1;
 insert into tg_demo1(rowid, _shape) select key, value from json_each('[
@@ -426,13 +437,28 @@ explain query plan select * from tg_demo1;
 explain query plan select * from tg_demo1 where tg_intersects(_shape, '');
 explain query plan select * from tg_demo1 where tg_contains(_shape, '');
 select rowid, * from tg_demo1;
+-- #endregion
 
-  --- # MISC
-  create table t as 
-    select 
-      tg_extra_json(geometry) as m, 
-      tg_to_wkb(geometry) as geometry 
-    from tg_each(readfile('examples/us-states.geojson'));
+-- #region MISC
+create table t as 
+  select 
+    tg_extra_json(geometry) as m, 
+    tg_to_wkb(geometry) as geometry 
+  from tg_each(readfile('examples/us-states.geojson'));
 
-  select octet_length(m), octet_length(geometry) from t;
+select octet_length(m), octet_length(geometry) from t;
+-- #endregion
 
+
+/*
+-- #region top
+select 't';
+-- #region inner 1
+select 1;
+-- #endregion
+-- #region inner 2
+select 2;
+-- #endregion
+select 'end?';
+-- #endregion
+*/
