@@ -1,10 +1,32 @@
 Source: ../leaks.sql
-explain query plan select * from tg_demo1 where tg_intersects(_shape, '');
+select id, minX, maxX, minY, maxY from tg_demo1_rtree;
 ---
 {
+	 id: 0
+	 minX: -117.23818969726563
+	 maxX: -117.238037109375
+	 minY: 32.88150405883789
+	 maxY: 32.88163375854492
+}
+{
+	 id: 1
+	 minX: -117.23794555664063
+	 maxX: -117.23778533935547
+	 minY: 32.88150405883789
+	 maxY: 32.88163375854492
+}
+{
 	 id: 2
-	 parent: 0
-	 notused: 49
-	 detail: 'SCAN tg_demo1 VIRTUAL TABLE INDEX 150:predicate'
+	 minX: -117.23818969726563
+	 maxX: -117.238037109375
+	 minY: 32.88132858276367
+	 maxY: 32.88145446777344
+}
+{
+	 id: 3
+	 minX: -117.23794555664063
+	 maxX: -117.23779296875
+	 minY: 32.881324768066406
+	 maxY: 32.88145446777344
 }
 

@@ -1,0 +1,4 @@
+Source: ../leaks.sql
+select regex_replace('(v)(.*)', tg_version(), '${1}REDACTED');
+---
+'vREDACTED'

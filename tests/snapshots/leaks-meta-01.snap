@@ -1,0 +1,25 @@
+Source: ../leaks.sql
+select 
+  regex_replace(
+    '(?<key>[^:]:)(.*)', 
+    line, 
+    '$key REDACTED'
+  ) as line_redacted
+from str_lines(tg_debug());
+---
+{
+	 line_redacted: 'sqlite-tg version: REDACTED'
+}
+{
+	 line_redacted: 'sqlite-tg date: REDACTED'
+}
+{
+	 line_redacted: 'sqlite-tg commit: REDACTED'
+}
+{
+	 line_redacted: 'tg date: REDACTED'
+}
+{
+	 line_redacted: 'tg commit: REDACTED'
+}
+

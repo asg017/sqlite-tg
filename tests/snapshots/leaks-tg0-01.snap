@@ -1,4 +1,19 @@
 Source: ../leaks.sql
-select count(*) from tg_demo1_rtree;
+select name from sqlite_master where name like 'tg%' order by 1;
 ---
-4
+{
+	 name: 'tg_demo1'
+}
+{
+	 name: 'tg_demo1_rtree'
+}
+{
+	 name: 'tg_demo1_rtree_node'
+}
+{
+	 name: 'tg_demo1_rtree_parent'
+}
+{
+	 name: 'tg_demo1_rtree_rowid'
+}
+

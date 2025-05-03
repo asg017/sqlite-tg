@@ -1,10 +1,10 @@
 Source: ../leaks.sql
-explain query plan select * from tg_demo1 where tg_contains(_shape, '');
+explain query plan select * from tg_demo1;
 ---
 {
 	 id: 2
 	 parent: 0
-	 notused: 49
-	 detail: 'SCAN tg_demo1 VIRTUAL TABLE INDEX 152:predicate'
+	 notused: 215
+	 detail: 'SCAN tg_demo1 VIRTUAL TABLE INDEX 0:fullscan'
 }
 

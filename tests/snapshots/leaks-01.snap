@@ -1,4 +1,0 @@
-Source: ../leaks.sql
-select tg_version();
----
-'v0.0.1-alpha.19'

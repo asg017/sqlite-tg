@@ -1,12 +1,26 @@
---.load dist/tg0 --snap-coverage
+.load dist/tg0
 
--- [x] Converage (functions, vtabs)
+-- [x] Coverage (functions, vtabs)
 -- [ ] authorizater deny
 -- [ ] shadow table contents?
 -- [ ] fuzzer?
 
-select tg_version();
-select tg_debug();
+
+-- #region meta
+
+select regex_replace('(v)(.*)', tg_version(), '${1}REDACTED');
+
+
+
+select 
+  regex_replace(
+    '(?<key>[^:]:)(.*)', 
+    line, 
+    '$key REDACTED'
+  ) as line_redacted
+from str_lines(tg_debug());
+
+-- #endregion
 
 -- #region tg_point
   select tg_point(1, 2);
@@ -421,8 +435,8 @@ select tg_geom('POINT (1 1)', 'unknown');
 
 
 -- #region tg0
-create virtual table temp.tg_demo1 using tg0();
-select name from temp.sqlite_master where name like 'tg%' order by 1;
+create virtual table tg_demo1 using tg0();
+select name from sqlite_master where name like 'tg%' order by 1;
 insert into tg_demo1(rowid, _shape) select key, value from json_each('[
     {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23818620800527,32.881627962039275],[-117.23803891594858,32.881627962039275],[-117.23803891594858,32.88150426716983],[-117.23818620800527,32.88150426716983],[-117.23818620800527,32.881627962039275]]]},"properties":{}},
     {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23794407791227,32.88163023398593],[-117.23779678585558,32.88163023398593],[-117.23779678585558,32.88150653911649],[-117.23794407791227,32.88150653911649],[-117.23794407791227,32.88163023398593]]]},"properties":{},},
@@ -447,17 +461,3 @@ create table t as
 
 select octet_length(m), octet_length(geometry) from t;
 -- #endregion
-
-
-/*
--- #region top
-select 't';
--- #region inner 1
-select 1;
--- #endregion
--- #region inner 2
-select 2;
--- #endregion
-select 'end?';
--- #endregion
-*/
