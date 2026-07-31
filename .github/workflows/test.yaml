@@ -11,24 +11,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # solite wheels currently cover manylinux_2_39_x86_64 (ubuntu-24.04+,
-          # see test-solite-linux below), macosx_11_0_arm64, and win_amd64 —
-          # enable `solite: true` on more targets as wheels are published
+          # `solite: true` runs make test-api + make docs-check with a
+          # PyPI-installed solite. Commented out where solite has no usable
+          # wheel yet — see https://github.com/asg017/sqlite-tg/issues/5
           - os: ubuntu-22.04
             target: linux-x86_64
-            solite: false
+            # TODO(#5): needs a solite wheel usable on glibc 2.35; covered by
+            # the test-solite-linux job below until then
+            # solite: true
           - os: ubuntu-22.04-arm
             target: linux-aarch64
-            solite: false
+            # TODO(#5): no linux-aarch64 solite wheel yet
+            # solite: true
           - os: macos-13
             target: macos-x86_64
-            solite: false
+            # TODO(#5): no macos-x86_64 solite wheel yet
+            # solite: true
           - os: macos-14
             target: macos-aarch64
             solite: true
           - os: windows-latest
             target: windows-x86_64
-            solite: false
+            # TODO(#5): win_amd64 wheel exists, but solite+make unverified on
+            # windows shells
+            # solite: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
