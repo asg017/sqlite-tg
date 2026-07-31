@@ -23,7 +23,8 @@ jobs:
             target: linux-aarch64
             # TODO(#5): no linux-aarch64 solite wheel yet
             # solite: true
-          - os: macos-13
+          # last Intel macOS image, supported until August 2027
+          - os: macos-15-intel
             target: macos-x86_64
             # TODO(#5): no macos-x86_64 solite wheel yet
             # solite: true
