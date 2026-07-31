@@ -466,7 +466,7 @@ create table t as
   select
     tg_extra_json(geometry) as m,
     tg_to_wkb(geometry) as geometry
-  from tg_each(readfile('examples/us-states.geojson'));
+  from tg_each(readfile('tests/data/collection.geojson'));
 
 select octet_length(m), octet_length(geometry) from t; -- @snap misc-octet-lengths
 -- #endregion

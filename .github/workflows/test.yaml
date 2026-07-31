@@ -11,16 +11,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # solite wheels currently cover manylinux_2_39_x86_64 (ubuntu-24.04+,
+          # see test-solite-linux below), macosx_11_0_arm64, and win_amd64 —
+          # enable `solite: true` on more targets as wheels are published
           - os: ubuntu-22.04
             target: linux-x86_64
+            solite: false
           - os: ubuntu-22.04-arm
             target: linux-aarch64
+            solite: false
           - os: macos-13
             target: macos-x86_64
+            solite: false
           - os: macos-14
             target: macos-aarch64
+            solite: true
           - os: windows-latest
             target: windows-x86_64
+            solite: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -28,18 +36,33 @@ jobs:
       - run: make loadable
       - run: make test-loadable
       - name: install solite
-        if: runner.os != 'Windows'
+        if: matrix.solite
         run: |
           uv tool install solite
           echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
       - run: make test-api
-        if: runner.os != 'Windows'
+        if: matrix.solite
       - run: make docs-check
-        if: runner.os != 'Windows'
+        if: matrix.solite
       - uses: actions/upload-artifact@v4
         with:
           name: sqlite-tg-${{ matrix.target }}-extension
           path: dist/*
+  # linux solite coverage lives here: the extension artifacts build on
+  # ubuntu-22.04 for glibc compatibility, but solite's manylinux_2_39 wheel
+  # needs ubuntu-24.04+
+  test-solite-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: make loadable
+      - name: install solite
+        run: |
+          uv tool install solite
+          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
+      - run: make test-api
+      - run: make docs-check
   build-wasm32-emscripten:
     runs-on: ubuntu-latest
     steps:
