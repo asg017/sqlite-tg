@@ -74,6 +74,7 @@ FUNCTIONS = [
     "tg_group_feature_collection_geojson",
     "tg_group_feature_collection_geojson",
     "tg_group_geometry_collection",
+    "tg_group_multilinestring",
     "tg_group_multipoint",
     "tg_group_multipolygon",
     "tg_intersects",
@@ -96,11 +97,13 @@ FUNCTIONS = [
 
 MODULES = [
     "tg0",
+    "tg_bbox",
+    "tg_each",
     "tg_geometries_each",
+    "tg_holes_each",
     "tg_lines_each",
     "tg_points_each",
     "tg_polygons_each",
-    "tg_bbox",
 ]
 
 SUPPORTS_SUBTYPE = sqlite3.version_info[1] > 38
@@ -140,7 +143,7 @@ def test_modules():
     modules = list(
         map(lambda a: a[0], db.execute("select name from loaded_modules").fetchall())
     )
-    assert modules, MODULES
+    assert modules == MODULES
 
 
 def test_tg_version():

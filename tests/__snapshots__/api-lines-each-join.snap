@@ -1,0 +1,39 @@
+Source: ../api.sql
+select
+    json_each.key,
+    tg_lines_each.rowid,
+    line,
+    tg_to_wkb(line),
+    tg_to_wkt(line),
+    tg_to_geojson(line)
+  from json_each('[
+    "MULTILINESTRING ((10 40, 40 30), (20 20, 30 10))",
+    "MULTILINESTRING ((50 60, 70 80))",
+  ]')
+  join tg_lines_each(value);
+---
+{
+	 key: 0
+	 rowid: 0
+	 line: pointer[]
+	 tg_to_wkb(line): X'0102000000020000000000000000002440000000000000444000000000000044400000000000003e40'
+	 tg_to_wkt(line): 'LINESTRING(10 40,40 30)'
+	 tg_to_geojson(line): (json) '{"type":"LineString","coordinates":[[10,40],[40,30]]}'
+}
+{
+	 key: 0
+	 rowid: 1
+	 line: pointer[]
+	 tg_to_wkb(line): X'010200000002000000000000000000344000000000000034400000000000003e400000000000002440'
+	 tg_to_wkt(line): 'LINESTRING(20 20,30 10)'
+	 tg_to_geojson(line): (json) '{"type":"LineString","coordinates":[[20,20],[30,10]]}'
+}
+{
+	 key: 1
+	 rowid: 0
+	 line: pointer[]
+	 tg_to_wkb(line): X'01020000000200000000000000000049400000000000004e4000000000008051400000000000005440'
+	 tg_to_wkt(line): 'LINESTRING(50 60,70 80)'
+	 tg_to_geojson(line): (json) '{"type":"LineString","coordinates":[[50,60],[70,80]]}'
+}
+

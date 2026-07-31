@@ -1,0 +1,35 @@
+Source: ../api.sql
+select
+    tg_type(value)
+  from json_each('[
+    "POINT EMPTY",
+    "LINESTRING EMPTY",
+    "POLYGON EMPTY",
+    "MULTIPOINT EMPTY",
+    "MULTIPOLYGON EMPTY",
+    "MULTILINESTRING EMPTY",
+    "GEOMETRYCOLLECTION EMPTY",
+  ]');
+---
+{
+	 tg_type(value): 'Point'
+}
+{
+	 tg_type(value): 'LineString'
+}
+{
+	 tg_type(value): 'Polygon'
+}
+{
+	 tg_type(value): 'MultiPoint'
+}
+{
+	 tg_type(value): 'MultiPolygon'
+}
+{
+	 tg_type(value): 'MultiLineString'
+}
+{
+	 tg_type(value): 'GeometryCollection'
+}
+

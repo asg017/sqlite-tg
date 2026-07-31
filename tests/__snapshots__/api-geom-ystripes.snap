@@ -1,0 +1,4 @@
+Source: ../api.sql
+select tg_geom('POINT (1 1)', 'ystripes');
+---
+pointer[]

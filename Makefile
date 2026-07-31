@@ -89,14 +89,14 @@ sqlite-tg.h: sqlite-tg.h.tmpl VERSION
 $(TARGET_STATIC_H): sqlite-tg.h $(prefix)
 	cp $< $@
 
-$(TARGET_TEST_MEMORY): tests/test-memory.c sqlite-tg.c vendor/tg/tg.c $(prefix)
+$(TARGET_TEST_MEMORY): tests/test-memory.c sqlite-tg.c vendor/sqlite/sqlite3.c vendor/tg/tg.c $(prefix)
 	gcc \
 	-Ivendor/sqlite -Ivendor/tg -I./ \
 	-O3 \
 	$(CFLAGS) \
-	-lsqlite3 \
 	-DSQLITE_CORE \
-	$< sqlite-tg.c vendor/tg/tg.c -o $@
+	-DSQLITE_ENABLE_RTREE \
+	$< vendor/sqlite/sqlite3.c sqlite-tg.c vendor/tg/tg.c -o $@
 
 clean:
 	rm -rf dist/*
@@ -121,13 +121,29 @@ publish-release:
 
 
 test-loadable: loadable
-	uv run --project tests -m pytest tests/test-loadable.py
+	uv run --managed-python --project tests -m pytest tests/test-loadable.py
 
 test-loadable-snapshot-update: loadable
-	uv run --project tests -m pytest tests/test-loadable.py --snapshot-update
+	uv run --managed-python --project tests -m pytest tests/test-loadable.py --snapshot-update
 
 test-loadable-watch:
 	watchexec -w sqlite-tg.c -w tests/test-loadable.py -w docs.md -w Makefile --clear -- make test-loadable
+
+test-api: loadable
+	solite test tests/api.sql
+
+test-api-snapshot-update: loadable
+	solite test --update tests/api.sql
+
+SOLITE_DOCGEN=solite docgen
+
+docs: loadable
+	$(SOLITE_DOCGEN) --extension $(TARGET_LOADABLE) docs.md -o docs.md
+
+docs-check: loadable
+	$(SOLITE_DOCGEN) --extension $(TARGET_LOADABLE) docs.md --check
+
+.PHONY: docs docs-check
 
 
 

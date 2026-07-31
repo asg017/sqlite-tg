@@ -1,0 +1,19 @@
+Source: ../api.sql
+select name from sqlite_master where name like 'tg%' order by 1;
+---
+{
+	 name: 'tg_demo1'
+}
+{
+	 name: 'tg_demo1_rtree'
+}
+{
+	 name: 'tg_demo1_rtree_node'
+}
+{
+	 name: 'tg_demo1_rtree_parent'
+}
+{
+	 name: 'tg_demo1_rtree_rowid'
+}
+

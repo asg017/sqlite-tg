@@ -1,0 +1,24 @@
+Source: ../api.sql
+select
+    rowid,
+    geometry,
+    tg_to_wkb(geometry),
+    tg_to_wkt(geometry),
+    tg_to_geojson(geometry)
+  from tg_geometries_each('GEOMETRYCOLLECTION (POINT (10 20), LINESTRING (30 40, 50 60))');
+---
+{
+	 rowid: 0
+	 geometry: pointer[]
+	 tg_to_wkb(geometry): X'010100000000000000000024400000000000003440'
+	 tg_to_wkt(geometry): 'POINT(10 20)'
+	 tg_to_geojson(geometry): (json) '{"type":"Point","coordinates":[10,20]}'
+}
+{
+	 rowid: 1
+	 geometry: pointer[]
+	 tg_to_wkb(geometry): X'0102000000020000000000000000003e40000000000000444000000000000049400000000000004e40'
+	 tg_to_wkt(geometry): 'LINESTRING(30 40,50 60)'
+	 tg_to_geojson(geometry): (json) '{"type":"LineString","coordinates":[[30,40],[50,60]]}'
+}
+

@@ -1,0 +1,10 @@
+Source: ../api.sql
+select * from tg_bbox('POINT (1 1)');
+---
+{
+	 minX: 1.0
+	 maxX: 1.0
+	 minY: 1.0
+	 maxY: 1.0
+}
+

@@ -6,63 +6,39 @@ on:
 permissions:
   contents: read
 jobs:
-  build-linux-x86_64-extension:
-    runs-on: ubuntu-20.04
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: linux-x86_64
+          - os: ubuntu-22.04-arm
+            target: linux-aarch64
+          - os: macos-13
+            target: macos-x86_64
+          - os: macos-14
+            target: macos-aarch64
+          - os: windows-latest
+            target: windows-x86_64
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: make loadable
       - run: make test-loadable
+      - name: install solite
+        if: runner.os != 'Windows'
+        run: |
+          uv tool install solite
+          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
+      - run: make test-api
+        if: runner.os != 'Windows'
+      - run: make docs-check
+        if: runner.os != 'Windows'
       - uses: actions/upload-artifact@v4
         with:
-          name: sqlite-tg-linux-x86_64-extension
-          path: dist/*
-  build-linux-aarch64-extension:
-    runs-on: ubuntu-22.04-arm
-    steps:
-      - uses: actions/checkout@v3
-      - uses: astral-sh/setup-uv@v5
-      - run: make loadable
-      - run: make test-loadable
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sqlite-tg-linux-aarch64-extension
-          path: dist/*
-  build-macos-x86_64-extension:
-    runs-on: macos-13
-    steps:
-      - uses: actions/checkout@v3
-      - uses: astral-sh/setup-uv@v5
-      - run: make loadable
-      - run: make test-loadable
-        env:
-          # MacOS Python block SQLite extension, so use homebrew's python (ez mode)
-          UV_PYTHON: /usr/local/opt/python@3/libexec/bin/python
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sqlite-tg-macos-x86_64-extension
-          path: dist/*
-  build-macos-aarch64-extension:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v3
-      - uses: astral-sh/setup-uv@v5
-      - run: make loadable
-      - run: make test-loadable
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sqlite-tg-macos-aarch64-extension
-          path: dist/*
-  build-windows-x86_64-extension:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: astral-sh/setup-uv@v5
-      - run: make loadable
-      - run: make test-loadable
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sqlite-tg-windows-x86_64-extension
+          name: sqlite-tg-${{ matrix.target }}-extension
           path: dist/*
   build-wasm32-emscripten:
     runs-on: ubuntu-latest
@@ -96,6 +72,6 @@ jobs:
       - run: make deps
         working-directory: ./bindings/rust
       - run: cargo test
-        env: 
+        env:
             CARGO_BUILD_TARGET: x86_64-pc-windows-gnu
         working-directory: ./bindings/rust

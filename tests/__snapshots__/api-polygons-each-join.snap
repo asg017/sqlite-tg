@@ -1,0 +1,40 @@
+Source: ../api.sql
+select
+    json_each.key,
+    tg_polygons_each.rowid,
+    polygon,
+    tg_to_wkb(polygon),
+    tg_to_wkt(polygon),
+    tg_to_geojson(polygon)
+  from json_each('[
+    "MULTIPOLYGON (((10 40, 40 30, 20 20, 10 40)), ((30 20, 20 10, 10 30, 30 20)))",
+    "MULTIPOLYGON (((50 60, 70 80, 90 100, 50 60)))",
+    "POLYGON EMPTY"
+   ]')
+   join tg_polygons_each(value);
+---
+{
+	 key: 0
+	 rowid: 0
+	 polygon: pointer[]
+	 tg_to_wkb(polygon): X'010300000001000000040000000000000000002440000000000000444000000000000044400000000000003e400000000000003440000000000000344000000000000024400000000000004440'
+	 tg_to_wkt(polygon): 'POLYGON((10 40,40 30,20 20,10 40))'
+	 tg_to_geojson(polygon): (json) '{"type":"Polygon","coordinates":[[[10,40],[40,30],[20,20],[10,40]]]}'
+}
+{
+	 key: 0
+	 rowid: 1
+	 polygon: pointer[]
+	 tg_to_wkb(polygon): X'010300000001000000040000000000000000003e4000000000000034400000000000003440000000000000244000000000000024400000000000003e400000000000003e400000000000003440'
+	 tg_to_wkt(polygon): 'POLYGON((30 20,20 10,10 30,30 20))'
+	 tg_to_geojson(polygon): (json) '{"type":"Polygon","coordinates":[[[30,20],[20,10],[10,30],[30,20]]]}'
+}
+{
+	 key: 1
+	 rowid: 0
+	 polygon: pointer[]
+	 tg_to_wkb(polygon): X'0103000000010000000400000000000000000049400000000000004e40000000000080514000000000000054400000000000805640000000000000594000000000000049400000000000004e40'
+	 tg_to_wkt(polygon): 'POLYGON((50 60,70 80,90 100,50 60))'
+	 tg_to_geojson(polygon): (json) '{"type":"Polygon","coordinates":[[[50,60],[70,80],[90,100],[50,60]]]}'
+}
+

@@ -1,0 +1,4 @@
+Source: ../api.sql
+select tg_point(1, 2);
+---
+pointer[]
