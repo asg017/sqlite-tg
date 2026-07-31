@@ -3,7 +3,8 @@ name = "tests"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11"
+# <3.14: shapely 2.0.x has no cp314 wheels, and a source build needs GEOS
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "pytest>=8.3.4",
     "shapely>=2.0.6",
