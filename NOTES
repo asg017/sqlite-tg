@@ -24,7 +24,7 @@ from businesses;
 
 ## constructors
 
-- [x] `tg_point()`
+- [x] `tg_point()` -- 3/4-arg Z/ZM arities added (ticket 12); M-only construction intentionally unsupported
 - [.] `tg_multipoint(p1, p2, ...)`
 - [.] `tg_group_multipoint(p)`
 - [x] `tg_geometrycollection(g1, g2)`

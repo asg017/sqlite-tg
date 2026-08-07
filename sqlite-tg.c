@@ -487,6 +487,96 @@ static void tg_y(sqlite3_context *context, int argc, sqlite3_value **argv) {
   tg_geom_free(geom);
 }
 
+static void tg_has_z(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  sqlite3_result_int(context, tg_geom_has_z(geom));
+
+  tg_geom_free(geom);
+}
+
+static void tg_has_m(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  sqlite3_result_int(context, tg_geom_has_m(geom));
+
+  tg_geom_free(geom);
+}
+
+// tg_z()/tg_m() require a Point-typed input, same as tg_x()/tg_y(). Unlike
+// tg_geom_z()/tg_geom_m() (which return 0 for a 2D point, indistinguishable
+// from a real Z/M value of 0), these return SQL NULL when the point has no
+// Z/M coordinate — better ergonomics than a silent 0.
+static void tg_z(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+  if (tg_geom_typeof(geom) != TG_POINT) {
+    const char *zErr = sqlite3_mprintf(
+        "tg_z() expected a Point geometry, found %s",
+        tg_geom_type_string(tg_geom_typeof(geom)));
+    sqlite3_result_error(context, zErr, -1);
+    sqlite3_free((void *)zErr);
+    tg_geom_free(geom);
+    return;
+  }
+
+  if (tg_geom_has_z(geom)) {
+    sqlite3_result_double(context, tg_geom_z(geom));
+  } else {
+    sqlite3_result_null(context);
+  }
+
+  tg_geom_free(geom);
+}
+
+static void tg_m(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+  if (tg_geom_typeof(geom) != TG_POINT) {
+    const char *zErr = sqlite3_mprintf(
+        "tg_m() expected a Point geometry, found %s",
+        tg_geom_type_string(tg_geom_typeof(geom)));
+    sqlite3_result_error(context, zErr, -1);
+    sqlite3_free((void *)zErr);
+    tg_geom_free(geom);
+    return;
+  }
+
+  if (tg_geom_has_m(geom)) {
+    sqlite3_result_double(context, tg_geom_m(geom));
+  } else {
+    sqlite3_result_null(context);
+  }
+
+  tg_geom_free(geom);
+}
+
 static void tg_min_x(sqlite3_context *context, int argc, sqlite3_value **argv) {
   struct tg_geom *geom;
   char * errmsg;
@@ -555,23 +645,33 @@ static void tg_max_y(sqlite3_context *context, int argc, sqlite3_value **argv) {
 
 #pragma region constructors
 
+// tg_point(x, y) constructs a 2D point; tg_point(x, y, z) constructs a Z
+// point (3-arg = Z, matching WKT convention, not M); tg_point(x, y, z, m)
+// constructs a ZM point. M-only points can't be constructed (nobody asks
+// for it — see ticket 12).
 static void tg_point(sqlite3_context *context, int argc, sqlite3_value **argv) {
-  int typeX = sqlite3_value_type(argv[0]);
-  int typeY = sqlite3_value_type(argv[1]);
-  if (typeX != SQLITE_INTEGER && typeX != SQLITE_FLOAT) {
-    sqlite3_result_error(context, "point X value must be an integer or float",
-                         -1);
-    return;
+  static const char *names[] = {"X", "Y", "Z", "M"};
+  double vals[4];
+  for (int i = 0; i < argc; i++) {
+    int type = sqlite3_value_type(argv[i]);
+    if (type != SQLITE_INTEGER && type != SQLITE_FLOAT) {
+      const char *zErr = sqlite3_mprintf(
+          "point %s value must be an integer or float", names[i]);
+      sqlite3_result_error(context, zErr, -1);
+      sqlite3_free((void *)zErr);
+      return;
+    }
+    vals[i] = sqlite3_value_double(argv[i]);
   }
-  if (typeY != SQLITE_INTEGER && typeY != SQLITE_FLOAT) {
-    sqlite3_result_error(context, "point Y value must be an integer or float",
-                         -1);
-    return;
+  struct tg_point point = {vals[0], vals[1]};
+  struct tg_geom *geom;
+  if (argc == 4) {
+    geom = tg_geom_new_point_zm(point, vals[2], vals[3]);
+  } else if (argc == 3) {
+    geom = tg_geom_new_point_z(point, vals[2]);
+  } else {
+    geom = tg_geom_new_point(point);
   }
-  double x = sqlite3_value_double(argv[0]);
-  double y = sqlite3_value_double(argv[1]);
-  struct tg_point point = {x, y};
-  struct tg_geom *geom = tg_geom_new_point(point);
   if (tg_geom_error(geom)) {
     sqlite3_result_error(context, tg_geom_error(geom), -1);
     tg_geom_free(geom);
@@ -3285,6 +3385,10 @@ int sqlite3_tg_init(sqlite3 *db, char **pzErrMsg,
 
       {(char *)"tg_x",              1, tg_x,          NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_y",              1, tg_y,          NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_has_z",          1, tg_has_z,      NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_has_m",          1, tg_has_m,      NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_z",              1, tg_z,          NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_m",              1, tg_m,          NULL,             NULL,         DEFAULT_FLAGS},
 
       {(char *)"tg_min_x",          1, tg_min_x,      NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_min_y",          1, tg_min_y,      NULL,             NULL,         DEFAULT_FLAGS},
@@ -3302,6 +3406,8 @@ int sqlite3_tg_init(sqlite3 *db, char **pzErrMsg,
       {(char *)"tg_multipoint",         -1, tg_multipoint,         NULL,       NULL,         DEFAULT_FLAGS},
       {(char *)"tg_multipolygon",       -1, tg_multipolygon,       NULL,       NULL,         DEFAULT_FLAGS},
       {(char *)"tg_point",               2, tg_point,              NULL,       NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_point",               3, tg_point,              NULL,       NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_point",               4, tg_point,              NULL,       NULL,         DEFAULT_FLAGS},
       {(char *)"tg_polygon",            -1, tg_polygon,            NULL,       NULL,         DEFAULT_FLAGS},
       {(char *)"tg_poly_exterior",       1, tg_poly_exterior_,     NULL,       NULL,         DEFAULT_FLAGS},
       {(char *)"tg_rect",                2, tg_rect,               NULL,       NULL,         DEFAULT_FLAGS},

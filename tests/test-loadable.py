@@ -84,12 +84,15 @@ FUNCTIONS = [
     "tg_group_multipolygon",
     "tg_group_polygon",
     "tg_group_ring",
+    "tg_has_m",
+    "tg_has_z",
     "tg_intersects",
     "tg_is_empty",
     "tg_is_feature",
     "tg_is_featurecollection",
     "tg_line",
     "tg_linestring",
+    "tg_m",
     "tg_max_x",
     "tg_max_y",
     "tg_memsize",
@@ -98,6 +101,8 @@ FUNCTIONS = [
     "tg_multilinestring",
     "tg_multipoint",
     "tg_multipolygon",
+    "tg_point",
+    "tg_point",
     "tg_point",
     "tg_poly_exterior",
     "tg_polygon",
@@ -118,6 +123,7 @@ FUNCTIONS = [
     "tg_within",
     "tg_x",
     "tg_y",
+    "tg_z",
 ]
 
 
@@ -670,6 +676,99 @@ def test_tg_point():
         sqlite3.OperationalError, match="point Y value must be an integer or float"
     ):
         assert db.execute("select tg_point(1, 'a')")
+
+    # Z/M arities: 3-arg = Z (WKT convention), 4-arg = ZM. M-only
+    # construction is intentionally unsupported.
+    assert (
+        db.execute("select tg_to_wkt(tg_point(1, 2, 3))").fetchone()[0]
+        == "POINT(1 2 3)"
+    )
+    assert (
+        db.execute("select tg_to_wkt(tg_point(1, 2, 3, 4))").fetchone()[0]
+        == "POINT(1 2 3 4)"
+    )
+
+    with pytest.raises(
+        sqlite3.OperationalError, match="point Z value must be an integer or float"
+    ):
+        assert db.execute("select tg_point(1, 2, 'a')")
+    with pytest.raises(
+        sqlite3.OperationalError, match="point M value must be an integer or float"
+    ):
+        assert db.execute("select tg_point(1, 2, 3, 'a')")
+
+
+def test_tg_has_z():
+    tg_has_z = lambda *args: db.execute("select tg_has_z(?)", args).fetchone()[0]
+    assert db.execute("select tg_has_z(tg_point(1, 2))").fetchone()[0] == 0
+    assert db.execute("select tg_has_z(tg_point(1, 2, 3))").fetchone()[0] == 1
+    assert db.execute("select tg_has_z(tg_point(1, 2, 3, 4))").fetchone()[0] == 1
+    assert tg_has_z(shapely.to_wkt(LINE_A)) == 0
+    assert tg_has_z("LINESTRING Z (0 0 1, 1 1 1)") == 1
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="invalid geometry input",
+    ):
+        tg_has_z(None)
+
+
+def test_tg_has_m():
+    tg_has_m = lambda *args: db.execute("select tg_has_m(?)", args).fetchone()[0]
+    assert db.execute("select tg_has_m(tg_point(1, 2))").fetchone()[0] == 0
+    assert db.execute("select tg_has_m(tg_point(1, 2, 3))").fetchone()[0] == 0
+    assert db.execute("select tg_has_m(tg_point(1, 2, 3, 4))").fetchone()[0] == 1
+    assert tg_has_m(shapely.to_wkt(LINE_A)) == 0
+    assert tg_has_m("LINESTRING ZM (0 0 1 1, 1 1 1 1)") == 1
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="invalid geometry input",
+    ):
+        tg_has_m(None)
+
+
+def test_tg_z():
+    tg_z = lambda *args: db.execute("select tg_z(?)", args).fetchone()[0]
+    # 2D point: no Z coordinate -> NULL, not 0 (0 would be ambiguous with a
+    # real Z value of 0).
+    assert tg_z("POINT (1 2)") is None
+    assert db.execute("select tg_z(tg_point(1, 2, 3))").fetchone()[0] == 3
+    assert db.execute("select tg_z(tg_point(1, 2, 3, 4))").fetchone()[0] == 3
+    assert tg_z("POINT Z (1 2 3)") == 3
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="tg_z\\(\\) expected a Point geometry, found LineString",
+    ):
+        tg_z(shapely.to_wkt(LINE_A))
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="invalid geometry input",
+    ):
+        tg_z(None)
+
+
+def test_tg_m():
+    tg_m = lambda *args: db.execute("select tg_m(?)", args).fetchone()[0]
+    # Same NULL-for-absent convention as tg_z().
+    assert tg_m("POINT (1 2)") is None
+    assert tg_m("POINT Z (1 2 3)") is None
+    assert db.execute("select tg_m(tg_point(1, 2, 3, 4))").fetchone()[0] == 4
+    assert tg_m("POINT ZM (1 2 3 4)") == 4
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="tg_m\\(\\) expected a Point geometry, found LineString",
+    ):
+        tg_m(shapely.to_wkt(LINE_A))
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="invalid geometry input",
+    ):
+        tg_m(None)
 
 
 def test_tg_points_each(snapshot):

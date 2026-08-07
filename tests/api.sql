@@ -28,9 +28,14 @@ from str_lines(tg_debug()); -- @snap debug
   select tg_to_wkt(tg_point(1, 3)); -- 'POINT(1 3)'
   select tg_to_wkb(tg_point(1, 2)); -- X'0101000000000000000000f03f0000000000000040'
   select tg_to_geojson(tg_point(1, 2)); -- '{"type":"Point","coordinates":[1,2]}'
+  -- Z/M arities
+  select tg_to_wkt(tg_point(1, 2, 3)); -- 'POINT(1 2 3)'
+  select tg_to_wkt(tg_point(1, 2, 3, 4)); -- 'POINT(1 2 3 4)'
   -- errors
     select tg_point('a', 1); -- error: point X value must be an integer or float
     select tg_point(1, 'a'); -- error: point Y value must be an integer or float
+    select tg_point(1, 2, 'a'); -- error: point Z value must be an integer or float
+    select tg_point(1, 2, 3, 'a'); -- error: point M value must be an integer or float
 -- #endregion
 
 
@@ -415,6 +420,45 @@ from str_lines(tg_debug()); -- @snap debug
   select tg_y(tg_point(1, 2)); -- 2.0
   select tg_y('LINESTRING (0 0, 1 1)'); -- error: tg_y() expected a Point geometry, found LineString
   select tg_y(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
+-- #region tg_has_z
+  select tg_has_z('POINT (1 2)'); -- 0
+  select tg_has_z('POINT Z (1 2 3)'); -- 1
+  select tg_has_z(tg_point(1, 2)); -- 0
+  select tg_has_z(tg_point(1, 2, 3)); -- 1
+  select tg_has_z('LINESTRING Z (0 0 1, 1 1 1)'); -- 1
+  select tg_has_z(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
+-- #region tg_has_m
+  select tg_has_m('POINT (1 2)'); -- 0
+  select tg_has_m('POINT ZM (1 2 3 4)'); -- 1
+  select tg_has_m(tg_point(1, 2, 3)); -- 0
+  select tg_has_m(tg_point(1, 2, 3, 4)); -- 1
+  select tg_has_m('LINESTRING ZM (0 0 1 1, 1 1 1 1)'); -- 1
+  select tg_has_m(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
+-- #region tg_z
+  -- 2D point: no Z coordinate, returns NULL (not 0, which would be
+  -- ambiguous with a real Z value of 0)
+  select tg_z('POINT (1 2)'); -- NULL
+  select tg_z('POINT Z (1 2 3)'); -- 3.0
+  select tg_z(tg_point(1, 2, 3)); -- 3.0
+  select tg_z(tg_point(1, 2, 3, 4)); -- 3.0
+  select tg_z('LINESTRING (0 0, 1 1)'); -- error: tg_z() expected a Point geometry, found LineString
+  select tg_z(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
+-- #region tg_m
+  -- same NULL-for-absent convention as tg_z()
+  select tg_m('POINT (1 2)'); -- NULL
+  select tg_m('POINT Z (1 2 3)'); -- NULL
+  select tg_m('POINT ZM (1 2 3 4)'); -- 4.0
+  select tg_m(tg_point(1, 2, 3, 4)); -- 4.0
+  select tg_m('LINESTRING (0 0, 1 1)'); -- error: tg_m() expected a Point geometry, found LineString
+  select tg_m(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
 -- #endregion
 
 -- #region tg_min_x

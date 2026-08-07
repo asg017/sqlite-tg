@@ -88,9 +88,15 @@ select tg_debug();
 
 A [pointer function](#pointer-functions) that returns a point geometry with the given `x` and `y` values. This value will appear to be `NULL` on direct access, and is meant for performance critical SQL queries where you want to avoid serializing/de-serializing.
 
+`tg_point(x, y, z)` also accepts a third argument to construct a point with a Z coordinate, and `tg_point(x, y, z, m)` a fourth to also add an M coordinate. There is no way to construct an M-only point (with no Z) — use [`tg_geom()`](#tg_geom) with `POINT M (...)` WKT text instead.
+
 ```sql
 select tg_to_wkt(tg_point(1, 2));
 -- 'POINT(1 2)'
+select tg_to_wkt(tg_point(1, 2, 3));
+-- 'POINT(1 2 3)'
+select tg_to_wkt(tg_point(1, 2, 3, 4));
+-- 'POINT(1 2 3 4)'
 ```
 
 #### `tg_line(p1, p2, ..., pN)` {#tg_line}
@@ -599,6 +605,56 @@ select tg_y('POINT(1 2)');
 -- 2.0
 select tg_y('LINESTRING(0 0, 1 1)');
 -- error: tg_y() expected a Point geometry, found LineString
+```
+
+#### `tg_has_z(geometry)` {#tg_has_z}
+
+Returns `1` if the given geometry has a Z coordinate, `0` otherwise. Works on any geometry type, not just Points.
+
+```sql
+select tg_has_z('POINT(1 2)');
+-- 0
+select tg_has_z('POINT Z (1 2 3)');
+-- 1
+select tg_has_z('LINESTRING Z (0 0 1, 1 1 1)');
+-- 1
+```
+
+#### `tg_has_m(geometry)` {#tg_has_m}
+
+Returns `1` if the given geometry has an M coordinate, `0` otherwise. Works on any geometry type, not just Points.
+
+```sql
+select tg_has_m('POINT(1 2)');
+-- 0
+select tg_has_m('POINT ZM (1 2 3 4)');
+-- 1
+```
+
+#### `tg_z(point)` {#tg_z}
+
+Returns the Z coordinate of the given Point geometry, or `NULL` if it has no Z coordinate. Raises an error if the input is not a Point. `NULL` is used instead of `0` for a missing Z so it's distinguishable from an actual Z value of `0` — check with [`tg_has_z()`](#tg_has_z) if you need to tell "no Z" apart from "Z is 0".
+
+```sql
+select tg_z('POINT(1 2)');
+-- NULL
+select tg_z('POINT Z (1 2 3)');
+-- 3.0
+select tg_z('LINESTRING(0 0, 1 1)');
+-- error: tg_z() expected a Point geometry, found LineString
+```
+
+#### `tg_m(point)` {#tg_m}
+
+Returns the M coordinate of the given Point geometry, or `NULL` if it has no M coordinate. Raises an error if the input is not a Point. Same `NULL`-for-missing convention as [`tg_z()`](#tg_z).
+
+```sql
+select tg_m('POINT(1 2)');
+-- NULL
+select tg_m('POINT ZM (1 2 3 4)');
+-- 4.0
+select tg_m('LINESTRING(0 0, 1 1)');
+-- error: tg_m() expected a Point geometry, found LineString
 ```
 
 #### `tg_min_x(geometry)` {#tg_min_x}
