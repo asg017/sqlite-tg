@@ -28,7 +28,7 @@ from businesses;
 - [.] `tg_multipoint(p1, p2, ...)`
 - [.] `tg_group_multipoint(p)`
 - [x] `tg_geometrycollection(g1, g2)`
-- [ ] `tg_group_geometrycollection(g)`
+- [x] `tg_group_geometrycollection(g)` -- registered as the primary name; `tg_group_geometry_collection` (underscored) kept as a deprecated alias, same step/final pair (ticket 08)
 - [x] `tg_linestring(p1, p2, ...)` (alias to `tg_line`)
 - [x] `tg_group_line(p)` -- registered as `tg_group_line` (matching `tg_line`, not `tg_linestring`); no `_linestring`-spelled alias shipped
 - [x] `tg_ring(p1, p2, ...)`

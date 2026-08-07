@@ -77,6 +77,7 @@ FUNCTIONS = [
     "tg_group_feature_collection_geojson",
     "tg_group_feature_collection_geojson",
     "tg_group_geometry_collection",
+    "tg_group_geometrycollection",
     "tg_group_line",
     "tg_group_multilinestring",
     "tg_group_multipoint",
@@ -845,6 +846,27 @@ def test_tg_group_polygon():
         db.execute(
             "select tg_group_polygon(value) from json_each(?)",
             [json.dumps(["POINT(1 1)"])],
+        )
+
+
+def test_tg_group_geometrycollection():
+    # tg_group_geometrycollection() is the primary (underscore-free) name;
+    # tg_group_geometry_collection() is a deprecated compatibility alias —
+    # same underlying step/final pair, so both must behave identically.
+    for fn in ("tg_group_geometrycollection", "tg_group_geometry_collection"):
+        assert (
+            db.execute(
+                f"select tg_to_wkt({fn}(value)) from json_each(?)",
+                [json.dumps(["POINT(1 1)", "LINESTRING(0 0, 1 1)"])],
+            ).fetchone()[0]
+            == "GEOMETRYCOLLECTION(POINT(1 1),LINESTRING(0 0,1 1))"
+        )
+
+        assert (
+            db.execute(
+                f"select tg_to_wkt({fn}(value)) from json_each(?)", [json.dumps([])]
+            ).fetchone()[0]
+            == "GEOMETRYCOLLECTION EMPTY"
         )
 
 

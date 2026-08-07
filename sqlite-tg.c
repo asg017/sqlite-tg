@@ -3272,6 +3272,12 @@ int sqlite3_tg_init(sqlite3 *db, char **pzErrMsg,
     {"tg_group_multipolygon",               1, tg_group_multipolygon_step,        tg_group_multipolygon_final},
     {"tg_group_polygon",                    1, tg_group_polygon_step,             tg_group_polygon_final},
     {"tg_group_ring",                       1, tg_group_ring_step,                tg_group_ring_final},
+    // "tg_group_geometrycollection" is the primary name (matches the
+    // underscore-free tg_multipoint/tg_multilinestring/tg_multipolygon/
+    // tg_geometrycollection naming convention). "tg_group_geometry_collection"
+    // is kept registered as a deprecated compatibility alias — same
+    // step/final pair, see docs.md.
+    {"tg_group_geometrycollection",         1, tg_group_geometry_collection_step, tg_group_geometry_collection_final},
     {"tg_group_geometry_collection",        1, tg_group_geometry_collection_step, tg_group_geometry_collection_final},
     {"tg_group_feature_collection_geojson", 1, tg_feature_collection_step,        tg_feature_collection_final},
     {"tg_group_feature_collection_geojson", 2, tg_feature_collection_step,        tg_feature_collection_final},

@@ -131,6 +131,9 @@ int main(int argc, char *argv[]) {
       "\"POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))\"]')",
       "select tg_to_wkt(tg_group_polygon(tg_ring(tg_point(1, 1)))) "
       "from (select 1 where 0)",
+      "select tg_to_wkt(tg_group_geometrycollection(value)) "
+      "from json_each('[\"POINT(1 1)\", \"LINESTRING(0 0, 1 1)\"]')",
+      // deprecated alias must still work, same step/final pair
       "select tg_to_wkt(tg_group_geometry_collection(value)) "
       "from json_each('[\"POINT(1 1)\", \"LINESTRING(0 0, 1 1)\"]')",
       "select tg_group_feature_collection_geojson(value) "

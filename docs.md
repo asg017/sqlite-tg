@@ -300,9 +300,21 @@ from json_each('["POLYGON((0 0, 1 0, 1 1, 0 0))", "POLYGON((2 2, 3 2, 3 3, 2 2))
 -- 'MULTIPOLYGON(((0 0,1 0,1 1,0 0)),((2 2,3 2,3 3,2 2)))'
 ```
 
+#### `tg_group_geometrycollection(geometry)` {#tg_group_geometrycollection}
+
+A [pointer function](#pointer-functions) and aggregate function that builds a GeometryCollection from the aggregated geometries, which may be of mixed types. Named to match the underscore-free `tg_multipoint`/`tg_multilinestring`/`tg_multipolygon`/`tg_geometrycollection` convention.
+
+```sql
+select tg_to_wkt(
+  tg_group_geometrycollection(value)
+)
+from json_each('["POINT(1 1)", "LINESTRING(0 0, 1 1)"]');
+-- 'GEOMETRYCOLLECTION(POINT(1 1),LINESTRING(0 0,1 1))'
+```
+
 #### `tg_group_geometry_collection(geometry)` {#tg_group_geometry_collection}
 
-A [pointer function](#pointer-functions) and aggregate function that builds a GeometryCollection from the aggregated geometries, which may be of mixed types.
+A **deprecated** alias of [`tg_group_geometrycollection()`](#tg_group_geometrycollection) — same implementation, same behavior, kept registered for backwards compatibility. Prefer `tg_group_geometrycollection()` in new code.
 
 ```sql
 select tg_to_wkt(
@@ -327,6 +339,8 @@ from json_each('["POINT(1 1)", "POINT(5 9)"]');
 #### `tg_group_feature_collection_geojson(geometry, $properties)` {#tg_group_feature_collection_geojson}
 
 An aggregate function that builds a GeoJSON `FeatureCollection` string from the aggregated geometries. The optional second argument provides the `properties` object for each feature.
+
+Note: this name keeps its underscores (`feature_collection`) rather than following the underscore-free `tg_group_geometrycollection`-style convention — `featurecollection` reads worse fused, and this isn't a `tg_geom` pointer-returning constructor like the others, so it was left as-is rather than renamed or aliased.
 
 ```sql
 select tg_group_feature_collection_geojson(value)

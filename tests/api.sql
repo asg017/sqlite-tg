@@ -660,7 +660,28 @@ select tg_group_polygon(value) from json_each('[
 ]'); -- error: argument to tg_group_polygon() expected a ring, found Point
 -- #endregion
 
--- #region tg_group_geometry_collection
+-- #region tg_group_geometrycollection
+-- primary (underscore-free) spelling
+select
+  tg_to_wkt(
+    tg_group_geometrycollection(value)
+  )
+from json_each('[
+  "POINT (1 1)",
+  "LINESTRING (2 2, 3 3)",
+  "POLYGON ((4 4, 5 5, 6 6, 4 4))",
+]'); -- 'GEOMETRYCOLLECTION(POINT(1 1),LINESTRING(2 2,3 3),POLYGON((4 4,5 5,6 6,4 4)))'
+
+select
+  tg_to_wkt(
+    tg_group_geometrycollection(value)
+  )
+from json_each('[]'); -- 'GEOMETRYCOLLECTION EMPTY'
+
+select tg_group_geometrycollection(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+
+-- deprecated compatibility alias: tg_group_geometry_collection, same
+-- step/final pair, must behave identically
 select
   tg_to_wkt(
     tg_group_geometry_collection(value)
