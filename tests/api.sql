@@ -598,6 +598,68 @@ select tg_group_multilinestring(NULL); -- error: invalid geometry input. Must be
 select tg_group_multilinestring('POINT (1 1)'); -- error: inputs to tg_group_multilinestring() must be LineString geometries
 -- #endregion
 
+-- #region tg_group_line
+-- aggregate input order is only defined with an explicit `order by` inside
+-- the aggregate call, or over an already-ordered subquery
+select
+  tg_to_wkt(tg_group_line(tg_point(value ->> 0, value ->> 1)))
+from json_each('[[1, 1], [2, 2]]'); -- 'LINESTRING(1 1,2 2)'
+
+select
+  tg_to_wkt(tg_group_line(tg_point(1, 1)))
+from (select 1 where 0); -- 'LINESTRING EMPTY'
+
+select tg_group_line(value) from json_each('[
+  "LINESTRING(0 0, 1 1)",
+]'); -- error: parameters to tg_group_line() must be Point geometries
+-- #endregion
+
+-- #region tg_group_ring
+select
+  tg_to_wkt(tg_group_ring(tg_point(value ->> 0, value ->> 1)))
+from json_each('[[0, 0], [10, 0], [10, 10]]'); -- 'POLYGON((0 0,10 0,10 10))'
+
+select
+  tg_to_wkt(tg_group_ring(tg_point(1, 1)))
+from (select 1 where 0); -- 'POLYGON(())'
+
+select tg_group_ring(value) from json_each('[
+  "LINESTRING(0 0, 1 1)",
+]'); -- error: parameters to tg_group_ring() must be Point geometries
+-- #endregion
+
+-- #region tg_group_polygon
+-- 1-arg form: first row is the exterior, remaining rows are holes
+select
+  tg_to_wkt(tg_group_polygon(value))
+from json_each('[
+  "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))",
+  "POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))",
+]'); -- 'POLYGON((0 0,10 0,10 10,0 10,0 0),(1 1,2 1,2 2,1 2,1 1))'
+
+-- bare ring rows (e.g. from tg_group_ring()) are accepted too
+select
+  tg_to_wkt(
+    tg_group_polygon(
+      tg_ring(tg_point(0, 0), tg_point(10, 0), tg_point(10, 10), tg_point(0, 0))
+    )
+  ); -- 'POLYGON((0 0,10 0,10 10,0 0))'
+
+select
+  tg_to_wkt(tg_group_polygon(tg_ring(tg_point(1, 1))))
+from (select 1 where 0); -- 'POLYGON EMPTY'
+
+-- a Polygon WITH holes cannot be used as a ring row: silently using its
+-- exterior would drop the holes' data
+select tg_group_polygon(value) from json_each('[
+  "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))",
+]'); -- error: argument to tg_group_polygon() expected a ring, found a Polygon with holes (its holes would be silently dropped)
+
+select tg_group_polygon(value) from json_each('[
+  "POINT(1 1)",
+]'); -- error: argument to tg_group_polygon() expected a ring, found Point
+-- #endregion
+
 -- #region tg_group_geometry_collection
 select
   tg_to_wkt(

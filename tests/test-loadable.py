@@ -77,9 +77,12 @@ FUNCTIONS = [
     "tg_group_feature_collection_geojson",
     "tg_group_feature_collection_geojson",
     "tg_group_geometry_collection",
+    "tg_group_line",
     "tg_group_multilinestring",
     "tg_group_multipoint",
     "tg_group_multipolygon",
+    "tg_group_polygon",
+    "tg_group_ring",
     "tg_intersects",
     "tg_is_empty",
     "tg_is_feature",
@@ -718,6 +721,131 @@ def test_tg_group_multipoint():
         match=re.escape("parameters to tg_group_multipoint() must be Point gemetries"),
     ):
         db.execute("select tg_group_multipoint('MULTIPOINT EMPTY')")
+
+
+def test_tg_group_line():
+    # aggregate input order is only defined with an explicit order by
+    # (inside the aggregate call, or via an ordered subquery)
+    assert (
+        db.execute(
+            "select tg_to_wkt(tg_group_line(tg_point(value ->> 0, value ->> 1))) "
+            "from json_each(?)",
+            [json.dumps([[1, 1], [2, 2]])],
+        ).fetchone()[0]
+        == "LINESTRING(1 1,2 2)"
+    )
+
+    # zero rows: mirrors tg_group_multipoint()'s empty-aggregate behavior
+    assert (
+        db.execute(
+            "select tg_to_wkt(tg_group_line(tg_point(1, 1))) from (select 1 where 0)"
+        ).fetchone()[0]
+        == "LINESTRING EMPTY"
+    )
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape("parameters to tg_group_line() must be Point geometries"),
+    ):
+        db.execute(
+            "select tg_group_line(value) from json_each(?)",
+            [json.dumps(["LINESTRING(0 0, 1 1)"])],
+        )
+
+
+def test_tg_group_ring():
+    assert (
+        db.execute(
+            "select tg_to_wkt(tg_group_ring(tg_point(value ->> 0, value ->> 1))) "
+            "from json_each(?)",
+            [json.dumps([[0, 0], [10, 0], [10, 10]])],
+        ).fetchone()[0]
+        == "POLYGON((0 0,10 0,10 10))"
+    )
+
+    # zero rows: mirrors tg_ring()'s zero-arg empty-ring shape
+    assert (
+        db.execute(
+            "select tg_to_wkt(tg_group_ring(tg_point(1, 1))) from (select 1 where 0)"
+        ).fetchone()[0]
+        == "POLYGON(())"
+    )
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape("parameters to tg_group_ring() must be Point geometries"),
+    ):
+        db.execute(
+            "select tg_group_ring(value) from json_each(?)",
+            [json.dumps(["LINESTRING(0 0, 1 1)"])],
+        )
+
+
+def test_tg_group_polygon():
+    # 1-arg form: first row is the exterior, remaining rows are holes
+    assert (
+        db.execute(
+            "select tg_to_wkt(tg_group_polygon(value)) from json_each(?)",
+            [
+                json.dumps(
+                    [
+                        "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))",
+                        "POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))",
+                    ]
+                )
+            ],
+        ).fetchone()[0]
+        == "POLYGON((0 0,10 0,10 10,0 10,0 0),(1 1,2 1,2 2,1 2,1 1))"
+    )
+
+    # bare ring rows (e.g. from tg_group_ring()) are accepted too
+    assert (
+        db.execute(
+            "select tg_to_wkt(tg_group_polygon("
+            "tg_ring(tg_point(0, 0), tg_point(10, 0), tg_point(10, 10), tg_point(0, 0))"
+            "))"
+        ).fetchone()[0]
+        == "POLYGON((0 0,10 0,10 10,0 0))"
+    )
+
+    # zero rows: mirrors tg_polygon()'s zero-arg empty-polygon shape
+    assert (
+        db.execute(
+            "select tg_to_wkt(tg_group_polygon(tg_ring(tg_point(1, 1)))) "
+            "from (select 1 where 0)"
+        ).fetchone()[0]
+        == "POLYGON EMPTY"
+    )
+
+    # a Polygon WITH holes cannot be used as a ring row: silently using its
+    # exterior would drop the holes' data
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_group_polygon() expected a ring, found a "
+            "Polygon with holes (its holes would be silently dropped)"
+        ),
+    ):
+        db.execute(
+            "select tg_group_polygon(value) from json_each(?)",
+            [
+                json.dumps(
+                    [
+                        "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), "
+                        "(1 1, 2 1, 2 2, 1 2, 1 1))"
+                    ]
+                )
+            ],
+        )
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape("argument to tg_group_polygon() expected a ring, found Point"),
+    ):
+        db.execute(
+            "select tg_group_polygon(value) from json_each(?)",
+            [json.dumps(["POINT(1 1)"])],
+        )
 
 
 def test_tg_multipoint():

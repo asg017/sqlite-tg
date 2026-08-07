@@ -120,6 +120,17 @@ int main(int argc, char *argv[]) {
       "select * from tg_bbox('LINESTRING (30 10, 10 30, 40 40)')",
       "select tg_to_wkt(tg_group_multipoint(tg_point(value, value))) "
       "from json_each('[1, 2, 3]')",
+      "select tg_to_wkt(tg_group_line(tg_point(value ->> 0, value ->> 1))) "
+      "from json_each('[[1, 1], [2, 2]]')",
+      "select tg_to_wkt(tg_group_line(tg_point(1, 1))) from (select 1 where 0)",
+      "select tg_to_wkt(tg_group_ring(tg_point(value ->> 0, value ->> 1))) "
+      "from json_each('[[0, 0], [10, 0], [10, 10]]')",
+      "select tg_to_wkt(tg_group_ring(tg_point(1, 1))) from (select 1 where 0)",
+      "select tg_to_wkt(tg_group_polygon(value)) from json_each("
+      "'[\"POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))\", "
+      "\"POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))\"]')",
+      "select tg_to_wkt(tg_group_polygon(tg_ring(tg_point(1, 1)))) "
+      "from (select 1 where 0)",
       "select tg_to_wkt(tg_group_geometry_collection(value)) "
       "from json_each('[\"POINT(1 1)\", \"LINESTRING(0 0, 1 1)\"]')",
       "select tg_group_feature_collection_geojson(value) "
@@ -169,6 +180,16 @@ int main(int argc, char *argv[]) {
       "select tg_equals('POINT(1 1)', 'nope')",
       "select tg_to_wkt(tg_group_multipoint(value)) "
       "from json_each('[\"LINESTRING(0 0, 1 1)\"]')",
+      // error mid-aggregation: a good row is stepped (growing the aggregate
+      // context's point array) before the error-triggering row is hit
+      "select tg_to_wkt(tg_group_line(value)) from json_each("
+      "'[\"POINT(1 1)\", \"LINESTRING(0 0, 1 1)\"]')",
+      "select tg_to_wkt(tg_group_ring(value)) from json_each("
+      "'[\"POINT(1 1)\", \"LINESTRING(0 0, 1 1)\"]')",
+      "select tg_to_wkt(tg_group_polygon(value)) from json_each("
+      "'[\"POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))\", \"POINT(1 1)\"]')",
+      "select tg_group_polygon(value) from json_each("
+      "'[\"POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))\"]')",
       "select * from tg_line_points_each('POINT(1 1)')",
       "select * from tg_line_segments_each('POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0))')",
       "select * from tg_ring_points_each('POINT(1 1)')",

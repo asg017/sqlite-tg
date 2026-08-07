@@ -30,11 +30,11 @@ from businesses;
 - [x] `tg_geometrycollection(g1, g2)`
 - [ ] `tg_group_geometrycollection(g)`
 - [x] `tg_linestring(p1, p2, ...)` (alias to `tg_line`)
-- [ ] `tg_group_linestring(p)`
+- [x] `tg_group_line(p)` -- registered as `tg_group_line` (matching `tg_line`, not `tg_linestring`); no `_linestring`-spelled alias shipped
 - [x] `tg_ring(p1, p2, ...)`
-- [ ] `tg_group_ring(p)`
+- [x] `tg_group_ring(p)`
 - [x] `tg_polygon(exterior, hole1, hole2, ...)` (params are rings)
-- [ ] `tg_group_polygon(exterior, hole)` -- ensure 1st arg 'exterior' remains constant
+- [x] `tg_group_polygon(ring)` -- shipped the 1-arg form: first row is the exterior, subsequent rows are holes (the 2-arg exterior+holes sketch below was deferred, see 07-group-line-ring-polygon.md)
 - [x] `tg_multilinestring(l1, l2, ...)`
 - [ ] `tg_group_multilinestring(l1, l2, ...)`
 - [x] `tg_multipolygon(p1, p2)`

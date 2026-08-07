@@ -237,6 +237,45 @@ from json_each('[[1, 1], [2, 2], [3, 3]]');
 -- 'MULTIPOINT(1 1,2 2,3 3)'
 ```
 
+#### `tg_group_line(point)` {#tg_group_line}
+
+A [pointer function](#pointer-functions) and aggregate function that builds a LineString geometry from the aggregated Point geometries, in row order. A zero-row aggregate produces `LINESTRING EMPTY`, matching [`tg_group_multipoint()`](#tg_group_multipoint).
+
+```sql
+select tg_to_wkt(
+  tg_group_line(tg_point(value ->> 0, value ->> 1))
+)
+from json_each('[[1, 1], [2, 2]]');
+-- 'LINESTRING(1 1,2 2)'
+```
+
+#### `tg_group_ring(point)` {#tg_group_ring}
+
+A [pointer function](#pointer-functions) and aggregate function that builds a ring from the aggregated Point geometries, in row order — same closing-point behavior as [`tg_ring()`](#tg_ring). A zero-row aggregate produces the same empty-ring shape as `tg_ring()` with no arguments.
+
+```sql
+select tg_to_wkt(
+  tg_group_ring(tg_point(value ->> 0, value ->> 1))
+)
+from json_each('[[0, 0], [10, 0], [10, 10]]');
+-- 'POLYGON((0 0,10 0,10 10))'
+```
+
+#### `tg_group_polygon(ring)` {#tg_group_polygon}
+
+A [pointer function](#pointer-functions) and aggregate function that builds a Polygon geometry from the aggregated rings: the first row is the exterior and any subsequent rows are holes. Each row follows the same ring convention as [`tg_polygon()`](#tg_polygon) — a bare ring upcast, or a hole-free Polygon geometry — and a Polygon-with-holes row is rejected for the same reason. A zero-row aggregate produces `POLYGON EMPTY`, matching `tg_polygon()` with no arguments. (The two-argument `tg_group_polygon(exterior, hole)` form sketched in earlier notes was deliberately not implemented — it composes awkwardly as an aggregate; use `tg_group_ring()` to build rings first if you need holes assembled separately.)
+
+```sql
+select tg_to_wkt(
+  tg_group_polygon(value)
+)
+from json_each('[
+  "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))",
+  "POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))"
+]');
+-- 'POLYGON((0 0,10 0,10 10,0 10,0 0),(1 1,2 1,2 2,1 2,1 1))'
+```
+
 #### `tg_group_multilinestring(line)` {#tg_group_multilinestring}
 
 A [pointer function](#pointer-functions) and aggregate function that builds a MultiLineString geometry from the aggregated LineString geometries.

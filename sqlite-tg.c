@@ -1409,6 +1409,236 @@ static void tg_group_geometry_collection_final(sqlite3_context *context) {
   tg_array_cleanup(a);
 }
 
+#pragma region tg_group_line
+// Aggregate input order is only well-defined when the query uses an explicit
+// `order by` inside the aggregate call (`tg_group_line(p order by ...)`) or
+// aggregates over an already-ordered subquery — mirrors the caveat already
+// documented for the other aggregate constructors.
+static void tg_group_line_step(sqlite3_context *context, int argc,
+                               sqlite3_value *argv[]) {
+
+  int rc;
+  struct Array *array;
+  array = (struct Array *)sqlite3_aggregate_context(context, sizeof(*array));
+  if (!array) {
+    return;
+  }
+  if(!array->z) {
+    rc = tg_array_init(array, sizeof(struct tg_point), 128);
+    if(rc!=SQLITE_OK) {
+      sqlite3_result_error_nomem(context);
+      return;
+    }
+  }
+
+  struct tg_geom *geom;
+  char * errmsg;
+  rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  if (tg_geom_typeof(geom) != TG_POINT) {
+    sqlite3_result_error(
+        context, "parameters to tg_group_line() must be Point geometries",
+        -1);
+    tg_geom_free(geom);
+    return;
+  }
+
+  struct tg_point src = tg_geom_point(geom);
+  tg_array_append(array, &src);
+  tg_geom_free(geom);
+}
+
+static void tg_group_line_final(sqlite3_context *context) {
+  struct Array *a;
+  a = (struct Array *)sqlite3_aggregate_context(context, sizeof(*a));
+  if (a == 0) {
+    return;
+  }
+  if (a->z == 0) {
+    // Zero rows: mirrors tg_group_multipoint_final()'s empty-aggregate
+    // behavior (an empty geometry of the target type, not NULL).
+    struct tg_geom *geom = tg_geom_new_linestring_empty();
+    if (!geom) {
+      sqlite3_result_error_nomem(context);
+    } else {
+      resultGeomPointer(context, geom);
+    }
+    return;
+  }
+  if (a->length) {
+    struct tg_line *line = tg_line_new((struct tg_point *) a->z, a->length);
+    if (!line) {
+      sqlite3_result_error_nomem(context);
+    } else {
+      // tg_line upcasts to tg_geom; the pointer destructor's tg_geom_free()
+      // dispatches back to tg_line_free()
+      resultGeomPointer(context, (struct tg_geom *) line);
+    }
+  }
+  tg_array_cleanup(a);
+}
+
+#pragma region tg_group_ring
+// Same ordering caveat as tg_group_line() above.
+static void tg_group_ring_step(sqlite3_context *context, int argc,
+                               sqlite3_value *argv[]) {
+
+  int rc;
+  struct Array *array;
+  array = (struct Array *)sqlite3_aggregate_context(context, sizeof(*array));
+  if (!array) {
+    return;
+  }
+  if(!array->z) {
+    rc = tg_array_init(array, sizeof(struct tg_point), 128);
+    if(rc!=SQLITE_OK) {
+      sqlite3_result_error_nomem(context);
+      return;
+    }
+  }
+
+  struct tg_geom *geom;
+  char * errmsg;
+  rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  if (tg_geom_typeof(geom) != TG_POINT) {
+    sqlite3_result_error(
+        context, "parameters to tg_group_ring() must be Point geometries",
+        -1);
+    tg_geom_free(geom);
+    return;
+  }
+
+  struct tg_point src = tg_geom_point(geom);
+  tg_array_append(array, &src);
+  tg_geom_free(geom);
+}
+
+static void tg_group_ring_final(sqlite3_context *context) {
+  struct Array *a;
+  a = (struct Array *)sqlite3_aggregate_context(context, sizeof(*a));
+  if (a == 0) {
+    return;
+  }
+  if (a->z == 0) {
+    // Zero rows: mirrors tg_group_multipoint_final()'s empty-aggregate
+    // behavior, using the same empty-ring shape as tg_ring() with no args.
+    struct tg_ring *ring = tg_ring_new(NULL, 0);
+    if (!ring) {
+      sqlite3_result_error_nomem(context);
+    } else {
+      resultGeomPointer(context, (struct tg_geom *) ring);
+    }
+    return;
+  }
+  if (a->length) {
+    struct tg_ring *ring = tg_ring_new((struct tg_point *) a->z, a->length);
+    if (!ring) {
+      sqlite3_result_error_nomem(context);
+    } else {
+      // rings upcast to tg_geom; the pointer destructor's tg_geom_free()
+      // dispatches back to tg_ring_free()
+      resultGeomPointer(context, (struct tg_geom *) ring);
+    }
+  }
+  tg_array_cleanup(a);
+}
+
+#pragma region tg_group_polygon
+// 1-arg form: aggregates rings where the first row is the exterior and any
+// subsequent rows are holes (deferred the 2-arg exterior+holes NOTES design,
+// see ticket 07 — awkward aggregate shape, and this composes with
+// tg_group_ring()). Ring arguments follow the same convention as
+// tg_polygon()'s arguments: a bare ring upcast, or a hole-free Polygon
+// geometry (see ringArgFromGeom()); a Polygon-with-holes argument is
+// rejected rather than silently dropping its holes.
+static void tg_group_polygon_step(sqlite3_context *context, int argc,
+                               sqlite3_value *argv[]) {
+
+  int rc;
+  struct Array *array;
+  array = (struct Array *)sqlite3_aggregate_context(context, sizeof(*array));
+  if (!array) {
+    return;
+  }
+  if(!array->z) {
+    rc = tg_array_init(array, sizeof(struct tg_ring *), 128);
+    if(rc!=SQLITE_OK) {
+      sqlite3_result_error_nomem(context);
+      return;
+    }
+  }
+
+  struct tg_geom *geom;
+  char * errmsg;
+  rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  char *ringerr = NULL;
+  struct tg_ring *ring = ringArgFromGeom(geom, &ringerr);
+  if (!ring) {
+    const char *zErr = sqlite3_mprintf(
+        "argument to tg_group_polygon() %z", ringerr);
+    sqlite3_result_error(context, zErr, -1);
+    sqlite3_free((void *)zErr);
+    return;
+  }
+
+  tg_array_append(array, &ring);
+}
+
+// tg_poly_new() clones its exterior/holes arguments internally, so the
+// rings collected in the array must be freed by us after the call
+// regardless of success or failure (same pattern as the tg_polygon()
+// scalar constructor).
+static void tg_group_polygon_final(sqlite3_context *context) {
+  struct Array *a;
+  a = (struct Array *)sqlite3_aggregate_context(context, sizeof(*a));
+  if (a == 0) {
+    return;
+  }
+  if (a->z == 0) {
+    // Zero rows: mirrors tg_group_multipoint_final()'s empty-aggregate
+    // behavior, using the same empty shape as tg_polygon() with no args.
+    struct tg_geom *geom = tg_geom_new_polygon_empty();
+    if (!geom) {
+      sqlite3_result_error_nomem(context);
+    } else {
+      resultGeomPointer(context, geom);
+    }
+    return;
+  }
+  if (a->length) {
+    struct tg_ring **rings = (struct tg_ring **) a->z;
+    struct tg_poly *poly = tg_poly_new(rings[0],
+                                       (const struct tg_ring *const *) &rings[1],
+                                       a->length - 1);
+    if (!poly) {
+      sqlite3_result_error_nomem(context);
+    } else {
+      resultGeomPointer(context, (struct tg_geom *) poly);
+    }
+  }
+  for (int i = 0; i < a->length; i++) {
+    tg_ring_free(((struct tg_ring **) a->z)[i]);
+  }
+  tg_array_cleanup(a);
+}
+
 struct feature_collection_context {
   sqlite3_str * s;
   int n;
@@ -3036,9 +3266,12 @@ int sqlite3_tg_init(sqlite3 *db, char **pzErrMsg,
 
   } aGroup[] = {
     {"tg_group_bbox",                       1, tg_group_bbox_step,                tg_group_bbox_final},
+    {"tg_group_line",                       1, tg_group_line_step,                tg_group_line_final},
     {"tg_group_multilinestring",            1, tg_group_multilinestring_step,     tg_group_multilinestring_final},
     {"tg_group_multipoint",                 1, tg_group_multipoint_step,          tg_group_multipoint_final},
     {"tg_group_multipolygon",               1, tg_group_multipolygon_step,        tg_group_multipolygon_final},
+    {"tg_group_polygon",                    1, tg_group_polygon_step,             tg_group_polygon_final},
+    {"tg_group_ring",                       1, tg_group_ring_step,                tg_group_ring_final},
     {"tg_group_geometry_collection",        1, tg_group_geometry_collection_step, tg_group_geometry_collection_final},
     {"tg_group_feature_collection_geojson", 1, tg_feature_collection_step,        tg_feature_collection_final},
     {"tg_group_feature_collection_geojson", 2, tg_feature_collection_step,        tg_feature_collection_final},
