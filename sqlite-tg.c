@@ -435,6 +435,124 @@ static void tg_memsize(sqlite3_context *context, int argc, sqlite3_value **argv)
 }
 #pragma endregion
 
+#pragma region measurements
+
+static void tg_x(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+  if (tg_geom_typeof(geom) != TG_POINT) {
+    const char *zErr = sqlite3_mprintf(
+        "tg_x() expected a Point geometry, found %s",
+        tg_geom_type_string(tg_geom_typeof(geom)));
+    sqlite3_result_error(context, zErr, -1);
+    sqlite3_free((void *)zErr);
+    tg_geom_free(geom);
+    return;
+  }
+
+  struct tg_point point = tg_geom_point(geom);
+  sqlite3_result_double(context, point.x);
+
+  tg_geom_free(geom);
+}
+
+static void tg_y(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+  if (tg_geom_typeof(geom) != TG_POINT) {
+    const char *zErr = sqlite3_mprintf(
+        "tg_y() expected a Point geometry, found %s",
+        tg_geom_type_string(tg_geom_typeof(geom)));
+    sqlite3_result_error(context, zErr, -1);
+    sqlite3_free((void *)zErr);
+    tg_geom_free(geom);
+    return;
+  }
+
+  struct tg_point point = tg_geom_point(geom);
+  sqlite3_result_double(context, point.y);
+
+  tg_geom_free(geom);
+}
+
+static void tg_min_x(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  struct tg_rect rect = tg_geom_rect(geom);
+  sqlite3_result_double(context, rect.min.x);
+
+  tg_geom_free(geom);
+}
+
+static void tg_min_y(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  struct tg_rect rect = tg_geom_rect(geom);
+  sqlite3_result_double(context, rect.min.y);
+
+  tg_geom_free(geom);
+}
+
+static void tg_max_x(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  struct tg_rect rect = tg_geom_rect(geom);
+  sqlite3_result_double(context, rect.max.x);
+
+  tg_geom_free(geom);
+}
+
+static void tg_max_y(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  struct tg_rect rect = tg_geom_rect(geom);
+  sqlite3_result_double(context, rect.max.y);
+
+  tg_geom_free(geom);
+}
+
+#pragma endregion
+
 #pragma region constructors
 
 static void tg_point(sqlite3_context *context, int argc, sqlite3_value **argv) {
@@ -2295,6 +2413,14 @@ int sqlite3_tg_init(sqlite3 *db, char **pzErrMsg,
       {(char *)"tg_is_feature",           1, tg_is_feature,           NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_is_featurecollection", 1, tg_is_featurecollection, NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_memsize",              1, tg_memsize,              NULL,             NULL,         DEFAULT_FLAGS},
+
+      {(char *)"tg_x",              1, tg_x,          NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_y",              1, tg_y,          NULL,             NULL,         DEFAULT_FLAGS},
+
+      {(char *)"tg_min_x",          1, tg_min_x,      NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_min_y",          1, tg_min_y,      NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_max_x",          1, tg_max_x,      NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_max_y",          1, tg_max_y,      NULL,             NULL,         DEFAULT_FLAGS},
 
       {(char *)"tg_to_wkt",         1, tg_to_wkt,     NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_to_wkb",         1, tg_to_wkb,     NULL,             NULL,         DEFAULT_FLAGS},

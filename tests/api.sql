@@ -217,6 +217,40 @@ from str_lines(tg_debug()); -- @snap debug
   select tg_is_featurecollection(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
 -- #endregion
 
+-- #region tg_x
+  select tg_x('POINT (1 2)'); -- 1.0
+  select tg_x(tg_point(1, 2)); -- 1.0
+  select tg_x('LINESTRING (0 0, 1 1)'); -- error: tg_x() expected a Point geometry, found LineString
+  select tg_x(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
+-- #region tg_y
+  select tg_y('POINT (1 2)'); -- 2.0
+  select tg_y(tg_point(1, 2)); -- 2.0
+  select tg_y('LINESTRING (0 0, 1 1)'); -- error: tg_y() expected a Point geometry, found LineString
+  select tg_y(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
+-- #region tg_min_x
+  select tg_min_x('POLYGON ((1 1, 2 2, 3 3, 1 1))'); -- 1.0
+  select tg_min_x(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
+-- #region tg_min_y
+  select tg_min_y('POLYGON ((1 1, 2 2, 3 3, 1 1))'); -- 1.0
+  select tg_min_y(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
+-- #region tg_max_x
+  select tg_max_x('POLYGON ((1 1, 2 2, 3 3, 1 1))'); -- 3.0
+  select tg_max_x(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
+-- #region tg_max_y
+  select tg_max_y('POLYGON ((1 1, 2 2, 3 3, 1 1))'); -- 3.0
+  select tg_max_y(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
 -- #region tg_memsize
   select tg_memsize('POINT (0 1)'); -- 24
   select tg_memsize(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).

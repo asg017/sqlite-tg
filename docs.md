@@ -405,6 +405,68 @@ select tg_valid_wkb(X'00');
 -- 0
 ```
 
+### Coordinates and bounding boxes
+
+Coordinate and bounding box accessors.
+
+#### `tg_x(point)` {#tg_x}
+
+Returns the X coordinate of the given Point geometry. Raises an error if the input is not a Point.
+
+```sql
+select tg_x('POINT(1 2)');
+-- 1.0
+select tg_x('LINESTRING(0 0, 1 1)');
+-- error: tg_x() expected a Point geometry, found LineString
+```
+
+#### `tg_y(point)` {#tg_y}
+
+Returns the Y coordinate of the given Point geometry. Raises an error if the input is not a Point.
+
+```sql
+select tg_y('POINT(1 2)');
+-- 2.0
+select tg_y('LINESTRING(0 0, 1 1)');
+-- error: tg_y() expected a Point geometry, found LineString
+```
+
+#### `tg_min_x(geometry)` {#tg_min_x}
+
+Returns the minimum X coordinate of the given geometry's bounding box. Based on [`tg_geom_rect()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_rect). Useful for populating an [R-Tree](https://www.sqlite.org/rtree.html) index alongside a geometry column.
+
+```sql
+select tg_min_x('POLYGON((1 1, 2 2, 3 3, 1 1))');
+-- 1.0
+```
+
+#### `tg_min_y(geometry)` {#tg_min_y}
+
+Returns the minimum Y coordinate of the given geometry's bounding box. Based on [`tg_geom_rect()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_rect).
+
+```sql
+select tg_min_y('POLYGON((1 1, 2 2, 3 3, 1 1))');
+-- 1.0
+```
+
+#### `tg_max_x(geometry)` {#tg_max_x}
+
+Returns the maximum X coordinate of the given geometry's bounding box. Based on [`tg_geom_rect()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_rect).
+
+```sql
+select tg_max_x('POLYGON((1 1, 2 2, 3 3, 1 1))');
+-- 3.0
+```
+
+#### `tg_max_y(geometry)` {#tg_max_y}
+
+Returns the maximum Y coordinate of the given geometry's bounding box. Based on [`tg_geom_rect()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_rect).
+
+```sql
+select tg_max_y('POLYGON((1 1, 2 2, 3 3, 1 1))');
+-- 3.0
+```
+
 ### Operations
 
 Every predicate accepts two geometries `a` and `b`, in any [supported format](#supported-formats), and returns `1` or `0`. All raise an error if either input is not a valid geometry.

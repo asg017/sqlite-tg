@@ -84,7 +84,11 @@ FUNCTIONS = [
     "tg_is_feature",
     "tg_is_featurecollection",
     "tg_line",
+    "tg_max_x",
+    "tg_max_y",
     "tg_memsize",
+    "tg_min_x",
+    "tg_min_y",
     "tg_multipoint",
     "tg_point",
     "tg_poly_exterior",
@@ -98,6 +102,8 @@ FUNCTIONS = [
     "tg_valid_wkt",
     "tg_version",
     "tg_within",
+    "tg_x",
+    "tg_y",
 ]
 
 
@@ -303,6 +309,69 @@ def test_tg_memsize():
         match="invalid geometry input",
     ):
         tg_memsize(None)
+
+
+def test_tg_x():
+    tg_x = lambda *args: db.execute("select tg_x(?)", args).fetchone()[0]
+    POINT = shapely.from_wkt("POINT (1 2)")
+    for format in ("wkt", "wkb", "geojson"):
+        assert tg_x(getattr(shapely, f"to_{format}")(POINT)) == 1
+    assert db.execute("select tg_x(tg_point(1, 2))").fetchone()[0] == 1
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="tg_x\\(\\) expected a Point geometry, found LineString",
+    ):
+        tg_x(shapely.to_wkt(LINE_A))
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="invalid geometry input",
+    ):
+        tg_x(None)
+
+
+def test_tg_y():
+    tg_y = lambda *args: db.execute("select tg_y(?)", args).fetchone()[0]
+    POINT = shapely.from_wkt("POINT (1 2)")
+    for format in ("wkt", "wkb", "geojson"):
+        assert tg_y(getattr(shapely, f"to_{format}")(POINT)) == 2
+    assert db.execute("select tg_y(tg_point(1, 2))").fetchone()[0] == 2
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="tg_y\\(\\) expected a Point geometry, found LineString",
+    ):
+        tg_y(shapely.to_wkt(LINE_A))
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="invalid geometry input",
+    ):
+        tg_y(None)
+
+
+def test_tg_min_x_min_y_max_x_max_y():
+    POLY = shapely.from_wkt("POLYGON ((1 1, 2 2, 3 3, 1 1))")
+    for format in ("wkt", "wkb", "geojson"):
+        value = getattr(shapely, f"to_{format}")(POLY)
+        assert db.execute("select tg_min_x(?)", [value]).fetchone()[0] == 1
+        assert db.execute("select tg_min_y(?)", [value]).fetchone()[0] == 1
+        assert db.execute("select tg_max_x(?)", [value]).fetchone()[0] == 3
+        assert db.execute("select tg_max_y(?)", [value]).fetchone()[0] == 3
+
+    row = db.execute(
+        "select tg_min_x(tg_geom(?)), tg_min_y(tg_geom(?)), "
+        "tg_max_x(tg_geom(?)), tg_max_y(tg_geom(?))",
+        ["POLYGON ((1 1, 2 2, 3 3, 1 1))"] * 4,
+    ).fetchone()
+    assert tuple(row) == (1, 1, 3, 3)
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="invalid geometry input",
+    ):
+        db.execute("select tg_min_x(?)", [None])
 
 
 def test_tg_to_wkt():

@@ -75,6 +75,12 @@ int main(int argc, char *argv[]) {
       "{\"type\": \"Point\", \"coordinates\": [1, 2]}, \"properties\": {}}')",
       "select tg_is_featurecollection('{\"type\": \"FeatureCollection\", \"features\": []}')",
       "select tg_memsize(tg_point(1, 2))",
+      "select tg_x(tg_point(1, 2))",
+      "select tg_y(tg_point(1, 2))",
+      "select tg_min_x('POLYGON ((1 1, 2 2, 3 3, 1 1))')",
+      "select tg_min_y('POLYGON ((1 1, 2 2, 3 3, 1 1))')",
+      "select tg_max_x('POLYGON ((1 1, 2 2, 3 3, 1 1))')",
+      "select tg_max_y('POLYGON ((1 1, 2 2, 3 3, 1 1))')",
       "select * from tg_bbox('LINESTRING (30 10, 10 30, 40 40)')",
       "select tg_to_wkt(tg_group_multipoint(tg_point(value, value))) "
       "from json_each('[1, 2, 3]')",
@@ -107,6 +113,9 @@ int main(int argc, char *argv[]) {
       "select tg_is_feature(NULL)",
       "select tg_is_featurecollection('not a geometry')",
       "select tg_memsize(NULL)",
+      "select tg_x('LINESTRING(0 0, 1 1)')",
+      "select tg_y(NULL)",
+      "select tg_min_x(NULL)",
       "select tg_intersects('POINT(1 1)', 'nope')",
       "select tg_equals('POINT(1 1)', 'nope')",
       "select tg_to_wkt(tg_group_multipoint(value)) "
