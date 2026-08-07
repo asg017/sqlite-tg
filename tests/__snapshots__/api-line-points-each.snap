@@ -1,0 +1,33 @@
+Source: ../api.sql
+select
+    rowid,
+    point,
+    tg_to_wkt(point),
+    tg_to_geojson(point)
+  from tg_line_points_each('LINESTRING (10 40, 40 30, 20 20, 30 10)');
+---
+{
+	 rowid: 0
+	 point: pointer[]
+	 tg_to_wkt(point): 'POINT(10 40)'
+	 tg_to_geojson(point): (json) '{"type":"Point","coordinates":[10,40]}'
+}
+{
+	 rowid: 1
+	 point: pointer[]
+	 tg_to_wkt(point): 'POINT(40 30)'
+	 tg_to_geojson(point): (json) '{"type":"Point","coordinates":[40,30]}'
+}
+{
+	 rowid: 2
+	 point: pointer[]
+	 tg_to_wkt(point): 'POINT(20 20)'
+	 tg_to_geojson(point): (json) '{"type":"Point","coordinates":[20,20]}'
+}
+{
+	 rowid: 3
+	 point: pointer[]
+	 tg_to_wkt(point): 'POINT(30 10)'
+	 tg_to_geojson(point): (json) '{"type":"Point","coordinates":[30,10]}'
+}
+

@@ -1,0 +1,28 @@
+Source: ../api.sql
+select
+    tg_ring_points_each.rowid,
+    tg_to_wkt(point)
+  from tg_holes_each('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))')
+  join tg_ring_points_each(hole);
+---
+{
+	 rowid: 0
+	 tg_to_wkt(point): 'POINT(1 1)'
+}
+{
+	 rowid: 1
+	 tg_to_wkt(point): 'POINT(2 1)'
+}
+{
+	 rowid: 2
+	 tg_to_wkt(point): 'POINT(2 2)'
+}
+{
+	 rowid: 3
+	 tg_to_wkt(point): 'POINT(1 2)'
+}
+{
+	 rowid: 4
+	 tg_to_wkt(point): 'POINT(1 1)'
+}
+

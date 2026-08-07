@@ -54,11 +54,11 @@ tg_segment(aP, bP)
 | `tg_lines_each()`         |   ✅   | `tg_geom` | `tg_geom_num_lines()`      | `tg_geom_line_at()`     |
 | `tg_polygons_each()`      |   ✅   | `tg_geom` | `tg_geom_num_polys()`      | `tg_geom_poly_at()`     |
 | `tg_geometries_each()`    |   ✅   | `tg_geom` | `tg_geom_num_geometries()` | `tg_geom_geometry_at()` |
-| `tg_line_points_each()`   |   ❌   | `tg_line` | `tg_line_num_points()`     | `tg_line_point_at()`    |
-| `tg_line_segments_each()` |   ❌   | `tg_line` | `tg_line_num_segments()`   | `tg_line_segment_at()`  |
-| `tg_poly_holes_each()`    |   ❌   | `tg_poly` | `tg_poly_num_holes()`      | `tg_poly_hole_at()`     |
-| `tg_ring_points_each()`   |   ❌   | `tg_ring` | `tg_ring_num_points()`     | `tg_ring_point_at()`    |
-| `tg_ring_segments_each()` |   ❌   | `tg_ring` | `tg_ring_num_segments()`   | `tg_ring_segment_at()`  |
+| `tg_line_points_each()`   |   ✅   | `tg_line` | `tg_line_num_points()`     | `tg_line_point_at()`    |
+| `tg_line_segments_each()` |   ✅   | `tg_line` | `tg_line_num_segments()`   | `tg_line_segment_at()`  |
+| `tg_holes_each()`         |   ✅   | `tg_poly` | `tg_poly_num_holes()`      | `tg_poly_hole_at()`     |
+| `tg_ring_points_each()`   |   ✅   | `tg_ring` | `tg_ring_num_points()`     | `tg_ring_point_at()`    |
+| `tg_ring_segments_each()` |   ✅   | `tg_ring` | `tg_ring_num_segments()`   | `tg_ring_segment_at()`  |
 
 ## goal sqlite-tg queries that should be fast
 

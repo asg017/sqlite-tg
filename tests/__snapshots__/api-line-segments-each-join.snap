@@ -1,0 +1,36 @@
+Source: ../api.sql
+select
+    json_each.key,
+    tg_line_segments_each.rowid,
+    ax, ay, bx, by
+  from json_each('[
+    "LINESTRING (10 40, 40 30)",
+    "LINESTRING (20 20, 30 10, 15 15)",
+  ]')
+  join tg_line_segments_each(value);
+---
+{
+	 key: 0
+	 rowid: 0
+	 ax: 10.0
+	 ay: 40.0
+	 bx: 40.0
+	 by: 30.0
+}
+{
+	 key: 1
+	 rowid: 0
+	 ax: 20.0
+	 ay: 20.0
+	 bx: 30.0
+	 by: 10.0
+}
+{
+	 key: 1
+	 rowid: 1
+	 ax: 30.0
+	 ay: 10.0
+	 bx: 15.0
+	 by: 15.0
+}
+

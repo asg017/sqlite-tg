@@ -84,6 +84,51 @@
     }),
   ])
 # ---
+# name: test_tg_line_points_each
+  list([
+    dict({
+      'point_wkt': 'POINT(10 10)',
+      'rowid': 0,
+    }),
+    dict({
+      'point_wkt': 'POINT(20 20)',
+      'rowid': 1,
+    }),
+    dict({
+      'point_wkt': 'POINT(10 40)',
+      'rowid': 2,
+    }),
+    dict({
+      'point_wkt': 'POINT(40 40)',
+      'rowid': 3,
+    }),
+  ])
+# ---
+# name: test_tg_line_segments_each
+  list([
+    dict({
+      'ax': 10.0,
+      'ay': 10.0,
+      'bx': 20.0,
+      'by': 20.0,
+      'rowid': 0,
+    }),
+    dict({
+      'ax': 20.0,
+      'ay': 20.0,
+      'bx': 10.0,
+      'by': 40.0,
+      'rowid': 1,
+    }),
+    dict({
+      'ax': 10.0,
+      'ay': 40.0,
+      'bx': 40.0,
+      'by': 40.0,
+      'rowid': 2,
+    }),
+  ])
+# ---
 # name: test_tg_lines_each
   list([
     dict({
@@ -155,6 +200,62 @@
       'rowid': 2,
       'tg_to_geojson(point)': '{"type":"Point","coordinates":[50,40]}',
       'tg_to_wkt(point)': 'POINT(50 40)',
+    }),
+  ])
+# ---
+# name: test_tg_ring_points_each
+  list([
+    dict({
+      'point_wkt': 'POINT(0 0)',
+      'rowid': 0,
+    }),
+    dict({
+      'point_wkt': 'POINT(10 0)',
+      'rowid': 1,
+    }),
+    dict({
+      'point_wkt': 'POINT(10 10)',
+      'rowid': 2,
+    }),
+    dict({
+      'point_wkt': 'POINT(0 10)',
+      'rowid': 3,
+    }),
+    dict({
+      'point_wkt': 'POINT(0 0)',
+      'rowid': 4,
+    }),
+  ])
+# ---
+# name: test_tg_ring_segments_each
+  list([
+    dict({
+      'ax': 0.0,
+      'ay': 0.0,
+      'bx': 10.0,
+      'by': 0.0,
+      'rowid': 0,
+    }),
+    dict({
+      'ax': 10.0,
+      'ay': 0.0,
+      'bx': 10.0,
+      'by': 10.0,
+      'rowid': 1,
+    }),
+    dict({
+      'ax': 10.0,
+      'ay': 10.0,
+      'bx': 0.0,
+      'by': 10.0,
+      'rowid': 2,
+    }),
+    dict({
+      'ax': 0.0,
+      'ay': 10.0,
+      'bx': 0.0,
+      'by': 0.0,
+      'rowid': 3,
     }),
   ])
 # ---

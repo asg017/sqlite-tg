@@ -1,0 +1,35 @@
+Source: ../api.sql
+select
+    rowid,
+    ax, ay, bx, by
+  from tg_ring_segments_each('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))');
+---
+{
+	 rowid: 0
+	 ax: 0.0
+	 ay: 0.0
+	 bx: 10.0
+	 by: 0.0
+}
+{
+	 rowid: 1
+	 ax: 10.0
+	 ay: 0.0
+	 bx: 10.0
+	 by: 10.0
+}
+{
+	 rowid: 2
+	 ax: 10.0
+	 ay: 10.0
+	 bx: 0.0
+	 by: 10.0
+}
+{
+	 rowid: 3
+	 ax: 0.0
+	 ay: 10.0
+	 bx: 0.0
+	 by: 0.0
+}
+

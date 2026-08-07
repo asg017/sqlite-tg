@@ -69,6 +69,19 @@ int main(int argc, char *argv[]) {
       "select tg_to_wkt(hole) from tg_holes_each("
       "'POLYGON ((0 0, 10 0, 10 10, 0 0), (1 1, 2 1, 2 2, 1 1))')",
       "select count(*) from tg_holes_each('POINT(1 1)')",
+      "select tg_to_wkt(point) from tg_line_points_each("
+      "'LINESTRING (10 40, 40 30, 20 20)')",
+      "select ax, ay, bx, by from tg_line_segments_each("
+      "'LINESTRING (10 40, 40 30, 20 20)')",
+      "select count(*) from tg_line_points_each('LINESTRING EMPTY')",
+      "select tg_to_wkt(point) from tg_ring_points_each("
+      "tg_poly_exterior('POLYGON ((0 0, 10 0, 10 10, 0 0))'))",
+      "select ax, ay, bx, by from tg_ring_segments_each("
+      "tg_poly_exterior('POLYGON ((0 0, 10 0, 10 10, 0 0))'))",
+      "select tg_to_wkt(point) from tg_ring_points_each("
+      "'POLYGON ((0 0, 10 0, 10 10, 0 0))')",
+      "select ax, ay, bx, by from tg_ring_segments_each("
+      "'POLYGON ((0 0, 10 0, 10 10, 0 0))')",
       "select tg_dims(tg_point(1, 2))",
       "select tg_is_empty('POINT EMPTY')",
       "select tg_is_feature('{\"type\": \"Feature\", \"geometry\": "
@@ -120,6 +133,12 @@ int main(int argc, char *argv[]) {
       "select tg_equals('POINT(1 1)', 'nope')",
       "select tg_to_wkt(tg_group_multipoint(value)) "
       "from json_each('[\"LINESTRING(0 0, 1 1)\"]')",
+      "select * from tg_line_points_each('POINT(1 1)')",
+      "select * from tg_line_segments_each('POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0))')",
+      "select * from tg_ring_points_each('POINT(1 1)')",
+      "select * from tg_ring_segments_each('MULTIPOINT (1 1, 2 2)')",
+      "select * from tg_line_points_each(NULL)",
+      "select * from tg_ring_points_each(NULL)",
   };
 
   for (int i = 0; i < sizeof(OK_STATEMENTS) / sizeof(OK_STATEMENTS[0]); i++) {

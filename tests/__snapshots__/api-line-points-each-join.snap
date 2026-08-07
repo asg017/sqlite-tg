@@ -1,0 +1,43 @@
+Source: ../api.sql
+select
+    json_each.key,
+    tg_line_points_each.rowid,
+    point,
+    tg_to_wkt(point)
+  from json_each('[
+    "LINESTRING (10 40, 40 30)",
+    "LINESTRING (20 20, 30 10, 15 15)",
+  ]')
+  join tg_line_points_each(value);
+---
+{
+	 key: 0
+	 rowid: 0
+	 point: pointer[]
+	 tg_to_wkt(point): 'POINT(10 40)'
+}
+{
+	 key: 0
+	 rowid: 1
+	 point: pointer[]
+	 tg_to_wkt(point): 'POINT(40 30)'
+}
+{
+	 key: 1
+	 rowid: 0
+	 point: pointer[]
+	 tg_to_wkt(point): 'POINT(20 20)'
+}
+{
+	 key: 1
+	 rowid: 1
+	 point: pointer[]
+	 tg_to_wkt(point): 'POINT(30 10)'
+}
+{
+	 key: 1
+	 rowid: 2
+	 point: pointer[]
+	 tg_to_wkt(point): 'POINT(15 15)'
+}
+

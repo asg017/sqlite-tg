@@ -113,9 +113,13 @@ MODULES = [
     "tg_each",
     "tg_geometries_each",
     "tg_holes_each",
+    "tg_line_points_each",
+    "tg_line_segments_each",
     "tg_lines_each",
     "tg_points_each",
     "tg_polygons_each",
+    "tg_ring_points_each",
+    "tg_ring_segments_each",
 ]
 
 SUPPORTS_SUBTYPE = sqlite3.version_info[1] > 38
@@ -467,6 +471,123 @@ def test_tg_lines_each(snapshot):
 
     # TODO: should this throw, since the input isn't a MULTILINESTRING?
     # tg_lines_each('LINESTRING(10 10,20 20,10 40)')
+
+
+def test_tg_line_points_each(snapshot):
+    tg_line_points_each = lambda *args: execute_all(
+        db,
+        "select rowid, tg_to_wkt(point) as point_wkt from tg_line_points_each(?)",
+        args,
+    )
+    assert tg_line_points_each("LINESTRING EMPTY") == []
+    assert (
+        tg_line_points_each("LINESTRING (10 10, 20 20, 10 40, 40 40)") == snapshot
+    )
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="expected a LineString geometry, found Point",
+    ):
+        tg_line_points_each("POINT (1 1)")
+
+    with pytest.raises(sqlite3.OperationalError, match="invalid geometry input"):
+        tg_line_points_each(None)
+
+    with pytest.raises(sqlite3.OperationalError):
+        tg_line_points_each("not a geometry")
+
+
+def test_tg_line_segments_each(snapshot):
+    tg_line_segments_each = lambda *args: execute_all(
+        db,
+        "select rowid, ax, ay, bx, by from tg_line_segments_each(?)",
+        args,
+    )
+    assert tg_line_segments_each("LINESTRING EMPTY") == []
+    assert (
+        tg_line_segments_each("LINESTRING (10 10, 20 20, 10 40, 40 40)") == snapshot
+    )
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="expected a LineString geometry, found Polygon",
+    ):
+        tg_line_segments_each("POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0))")
+
+    with pytest.raises(sqlite3.OperationalError, match="invalid geometry input"):
+        tg_line_segments_each(None)
+
+
+def test_tg_ring_points_each(snapshot):
+    from_exterior = execute_all(
+        db,
+        """
+        select rowid, tg_to_wkt(point) as point_wkt
+        from tg_ring_points_each(
+          tg_poly_exterior('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))')
+        )
+        """,
+    )
+    assert from_exterior == snapshot
+
+    # a plain Polygon is also accepted: its exterior ring is used automatically
+    from_polygon = execute_all(
+        db,
+        "select rowid, tg_to_wkt(point) as point_wkt from tg_ring_points_each(?)",
+        ["POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))"],
+    )
+    assert from_polygon == from_exterior
+
+    # a hole ring (also an upcast ring pointer, same as tg_poly_exterior())
+    # works the same way
+    from_hole = execute_all(
+        db,
+        """
+        select tg_ring_points_each.rowid, tg_to_wkt(point) as point_wkt
+        from tg_holes_each(
+          'POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))'
+        )
+        join tg_ring_points_each(hole)
+        """,
+    )
+    assert len(from_hole) == 5
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="expected a ring .* or a Polygon geometry, found Point",
+    ):
+        execute_all(db, "select * from tg_ring_points_each(?)", ["POINT (1 1)"])
+
+    with pytest.raises(sqlite3.OperationalError, match="invalid geometry input"):
+        execute_all(db, "select * from tg_ring_points_each(?)", [None])
+
+
+def test_tg_ring_segments_each(snapshot):
+    from_exterior = execute_all(
+        db,
+        """
+        select rowid, ax, ay, bx, by
+        from tg_ring_segments_each(
+          tg_poly_exterior('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))')
+        )
+        """,
+    )
+    assert from_exterior == snapshot
+
+    from_polygon = execute_all(
+        db,
+        "select rowid, ax, ay, bx, by from tg_ring_segments_each(?)",
+        ["POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))"],
+    )
+    assert from_polygon == from_exterior
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="expected a ring .* or a Polygon geometry, found MultiPoint",
+    ):
+        execute_all(
+            db, "select * from tg_ring_segments_each(?)", ["MULTIPOINT (1 1, 2 2)"]
+        )
 
 
 @pytest.mark.skip(reason="TODO")

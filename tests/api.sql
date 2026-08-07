@@ -83,6 +83,51 @@ from str_lines(tg_debug()); -- @snap debug
   select * from tg_lines_each(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
 -- #endregion
 
+-- #region tg_line_points_each
+  select
+    rowid,
+    point,
+    tg_to_wkt(point),
+    tg_to_geojson(point)
+  from tg_line_points_each('LINESTRING (10 40, 40 30, 20 20, 30 10)'); -- @snap line-points-each
+
+  select
+    json_each.key,
+    tg_line_points_each.rowid,
+    point,
+    tg_to_wkt(point)
+  from json_each('[
+    "LINESTRING (10 40, 40 30)",
+    "LINESTRING (20 20, 30 10, 15 15)",
+  ]')
+  join tg_line_points_each(value); -- @snap line-points-each-join
+
+  select count(*) from tg_line_points_each('LINESTRING EMPTY'); -- 0
+  select * from tg_line_points_each(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+  select * from tg_line_points_each('POINT(1 1)'); -- error: expected a LineString geometry, found Point
+  select * from tg_line_points_each('MULTILINESTRING ((10 40, 40 30))'); -- error: expected a LineString geometry, found MultiLineString
+-- #endregion
+
+-- #region tg_line_segments_each
+  select
+    rowid,
+    ax, ay, bx, by
+  from tg_line_segments_each('LINESTRING (10 40, 40 30, 20 20, 30 10)'); -- @snap line-segments-each
+
+  select
+    json_each.key,
+    tg_line_segments_each.rowid,
+    ax, ay, bx, by
+  from json_each('[
+    "LINESTRING (10 40, 40 30)",
+    "LINESTRING (20 20, 30 10, 15 15)",
+  ]')
+  join tg_line_segments_each(value); -- @snap line-segments-each-join
+
+  select count(*) from tg_line_segments_each('LINESTRING EMPTY'); -- 0
+  select * from tg_line_segments_each('POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0))'); -- error: expected a LineString geometry, found Polygon
+-- #endregion
+
 -- #region tg_polygons_each
   select
     rowid,
@@ -300,6 +345,49 @@ from str_lines(tg_debug()); -- @snap debug
     "coordinates": [[[0,0],[10,0],[10,10],[0,0]],[[1,1],[2,1],[2,2],[1,1]]],
     "extra": 1
   }'); -- 'POLYGON((1 1,2 1,2 2,1 1))'
+-- #endregion
+
+-- #region tg_ring_points_each
+  select
+    rowid,
+    point,
+    tg_to_wkt(point)
+  from tg_ring_points_each(
+    tg_poly_exterior('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))')
+  ); -- @snap ring-points-each
+
+  -- a plain Polygon is also accepted: its exterior ring is used automatically,
+  -- same rows as above
+  select
+    rowid,
+    tg_to_wkt(point)
+  from tg_ring_points_each('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))'); -- @snap ring-points-each-polygon
+
+  -- a hole ring (also an upcast ring pointer, same as tg_poly_exterior()) works too
+  select
+    tg_ring_points_each.rowid,
+    tg_to_wkt(point)
+  from tg_holes_each('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))')
+  join tg_ring_points_each(hole); -- @snap ring-points-each-hole-join
+
+  select * from tg_ring_points_each(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+  select * from tg_ring_points_each('POINT(1 1)'); -- error: expected a ring (e.g. from tg_poly_exterior() or tg_holes_each()) or a Polygon geometry, found Point
+-- #endregion
+
+-- #region tg_ring_segments_each
+  select
+    rowid,
+    ax, ay, bx, by
+  from tg_ring_segments_each(
+    tg_poly_exterior('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))')
+  ); -- @snap ring-segments-each
+
+  select
+    rowid,
+    ax, ay, bx, by
+  from tg_ring_segments_each('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))'); -- @snap ring-segments-each-polygon
+
+  select * from tg_ring_segments_each('MULTIPOINT (1 1, 2 2)'); -- error: expected a ring (e.g. from tg_poly_exterior() or tg_holes_each()) or a Polygon geometry, found MultiPoint
 -- #endregion
 
 -- #region tg_each

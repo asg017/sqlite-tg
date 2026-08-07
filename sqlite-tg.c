@@ -1150,21 +1150,35 @@ static void tg_feature_collection_final(sqlite3_context *context) {
 #pragma region each table functions
 
 struct control {
-  // resulting column name in the table function
+  // resulting column name in the table function; for controls that emit
+  // more than one column (nCols > 1) leave this NULL and set zColumns
+  // instead
   char *name;
+  // raw comma-separated column list SQL fragment for multi-column controls
+  // (e.g. "ax, ay, bx, by"); NULL means single column named `name`
+  char *zColumns;
+  // number of value columns; 0 means 1 (single-column mode via `name`)
+  int nCols;
   // free the target
   void (*xFree)(void *p);
   // determine if the table function has completed
   int (*xEof)(void *p, sqlite3_int64 iRowid);
-  // result the column value at the given rowid
-  void (*xResult)(sqlite3_context *context, void *p, sqlite3_int64 iRowid);
+  // result the column value at the given rowid/column index
+  void (*xResult)(sqlite3_context *context, void *p, sqlite3_int64 iRowid,
+                  int iCol);
+  // optional: validate the resolved target right after geomValue()
+  // succeeds; return an sqlite3_mprintf'd error message (the caller frees
+  // it) if the target isn't usable for this module, else NULL. Leave unset
+  // (NULL) to accept anything geomValue() accepts.
+  char *(*xCheck)(void *p);
 };
 
 #pragma region tg_points_each
 int pointsEachEof(void *p, sqlite3_int64 iRowid) {
   return iRowid >= tg_geom_num_points((struct tg_geom *)p);
 }
-void pointsEachResult(sqlite3_context *context, void *p, sqlite3_int64 iRowid) {
+void pointsEachResult(sqlite3_context *context, void *p, sqlite3_int64 iRowid,
+                      int iCol) {
   struct tg_point point = tg_geom_point_at((struct tg_geom *)p, iRowid);
   struct tg_geom *g = tg_geom_new_point(point);
   sqlite3_result_pointer(context, g, TG_GEOM_POINTER_NAME,
@@ -1178,7 +1192,8 @@ void pointsEachFree(void *p) { tg_geom_free((struct tg_geom *)p); }
 int linesEachEof(void *p, sqlite3_int64 iRowid) {
   return iRowid >= tg_geom_num_lines((struct tg_geom *)p);
 }
-void linesEachResult(sqlite3_context *context, void *p, sqlite3_int64 iRowid) {
+void linesEachResult(sqlite3_context *context, void *p, sqlite3_int64 iRowid,
+                     int iCol) {
   const struct tg_line *line = tg_geom_line_at((struct tg_geom *)p, iRowid);
   sqlite3_result_pointer(context, (void *)line, TG_GEOM_POINTER_NAME, NULL);
 }
@@ -1191,7 +1206,7 @@ int geometriesEachEof(void *p, sqlite3_int64 iRowid) {
   return iRowid >= tg_geom_num_geometries((struct tg_geom *)p);
 }
 void geometriesEachResult(sqlite3_context *context, void *p,
-                          sqlite3_int64 iRowid) {
+                          sqlite3_int64 iRowid, int iCol) {
   const struct tg_geom *geom = tg_geom_geometry_at((struct tg_geom *)p, iRowid);
   sqlite3_result_pointer(context, (void *)geom, TG_GEOM_POINTER_NAME, NULL);
 }
@@ -1204,7 +1219,7 @@ int polygonsEachEof(void *p, sqlite3_int64 iRowid) {
   return iRowid >= tg_geom_num_polys((struct tg_geom *)p);
 }
 void polygonsEachResult(sqlite3_context *context, void *p,
-                        sqlite3_int64 iRowid) {
+                        sqlite3_int64 iRowid, int iCol) {
   const struct tg_poly *poly = tg_geom_poly_at((struct tg_geom *)p, iRowid);
 
   // rationale: tg_poly can safely upcast to tg_geom
@@ -1227,7 +1242,7 @@ int holesEachEof(void *p, sqlite3_int64 iRowid) {
   return iRowid >= tg_poly_num_holes(poly);
 }
 void holesEachResult(sqlite3_context *context, void *p,
-                        sqlite3_int64 iRowid) {
+                        sqlite3_int64 iRowid, int iCol) {
   const struct tg_poly *poly = tg_geom_poly((struct tg_geom *)p);
   const struct tg_ring *ring = tg_poly_hole_at(poly, iRowid);
 
@@ -1237,6 +1252,119 @@ void holesEachResult(sqlite3_context *context, void *p,
 }
 
 void holesEachFree(void *p) { tg_geom_free((struct tg_geom *)p); }
+#pragma endregion
+
+// Shared validators for the tg_line_*/tg_ring_* modules below. The cursor
+// target is always the tg_geom (or upcast tg_line/tg_ring) produced by
+// geomValue(); tg_geom_typeof() is safe to call on any of those (the `type`
+// field lives in the shared `head` struct at a fixed offset, see tg's
+// upcasting docs) and, unlike resolving via tg_geom_line()/tg_geom_poly(),
+// it distinguishes "wrong geometry type" from "right type but empty" (whose
+// resolved line/ring pointer is legitimately NULL either way).
+static char *lineEachCheck(void *p) {
+  struct tg_geom *geom = (struct tg_geom *)p;
+  if (tg_geom_typeof(geom) == TG_LINESTRING)
+    return NULL;
+  return sqlite3_mprintf(
+      "expected a LineString geometry, found %s",
+      tg_geom_type_string(tg_geom_typeof(geom)));
+}
+
+// Accepts either a bare ring (the upcast pointers produced by
+// tg_poly_exterior()/tg_poly_hole_at(), e.g. via tg_holes_each) or a plain
+// Polygon geometry, in which case the polygon's exterior ring is used.
+// Both cases report as TG_POLYGON per tg's own upcasting rules (see
+// series_new() in tg.c), so a single typeof() check covers them.
+static char *ringEachCheck(void *p) {
+  struct tg_geom *geom = (struct tg_geom *)p;
+  if (tg_geom_typeof(geom) == TG_POLYGON)
+    return NULL;
+  return sqlite3_mprintf(
+      "expected a ring (e.g. from tg_poly_exterior() or tg_holes_each()) or "
+      "a Polygon geometry, found %s",
+      tg_geom_type_string(tg_geom_typeof(geom)));
+}
+
+#pragma region tg_line_points_each
+int linePointsEachEof(void *p, sqlite3_int64 iRowid) {
+  const struct tg_line *line = tg_geom_line((struct tg_geom *)p);
+  if (!line)
+    return 1;
+  return iRowid >= tg_line_num_points(line);
+}
+void linePointsEachResult(sqlite3_context *context, void *p,
+                          sqlite3_int64 iRowid, int iCol) {
+  const struct tg_line *line = tg_geom_line((struct tg_geom *)p);
+  struct tg_point point = tg_line_point_at(line, iRowid);
+  struct tg_geom *g = tg_geom_new_point(point);
+  sqlite3_result_pointer(context, g, TG_GEOM_POINTER_NAME,
+                         (void (*)(void *))tg_geom_free);
+}
+void linePointsEachFree(void *p) { tg_geom_free((struct tg_geom *)p); }
+#pragma endregion
+
+#pragma region tg_line_segments_each
+int lineSegmentsEachEof(void *p, sqlite3_int64 iRowid) {
+  const struct tg_line *line = tg_geom_line((struct tg_geom *)p);
+  if (!line)
+    return 1;
+  return iRowid >= tg_line_num_segments(line);
+}
+void lineSegmentsEachResult(sqlite3_context *context, void *p,
+                            sqlite3_int64 iRowid, int iCol) {
+  const struct tg_line *line = tg_geom_line((struct tg_geom *)p);
+  struct tg_segment seg = tg_line_segment_at(line, iRowid);
+  switch (iCol) {
+  case 0: sqlite3_result_double(context, seg.a.x); break;
+  case 1: sqlite3_result_double(context, seg.a.y); break;
+  case 2: sqlite3_result_double(context, seg.b.x); break;
+  case 3: sqlite3_result_double(context, seg.b.y); break;
+  }
+}
+void lineSegmentsEachFree(void *p) { tg_geom_free((struct tg_geom *)p); }
+#pragma endregion
+
+#pragma region tg_ring_points_each
+int ringPointsEachEof(void *p, sqlite3_int64 iRowid) {
+  const struct tg_poly *poly = tg_geom_poly((struct tg_geom *)p);
+  const struct tg_ring *ring = poly ? tg_poly_exterior(poly) : NULL;
+  if (!ring)
+    return 1;
+  return iRowid >= tg_ring_num_points(ring);
+}
+void ringPointsEachResult(sqlite3_context *context, void *p,
+                          sqlite3_int64 iRowid, int iCol) {
+  const struct tg_poly *poly = tg_geom_poly((struct tg_geom *)p);
+  const struct tg_ring *ring = tg_poly_exterior(poly);
+  struct tg_point point = tg_ring_point_at(ring, iRowid);
+  struct tg_geom *g = tg_geom_new_point(point);
+  sqlite3_result_pointer(context, g, TG_GEOM_POINTER_NAME,
+                         (void (*)(void *))tg_geom_free);
+}
+void ringPointsEachFree(void *p) { tg_geom_free((struct tg_geom *)p); }
+#pragma endregion
+
+#pragma region tg_ring_segments_each
+int ringSegmentsEachEof(void *p, sqlite3_int64 iRowid) {
+  const struct tg_poly *poly = tg_geom_poly((struct tg_geom *)p);
+  const struct tg_ring *ring = poly ? tg_poly_exterior(poly) : NULL;
+  if (!ring)
+    return 1;
+  return iRowid >= tg_ring_num_segments(ring);
+}
+void ringSegmentsEachResult(sqlite3_context *context, void *p,
+                            sqlite3_int64 iRowid, int iCol) {
+  const struct tg_poly *poly = tg_geom_poly((struct tg_geom *)p);
+  const struct tg_ring *ring = tg_poly_exterior(poly);
+  struct tg_segment seg = tg_ring_segment_at(ring, iRowid);
+  switch (iCol) {
+  case 0: sqlite3_result_double(context, seg.a.x); break;
+  case 1: sqlite3_result_double(context, seg.a.y); break;
+  case 2: sqlite3_result_double(context, seg.b.x); break;
+  case 3: sqlite3_result_double(context, seg.b.y); break;
+  }
+}
+void ringSegmentsEachFree(void *p) { tg_geom_free((struct tg_geom *)p); }
 #pragma endregion
 
 typedef struct template_each_vtab template_each_vtab;
@@ -1252,6 +1380,12 @@ struct template_each_cursor {
   void *target;
 };
 
+// number of value columns a control exposes; the hidden "source" column
+// always immediately follows them
+static int controlNumCols(struct control *pControl) {
+  return pControl->nCols > 0 ? pControl->nCols : 1;
+}
+
 static int template_eachConnect(sqlite3 *db, void *pAux, int argc,
                                 const char *const *argv, sqlite3_vtab **ppVtab,
                                 char **pzErr) {
@@ -1260,9 +1394,11 @@ static int template_eachConnect(sqlite3 *db, void *pAux, int argc,
 
   struct control *pControl = (struct control *)pAux;
   const char *schema =
-      sqlite3_mprintf("CREATE TABLE x(%w, source hidden)", pControl->name);
-#define TEMPLATE_EACH_TARGET 0
-#define TEMPLATE_EACH_SOURCE 1
+      pControl->zColumns
+          ? sqlite3_mprintf("CREATE TABLE x(%s, source hidden)",
+                            pControl->zColumns)
+          : sqlite3_mprintf("CREATE TABLE x(%w, source hidden)",
+                            pControl->name);
   rc = sqlite3_declare_vtab(db, schema);
   sqlite3_free((void *)schema);
   if (rc == SQLITE_OK) {
@@ -1305,18 +1441,18 @@ static int template_eachClose(sqlite3_vtab_cursor *cur) {
 
 static int template_eachBestIndex(sqlite3_vtab *pVTab,
                                   sqlite3_index_info *pIdxInfo) {
+  struct control *pControl = ((template_each_vtab *)pVTab)->pControl;
+  int iSourceCol = controlNumCols(pControl);
   int hasSource = 0;
   for (int i = 0; i < pIdxInfo->nConstraint; i++) {
     const struct sqlite3_index_constraint *pCons = &pIdxInfo->aConstraint[i];
-    switch (pCons->iColumn) {
-    case TEMPLATE_EACH_SOURCE: {
+    if (pCons->iColumn == iSourceCol) {
       if (!hasSource && !pCons->usable ||
           pCons->op != SQLITE_INDEX_CONSTRAINT_EQ)
         return SQLITE_CONSTRAINT;
       hasSource = 1;
       pIdxInfo->aConstraintUsage[i].argvIndex = 1;
       pIdxInfo->aConstraintUsage[i].omit = 1;
-    }
     }
   }
   if (!hasSource) {
@@ -1350,6 +1486,15 @@ static int template_eachFilter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
     sqlite3_free(errmsg);
     return SQLITE_ERROR;
   }
+  if (pControl->xCheck) {
+    char *checkErr = pControl->xCheck(geom);
+    if (checkErr) {
+      sqlite3_free(pVtabCursor->pVtab->zErrMsg);
+      pVtabCursor->pVtab->zErrMsg = checkErr;
+      pControl->xFree(geom);
+      return SQLITE_ERROR;
+    }
+  }
   pCur->target = geom;
   return SQLITE_OK;
 }
@@ -1375,13 +1520,9 @@ static int template_eachEof(sqlite3_vtab_cursor *cur) {
 static int template_eachColumn(sqlite3_vtab_cursor *cur,
                                sqlite3_context *context, int i) {
   template_each_cursor *pCur = (template_each_cursor *)cur;
-  switch (i) {
-  case TEMPLATE_EACH_TARGET: {
-    struct control *pControl =
-        ((template_each_vtab *)pCur->base.pVtab)->pControl;
-    pControl->xResult(context, pCur->target, pCur->iRowid);
-    break;
-  }
+  struct control *pControl = ((template_each_vtab *)pCur->base.pVtab)->pControl;
+  if (i < controlNumCols(pControl)) {
+    pControl->xResult(context, pCur->target, pCur->iRowid, i);
   }
   return SQLITE_OK;
 }
@@ -2476,6 +2617,37 @@ int sqlite3_tg_init(sqlite3 *db, char **pzErrMsg,
       .xFree = &holesEachFree,
   };
 
+  static struct control linePointsEach = {
+      .name = "point",
+      .xEof = &linePointsEachEof,
+      .xResult = &linePointsEachResult,
+      .xFree = &linePointsEachFree,
+      .xCheck = &lineEachCheck,
+  };
+  static struct control lineSegmentsEach = {
+      .zColumns = "ax, ay, bx, by",
+      .nCols = 4,
+      .xEof = &lineSegmentsEachEof,
+      .xResult = &lineSegmentsEachResult,
+      .xFree = &lineSegmentsEachFree,
+      .xCheck = &lineEachCheck,
+  };
+  static struct control ringPointsEach = {
+      .name = "point",
+      .xEof = &ringPointsEachEof,
+      .xResult = &ringPointsEachResult,
+      .xFree = &ringPointsEachFree,
+      .xCheck = &ringEachCheck,
+  };
+  static struct control ringSegmentsEach = {
+      .zColumns = "ax, ay, bx, by",
+      .nCols = 4,
+      .xEof = &ringSegmentsEachEof,
+      .xResult = &ringSegmentsEachResult,
+      .xFree = &ringSegmentsEachFree,
+      .xCheck = &ringEachCheck,
+  };
+
   static const struct {
     char *zModuleName;
     struct control *c;
@@ -2488,6 +2660,10 @@ int sqlite3_tg_init(sqlite3 *db, char **pzErrMsg,
       {(char *)"tg_holes_each",  &holesEach},
       {(char *)"tg_geometries_each",  &geometriesEach},
       {(char *)"tg_each",  &geometriesEach},
+      {(char *)"tg_line_points_each",  &linePointsEach},
+      {(char *)"tg_line_segments_each",  &lineSegmentsEach},
+      {(char *)"tg_ring_points_each",  &ringPointsEach},
+      {(char *)"tg_ring_segments_each",  &ringSegmentsEach},
       // clang-format on
   };
 

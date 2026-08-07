@@ -1,0 +1,28 @@
+Source: ../api.sql
+select
+    rowid,
+    ax, ay, bx, by
+  from tg_line_segments_each('LINESTRING (10 40, 40 30, 20 20, 30 10)');
+---
+{
+	 rowid: 0
+	 ax: 10.0
+	 ay: 40.0
+	 bx: 40.0
+	 by: 30.0
+}
+{
+	 rowid: 1
+	 ax: 40.0
+	 ay: 30.0
+	 bx: 20.0
+	 by: 20.0
+}
+{
+	 rowid: 2
+	 ax: 20.0
+	 ay: 20.0
+	 bx: 30.0
+	 by: 10.0
+}
+

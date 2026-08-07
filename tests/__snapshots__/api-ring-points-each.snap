@@ -1,0 +1,35 @@
+Source: ../api.sql
+select
+    rowid,
+    point,
+    tg_to_wkt(point)
+  from tg_ring_points_each(
+    tg_poly_exterior('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))')
+  );
+---
+{
+	 rowid: 0
+	 point: pointer[]
+	 tg_to_wkt(point): 'POINT(0 0)'
+}
+{
+	 rowid: 1
+	 point: pointer[]
+	 tg_to_wkt(point): 'POINT(10 0)'
+}
+{
+	 rowid: 2
+	 point: pointer[]
+	 tg_to_wkt(point): 'POINT(10 10)'
+}
+{
+	 rowid: 3
+	 point: pointer[]
+	 tg_to_wkt(point): 'POINT(0 10)'
+}
+{
+	 rowid: 4
+	 point: pointer[]
+	 tg_to_wkt(point): 'POINT(0 0)'
+}
+

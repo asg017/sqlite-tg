@@ -652,6 +652,41 @@ from tg_lines_each('MULTILINESTRING ((10 10, 20 20), (40 40, 30 30))');
 */
 ```
 
+#### `tg_line_points_each(line)` {#tg_line_points_each}
+
+Iterates over every Point of the given LineString geometry, in the `point` column. Errors on non-LineString input.
+
+```sql
+select rowid, tg_to_wkt(point) as point
+from tg_line_points_each('LINESTRING (10 10, 20 20, 10 40)');
+/*
+┌───────┬────────────────┐
+│ rowid │ point          │
+├───────┼────────────────┤
+│ 0     │ 'POINT(10 10)' │
+│ 1     │ 'POINT(20 20)' │
+│ 2     │ 'POINT(10 40)' │
+└───────┴────────────────┘
+*/
+```
+
+#### `tg_line_segments_each(line)` {#tg_line_segments_each}
+
+Iterates over every segment of the given LineString geometry, as flat `ax`, `ay`, `bx`, `by` columns. Errors on non-LineString input.
+
+```sql
+select rowid, ax, ay, bx, by
+from tg_line_segments_each('LINESTRING (10 10, 20 20, 10 40)');
+/*
+┌───────┬──────┬──────┬──────┬──────┐
+│ rowid │ ax   │ ay   │ bx   │ by   │
+├───────┼──────┼──────┼──────┼──────┤
+│ 0     │ 10.0 │ 10.0 │ 20.0 │ 20.0 │
+│ 1     │ 20.0 │ 20.0 │ 10.0 │ 40.0 │
+└───────┴──────┴──────┴──────┴──────┘
+*/
+```
+
 #### `tg_polygons_each(geometry)` {#tg_polygons_each}
 
 Iterates over every Polygon in the given MultiPolygon geometry, in the `polygon` column.
@@ -687,6 +722,45 @@ from tg_holes_each('POLYGON(
 │ 0     │ 'POLYGON((1 1,2 1,2 2,1 2,1 1))' │
 │ 1     │ 'POLYGON((5 5,6 5,6 6,5 6,5 5))' │
 └───────┴──────────────────────────────────┘
+*/
+```
+
+#### `tg_ring_points_each(ring)` {#tg_ring_points_each}
+
+Iterates over every Point of the given ring, in the `point` column. The ring argument accepts either the upcast ring pointers produced by [`tg_poly_exterior()`](#tg_poly_exterior)/[`tg_holes_each()`](#tg_holes_each), or a plain Polygon geometry, in which case its exterior ring is used. Errors on any other geometry type.
+
+```sql
+select rowid, tg_to_wkt(point) as point
+from tg_ring_points_each(tg_poly_exterior('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))'));
+/*
+┌───────┬────────────────┐
+│ rowid │ point          │
+├───────┼────────────────┤
+│ 0     │ 'POINT(0 0)'   │
+│ 1     │ 'POINT(10 0)'  │
+│ 2     │ 'POINT(10 10)' │
+│ 3     │ 'POINT(0 10)'  │
+│ 4     │ 'POINT(0 0)'   │
+└───────┴────────────────┘
+*/
+```
+
+#### `tg_ring_segments_each(ring)` {#tg_ring_segments_each}
+
+Iterates over every segment of the given ring, as flat `ax`, `ay`, `bx`, `by` columns. Accepts the same ring/Polygon input as [`tg_ring_points_each()`](#tg_ring_points_each).
+
+```sql
+select rowid, ax, ay, bx, by
+from tg_ring_segments_each(tg_poly_exterior('POLYGON ((0 0, 10 0, 10 10, 0 10, 0 0))'));
+/*
+┌───────┬──────┬──────┬──────┬──────┐
+│ rowid │ ax   │ ay   │ bx   │ by   │
+├───────┼──────┼──────┼──────┼──────┤
+│ 0     │ 0.0  │ 0.0  │ 10.0 │ 0.0  │
+│ 1     │ 10.0 │ 0.0  │ 10.0 │ 10.0 │
+│ 2     │ 10.0 │ 10.0 │ 0.0  │ 10.0 │
+│ 3     │ 0.0  │ 10.0 │ 0.0  │ 0.0  │
+└───────┴──────┴──────┴──────┴──────┘
 */
 ```
 
