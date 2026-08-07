@@ -57,9 +57,32 @@ int main(int argc, char *argv[]) {
       "select tg_type('POLYGON ((30 10, 40 40, 20 40, 10 20, 30 10))')",
       "select tg_extra_json('{\"id\": 1, \"type\": \"Point\", \"coordinates\": [1, 2]}')",
       "select tg_to_wkt(tg_line(tg_point(0, 0), tg_point(1, 1)))",
+      "select tg_to_wkt(tg_linestring(tg_point(0, 0), tg_point(1, 1)))",
       "select tg_to_wkt(tg_multipoint(tg_point(0, 0), tg_point(1, 1)))",
       "select tg_to_wkt(tg_poly_exterior("
       "'POLYGON ((30 10, 40 40, 20 40, 10 20, 30 10), (20 30, 35 35, 30 20, 20 30))'))",
+      "select tg_to_wkt(tg_ring())",
+      "select tg_to_wkt(tg_ring(tg_point(0, 0), tg_point(10, 0), tg_point(10, 10)))",
+      "select tg_to_wkt(tg_polygon())",
+      "select tg_to_wkt(tg_polygon(tg_ring(tg_point(0, 0), tg_point(10, 0), "
+      "tg_point(10, 10), tg_point(0, 10), tg_point(0, 0))))",
+      "select tg_to_wkt(tg_polygon("
+      "tg_ring(tg_point(0, 0), tg_point(10, 0), tg_point(10, 10), tg_point(0, 10), tg_point(0, 0)), "
+      "tg_ring(tg_point(1, 1), tg_point(2, 1), tg_point(2, 2), tg_point(1, 2), tg_point(1, 1))))",
+      "select tg_to_wkt(tg_polygon('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'))",
+      "select tg_to_wkt(tg_multilinestring())",
+      "select tg_to_wkt(tg_multilinestring("
+      "tg_line(tg_point(0, 0), tg_point(1, 1)), tg_line(tg_point(2, 2), tg_point(3, 3))))",
+      "select tg_to_wkt(tg_multipolygon())",
+      "select tg_to_wkt(tg_multipolygon("
+      "'POLYGON((0 0, 1 0, 1 1, 0 0))', 'POLYGON((10 10, 11 10, 11 11, 10 10))'))",
+      "select tg_to_wkt(tg_multipolygon("
+      "tg_ring(tg_point(0, 0), tg_point(1, 0), tg_point(1, 1), tg_point(0, 0))))",
+      "select tg_to_wkt(tg_geometrycollection())",
+      "select tg_to_wkt(tg_geometrycollection('POINT(1 1)', 'LINESTRING(0 0, 1 1)'))",
+      "select tg_to_wkt(tg_geometrycollection("
+      "'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))', "
+      "'GEOMETRYCOLLECTION(POINT(2 2))'))",
       "select tg_intersects('LINESTRING (0 0, 2 2)', 'LINESTRING (1 0, 1 2)')",
       "select tg_equals('POINT(1 1)', 'POINT(1 1)')",
       "select tg_valid_wkt('POINT(1 1)'), tg_valid_wkt('nope')",
@@ -121,6 +144,19 @@ int main(int argc, char *argv[]) {
       "select tg_geom('POINT(0 1)', 'not-an-index')",
       "select tg_poly_exterior('POINT(1 1)')",
       "select tg_multipoint('LINESTRING(0 0, 1 1)')",
+      "select tg_ring(tg_point(0, 0), 'not point', tg_point(1, 1))",
+      "select tg_ring('not a geometry')",
+      "select tg_polygon(tg_ring(tg_point(0, 0), tg_point(1, 0), tg_point(1, 1), "
+      "tg_point(0, 0)), tg_ring(tg_point(0, 0), tg_point(1, 0), tg_point(1, 1), "
+      "tg_point(0, 0)), 'not a ring')",
+      "select tg_polygon('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), "
+      "(1 1, 2 1, 2 2, 1 2, 1 1))')",
+      "select tg_multilinestring(tg_line(tg_point(0, 0), tg_point(1, 1)), "
+      "tg_line(tg_point(2, 2), tg_point(3, 3)), 'POINT(1 1)')",
+      "select tg_multipolygon('POLYGON((0 0, 1 0, 1 1, 0 0))', "
+      "'POLYGON((10 10, 11 10, 11 11, 10 10))', 'not a polygon')",
+      "select tg_geometrycollection('POINT(1 1)', 'LINESTRING(0 0, 1 1)', "
+      "'not a geometry')",
       "select tg_dims(NULL)",
       "select tg_is_empty('not a geometry')",
       "select tg_is_feature(NULL)",

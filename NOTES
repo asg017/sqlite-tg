@@ -27,17 +27,17 @@ from businesses;
 - [x] `tg_point()`
 - [.] `tg_multipoint(p1, p2, ...)`
 - [.] `tg_group_multipoint(p)`
-- [ ] `tg_geometrycollection(g1, g2)`
+- [x] `tg_geometrycollection(g1, g2)`
 - [ ] `tg_group_geometrycollection(g)`
-- [ ] `tg_linestring(p1, p2, ...)` (alias to `tg_line`?)
+- [x] `tg_linestring(p1, p2, ...)` (alias to `tg_line`)
 - [ ] `tg_group_linestring(p)`
-- [ ] `tg_ring(p1, p2, ...)`
+- [x] `tg_ring(p1, p2, ...)`
 - [ ] `tg_group_ring(p)`
-- [ ] `tg_polygon(exterior, hole1, hole2, ...)` (params are rings)
+- [x] `tg_polygon(exterior, hole1, hole2, ...)` (params are rings)
 - [ ] `tg_group_polygon(exterior, hole)` -- ensure 1st arg 'exterior' remains constant
-- [ ] `tg_multilinestring(l1, l2, ...)`
+- [x] `tg_multilinestring(l1, l2, ...)`
 - [ ] `tg_group_multilinestring(l1, l2, ...)`
-- [ ] `tg_multipolygon(p1, p2)`
+- [x] `tg_multipolygon(p1, p2)`
 - [ ] `tg_group_multipolygon(p)`
 
 tg_rect(minX, minY, maxX, maxY)

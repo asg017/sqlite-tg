@@ -220,6 +220,111 @@ from str_lines(tg_debug()); -- @snap debug
   --select t
 -- #endregion
 
+-- #region tg_linestring
+  -- alias of tg_line(), same implementation (error messages still say tg_line())
+  select tg_to_wkt(tg_linestring()); -- 'LINESTRING EMPTY'
+  select tg_to_wkt(
+    tg_linestring(
+      tg_point(1, 2),
+      tg_point(3, 4)
+    )
+  ); -- 'LINESTRING(1 2,3 4)'
+  select tg_linestring('LINESTRING EMPTY'); -- error: argument to tg_line() at index 0 expected a point, found LineString
+-- #endregion
+
+-- #region tg_ring
+  -- tg_ring_new() does not synthesize a closing point: WKT echoes back
+  -- exactly the points given (see comment above tg_ring() in sqlite-tg.c),
+  -- even though the ring is geometrically closed either way.
+  select tg_to_wkt(tg_ring()); -- 'POLYGON(())'
+  select tg_to_wkt(
+    tg_ring(
+      tg_point(0, 0),
+      tg_point(10, 0),
+      tg_point(10, 10)
+    )
+  ); -- 'POLYGON((0 0,10 0,10 10))'
+  select tg_to_wkt(
+    tg_ring(
+      tg_point(0, 0),
+      tg_point(10, 0),
+      tg_point(10, 10),
+      tg_point(0, 0)
+    )
+  ); -- 'POLYGON((0 0,10 0,10 10,0 0))'
+  select tg_ring(tg_point(1, 1), 'not point'); -- error: argument to tg_ring() at index 1 is an invalid geometry: ParseError: invalid type specifier, expected 'Z', 'M', 'ZM', or 'EMPTY'
+  select tg_ring('LINESTRING EMPTY'); -- error: argument to tg_ring() at index 0 expected a point, found LineString
+-- #endregion
+
+-- #region tg_polygon
+  select tg_to_wkt(tg_polygon()); -- 'POLYGON EMPTY'
+  select tg_to_wkt(
+    tg_polygon(
+      tg_ring(tg_point(0, 0), tg_point(10, 0), tg_point(10, 10), tg_point(0, 10), tg_point(0, 0))
+    )
+  ); -- 'POLYGON((0 0,10 0,10 10,0 10,0 0))'
+  select tg_to_wkt(
+    tg_polygon(
+      tg_ring(tg_point(0, 0), tg_point(10, 0), tg_point(10, 10), tg_point(0, 10), tg_point(0, 0)),
+      tg_ring(tg_point(1, 1), tg_point(2, 1), tg_point(2, 2), tg_point(1, 2), tg_point(1, 1))
+    )
+  ); -- 'POLYGON((0 0,10 0,10 10,0 10,0 0),(1 1,2 1,2 2,1 2,1 1))'
+  -- a Polygon-typed arg with no holes is accepted the same as a bare ring
+  select tg_to_wkt(
+    tg_polygon('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))')
+  ); -- 'POLYGON((0 0,10 0,10 10,0 10,0 0))'
+
+  select tg_polygon('not a geometry'); -- error: argument to tg_polygon() at index 0 is an invalid geometry: ParseError: invalid type specifier, expected 'Z', 'M', 'ZM', or 'EMPTY'
+  select tg_polygon(tg_ring(tg_point(0, 0), tg_point(1, 0), tg_point(1, 1), tg_point(0, 0)), 'POINT(1 1)'); -- error: argument to tg_polygon() at index 1 expected a ring, found Point
+  -- a Polygon WITH holes cannot be used as a ring arg: silently using its
+  -- exterior would drop the holes' data
+  select tg_polygon('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))'); -- error: argument to tg_polygon() at index 0 expected a ring, found a Polygon with holes (its holes would be silently dropped)
+-- #endregion
+
+-- #region tg_multilinestring
+  select tg_to_wkt(tg_multilinestring()); -- 'MULTILINESTRING EMPTY'
+  select tg_to_wkt(
+    tg_multilinestring(
+      tg_line(tg_point(0, 0), tg_point(1, 1)),
+      tg_line(tg_point(2, 2), tg_point(3, 3))
+    )
+  ); -- 'MULTILINESTRING((0 0,1 1),(2 2,3 3))'
+  select tg_multilinestring('not a geometry'); -- error: argument to tg_multilinestring() at index 0 is an invalid geometry: ParseError: invalid type specifier, expected 'Z', 'M', 'ZM', or 'EMPTY'
+  select tg_multilinestring('LINESTRING(0 0, 1 1)', 'POINT(1 1)'); -- error: argument to tg_multilinestring() at index 1 expected a LineString, found Point
+-- #endregion
+
+-- #region tg_multipolygon
+  select tg_to_wkt(tg_multipolygon()); -- 'MULTIPOLYGON EMPTY'
+  select tg_to_wkt(
+    tg_multipolygon(
+      'POLYGON((0 0, 1 0, 1 1, 0 0))',
+      'POLYGON((10 10, 11 10, 11 11, 10 10))'
+    )
+  ); -- 'MULTIPOLYGON(((0 0,1 0,1 1,0 0)),((10 10,11 10,11 11,10 10)))'
+  -- a bare ring upcast pointer is accepted too (reports typeof Polygon)
+  select tg_to_wkt(
+    tg_multipolygon(tg_ring(tg_point(0, 0), tg_point(1, 0), tg_point(1, 1), tg_point(0, 0)))
+  ); -- 'MULTIPOLYGON(((0 0,1 0,1 1,0 0)))'
+  select tg_multipolygon('not a geometry'); -- error: argument to tg_multipolygon() at index 0 is an invalid geometry: ParseError: invalid type specifier, expected 'Z', 'M', 'ZM', or 'EMPTY'
+  select tg_multipolygon('POLYGON((0 0, 1 0, 1 1, 0 0))', 'POINT(1 1)'); -- error: argument to tg_multipolygon() at index 1 expected a Polygon, found Point
+-- #endregion
+
+-- #region tg_geometrycollection
+  select tg_to_wkt(tg_geometrycollection()); -- 'GEOMETRYCOLLECTION EMPTY'
+  select tg_to_wkt(
+    tg_geometrycollection('POINT(1 1)', 'LINESTRING(0 0, 1 1)')
+  ); -- 'GEOMETRYCOLLECTION(POINT(1 1),LINESTRING(0 0,1 1))'
+  -- mixed types: a polygon with a hole, and a nested collection
+  select tg_to_wkt(
+    tg_geometrycollection(
+      'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))',
+      'GEOMETRYCOLLECTION(POINT(2 2))'
+    )
+  ); -- 'GEOMETRYCOLLECTION(POLYGON((0 0,10 0,10 10,0 10,0 0),(1 1,2 1,2 2,1 2,1 1)),GEOMETRYCOLLECTION(POINT(2 2)))'
+  select tg_geometrycollection('not a geometry'); -- error: argument to tg_geometrycollection() at index 0 is an invalid geometry: ParseError: invalid type specifier, expected 'Z', 'M', 'ZM', or 'EMPTY'
+  select tg_geometrycollection('POINT(1 1)', 'not a geometry'); -- error: argument to tg_geometrycollection() at index 1 is an invalid geometry: ParseError: invalid type specifier, expected 'Z', 'M', 'ZM', or 'EMPTY'
+-- #endregion
+
 -- #region tg_type
   select
     tg_type(value)

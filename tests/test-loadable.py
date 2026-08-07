@@ -72,6 +72,7 @@ FUNCTIONS = [
     "tg_extra_json",
     "tg_geom",
     "tg_geom",
+    "tg_geometrycollection",
     "tg_group_bbox",
     "tg_group_feature_collection_geojson",
     "tg_group_feature_collection_geojson",
@@ -84,14 +85,19 @@ FUNCTIONS = [
     "tg_is_feature",
     "tg_is_featurecollection",
     "tg_line",
+    "tg_linestring",
     "tg_max_x",
     "tg_max_y",
     "tg_memsize",
     "tg_min_x",
     "tg_min_y",
+    "tg_multilinestring",
     "tg_multipoint",
+    "tg_multipolygon",
     "tg_point",
     "tg_poly_exterior",
+    "tg_polygon",
+    "tg_ring",
     "tg_to_geojson",
     "tg_to_wkb",
     "tg_to_wkt",
@@ -749,6 +755,215 @@ def test_tg_multipoint():
         ),
     ):
         tg_multipoint("multipoint(1 1)")
+
+
+def test_tg_linestring():
+    # alias of tg_line(): same registered C function, so error messages
+    # still say "tg_line()" (the name is baked into the impl, not looked up
+    # from the SQL function name it was invoked as).
+    tg_linestring = lambda *args: db.execute(
+        f"select tg_to_wkt(tg_linestring({spread_args(args)}))", args
+    ).fetchone()[0]
+    assert tg_linestring() == "LINESTRING EMPTY"
+    assert (
+        tg_linestring("point(0 0)", "point(1 1)") == "LINESTRING(0 0,1 1)"
+    )
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_line() at index 1 is an invalid geometry"
+        ),
+    ):
+        tg_linestring("point(1 1)", "invalid")
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_line() at index 0 expected a point, found LineString"
+        ),
+    ):
+        tg_linestring("LINESTRING EMPTY")
+
+
+def test_tg_ring():
+    tg_ring = lambda *args: db.execute(
+        f"select tg_to_wkt(tg_ring({spread_args(args)}))", args
+    ).fetchone()[0]
+    # tg_ring_new() does not synthesize a closing point: WKT echoes back
+    # exactly the points given, even though the ring is treated as
+    # geometrically closed either way (see comment above tg_ring() in
+    # sqlite-tg.c).
+    assert tg_ring() == "POLYGON(())"
+    assert tg_ring("point(0 0)", "point(10 0)", "point(10 10)") == (
+        "POLYGON((0 0,10 0,10 10))"
+    )
+    assert tg_ring(
+        "point(0 0)", "point(10 0)", "point(10 10)", "point(0 0)"
+    ) == "POLYGON((0 0,10 0,10 10,0 0))"
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape("argument to tg_ring() at index 0 is an invalid geometry"),
+    ):
+        tg_ring("invalid")
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_ring() at index 1 expected a point, found LineString"
+        ),
+    ):
+        tg_ring("point(0 0)", "LINESTRING(0 0, 1 1)")
+
+
+def test_tg_polygon():
+    tg_polygon = lambda *args: db.execute(
+        f"select tg_to_wkt(tg_polygon({spread_args(args)}))", args
+    ).fetchone()[0]
+    assert tg_polygon() == "POLYGON EMPTY"
+
+    exterior = "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"
+    hole = "POLYGON((1 1, 2 1, 2 2, 1 2, 1 1))"
+
+    assert tg_polygon(exterior) == "POLYGON((0 0,10 0,10 10,0 10,0 0))"
+    assert tg_polygon(exterior, hole) == (
+        "POLYGON((0 0,10 0,10 10,0 10,0 0),(1 1,2 1,2 2,1 2,1 1))"
+    )
+
+    # a Polygon-typed exterior arg (no holes) is accepted, same as a bare
+    # ring from tg_ring()/tg_poly_exterior()
+    assert db.execute(
+        "select tg_to_wkt(tg_polygon(tg_ring(tg_point(0,0), tg_point(1,0), "
+        "tg_point(1,1), tg_point(0,0))))"
+    ).fetchone()[0] == "POLYGON((0 0,1 0,1 1,0 0))"
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_polygon() at index 0 is an invalid geometry"
+        ),
+    ):
+        tg_polygon("invalid")
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_polygon() at index 1 expected a ring, found Point"
+        ),
+    ):
+        tg_polygon(exterior, "POINT(1 1)")
+
+    # a Polygon WITH holes cannot be used as a ring argument: silently using
+    # its exterior would drop the holes' data
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_polygon() at index 0 expected a ring, found a "
+            "Polygon with holes (its holes would be silently dropped)"
+        ),
+    ):
+        tg_polygon(
+            "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))"
+        )
+
+
+def test_tg_multilinestring():
+    tg_multilinestring = lambda *args: db.execute(
+        f"select tg_to_wkt(tg_multilinestring({spread_args(args)}))", args
+    ).fetchone()[0]
+    assert tg_multilinestring() == "MULTILINESTRING EMPTY"
+    assert tg_multilinestring("LINESTRING(0 0, 1 1)") == "MULTILINESTRING((0 0,1 1))"
+    assert (
+        tg_multilinestring("LINESTRING(0 0, 1 1)", "LINESTRING(2 2, 3 3)")
+        == "MULTILINESTRING((0 0,1 1),(2 2,3 3))"
+    )
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_multilinestring() at index 0 is an invalid geometry"
+        ),
+    ):
+        tg_multilinestring("invalid")
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_multilinestring() at index 1 expected a LineString, found Point"
+        ),
+    ):
+        tg_multilinestring("LINESTRING(0 0, 1 1)", "POINT(1 1)")
+
+
+def test_tg_multipolygon():
+    tg_multipolygon = lambda *args: db.execute(
+        f"select tg_to_wkt(tg_multipolygon({spread_args(args)}))", args
+    ).fetchone()[0]
+    assert tg_multipolygon() == "MULTIPOLYGON EMPTY"
+    p1 = "POLYGON((0 0, 1 0, 1 1, 0 0))"
+    p2 = "POLYGON((10 10, 11 10, 11 11, 10 10))"
+    assert tg_multipolygon(p1) == "MULTIPOLYGON(((0 0,1 0,1 1,0 0)))"
+    assert (
+        tg_multipolygon(p1, p2)
+        == "MULTIPOLYGON(((0 0,1 0,1 1,0 0)),((10 10,11 10,11 11,10 10)))"
+    )
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_multipolygon() at index 0 is an invalid geometry"
+        ),
+    ):
+        tg_multipolygon("invalid")
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_multipolygon() at index 1 expected a Polygon, found Point"
+        ),
+    ):
+        tg_multipolygon(p1, "POINT(1 1)")
+
+
+def test_tg_geometrycollection():
+    tg_geometrycollection = lambda *args: db.execute(
+        f"select tg_to_wkt(tg_geometrycollection({spread_args(args)}))", args
+    ).fetchone()[0]
+    assert tg_geometrycollection() == "GEOMETRYCOLLECTION EMPTY"
+    assert (
+        tg_geometrycollection("POINT(1 1)")
+        == "GEOMETRYCOLLECTION(POINT(1 1))"
+    )
+    assert (
+        tg_geometrycollection("POINT(1 1)", "LINESTRING(0 0, 1 1)")
+        == "GEOMETRYCOLLECTION(POINT(1 1),LINESTRING(0 0,1 1))"
+    )
+    # mixed types, including a polygon with a hole, and nested collections
+    assert (
+        tg_geometrycollection(
+            "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))",
+            "GEOMETRYCOLLECTION(POINT(2 2))",
+        )
+        == "GEOMETRYCOLLECTION(POLYGON((0 0,10 0,10 10,0 10,0 0),"
+        "(1 1,2 1,2 2,1 2,1 1)),GEOMETRYCOLLECTION(POINT(2 2)))"
+    )
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_geometrycollection() at index 0 is an invalid geometry"
+        ),
+    ):
+        tg_geometrycollection("invalid")
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_geometrycollection() at index 1 is an invalid geometry"
+        ),
+    ):
+        tg_geometrycollection("POINT(1 1)", "invalid")
 
 
 @pytest.mark.skip(reason="TODO")

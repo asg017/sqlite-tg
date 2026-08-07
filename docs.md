@@ -102,6 +102,48 @@ select tg_to_wkt(tg_line(tg_point(0, 0), tg_point(1, 1), tg_point(2, 0)));
 -- 'LINESTRING(0 0,1 1,2 0)'
 ```
 
+#### `tg_linestring(p1, p2, ..., pN)` {#tg_linestring}
+
+An alias of [`tg_line()`](#tg_line) — same implementation, provided for familiarity with the WKT `LINESTRING` type name. Note that any error messages it raises will still refer to `tg_line()`.
+
+```sql
+select tg_to_wkt(tg_linestring(tg_point(0, 0), tg_point(1, 1)));
+-- 'LINESTRING(0 0,1 1)'
+```
+
+#### `tg_ring(p1, p2, ..., pN)` {#tg_ring}
+
+A [pointer function](#pointer-functions) that returns a ring made up of the given points, in order. Input arguments must be Point geometries, in any [supported format](#supported-formats). A ring can always be used anywhere a Polygon or generic geometry is expected (see [`tg_poly_exterior()`](#tg_poly_exterior)), and is the input type expected by [`tg_polygon()`](#tg_polygon).
+
+A ring is always treated as geometrically closed — the segment from the last point back to the first is implied even if you don't repeat it — but `tg_to_wkt()`/`tg_to_geojson()` output echoes back exactly the points you passed in. Repeat the first point as the last argument if you want conventional closed-ring WKT/GeoJSON text.
+
+```sql
+select tg_to_wkt(tg_ring(tg_point(0, 0), tg_point(10, 0), tg_point(10, 10)));
+-- 'POLYGON((0 0,10 0,10 10))'
+select tg_to_wkt(tg_ring(tg_point(0, 0), tg_point(10, 0), tg_point(10, 10), tg_point(0, 0)));
+-- 'POLYGON((0 0,10 0,10 10,0 0))'
+```
+
+#### `tg_polygon(exterior, hole1, ..., holeN)` {#tg_polygon}
+
+A [pointer function](#pointer-functions) that returns a Polygon geometry from the given exterior ring and, optionally, one or more interior holes. Every argument must be a ring — either from [`tg_ring()`](#tg_ring)/[`tg_poly_exterior()`](#tg_poly_exterior)/[`tg_holes_each()`](#tg_holes_each), or a Polygon geometry with no holes of its own (its exterior ring is used). A Polygon argument that itself has holes is rejected, since silently using only its exterior would drop that data.
+
+```sql
+select tg_to_wkt(
+  tg_polygon(
+    tg_ring(tg_point(0, 0), tg_point(10, 0), tg_point(10, 10), tg_point(0, 10), tg_point(0, 0))
+  )
+);
+-- 'POLYGON((0 0,10 0,10 10,0 10,0 0))'
+select tg_to_wkt(
+  tg_polygon(
+    tg_ring(tg_point(0, 0), tg_point(10, 0), tg_point(10, 10), tg_point(0, 10), tg_point(0, 0)),
+    tg_ring(tg_point(1, 1), tg_point(2, 1), tg_point(2, 2), tg_point(1, 2), tg_point(1, 1))
+  )
+);
+-- 'POLYGON((0 0,10 0,10 10,0 10,0 0),(1 1,2 1,2 2,1 2,1 1))'
+```
+
 #### `tg_multipoint(p1, p2, ..., pN)` {#tg_multipoint}
 
 A [pointer function](#pointer-functions) that returns a MultiPoint geometry with the given points. Input arguments must be Point geometries, in any [supported format](#supported-formats).
@@ -109,6 +151,45 @@ A [pointer function](#pointer-functions) that returns a MultiPoint geometry with
 ```sql
 select tg_to_wkt(tg_multipoint(tg_point(1, 1), tg_point(2, 2)));
 -- 'MULTIPOINT(1 1,2 2)'
+```
+
+#### `tg_multilinestring(l1, l2, ..., lN)` {#tg_multilinestring}
+
+A [pointer function](#pointer-functions) that returns a MultiLineString geometry with the given LineStrings. Input arguments must be LineString geometries, in any [supported format](#supported-formats).
+
+```sql
+select tg_to_wkt(
+  tg_multilinestring(
+    tg_line(tg_point(0, 0), tg_point(1, 1)),
+    tg_line(tg_point(2, 2), tg_point(3, 3))
+  )
+);
+-- 'MULTILINESTRING((0 0,1 1),(2 2,3 3))'
+```
+
+#### `tg_multipolygon(p1, p2, ..., pN)` {#tg_multipolygon}
+
+A [pointer function](#pointer-functions) that returns a MultiPolygon geometry with the given Polygons. Input arguments must be Polygon geometries (including bare rings, which upcast to Polygon), in any [supported format](#supported-formats).
+
+```sql
+select tg_to_wkt(
+  tg_multipolygon(
+    'POLYGON((0 0, 1 0, 1 1, 0 0))',
+    'POLYGON((10 10, 11 10, 11 11, 10 10))'
+  )
+);
+-- 'MULTIPOLYGON(((0 0,1 0,1 1,0 0)),((10 10,11 10,11 11,10 10)))'
+```
+
+#### `tg_geometrycollection(g1, g2, ..., gN)` {#tg_geometrycollection}
+
+A [pointer function](#pointer-functions) that returns a GeometryCollection geometry with the given geometries, which may be of mixed types (including nested GeometryCollections).
+
+```sql
+select tg_to_wkt(
+  tg_geometrycollection('POINT(1 1)', 'LINESTRING(0 0, 1 1)')
+);
+-- 'GEOMETRYCOLLECTION(POINT(1 1),LINESTRING(0 0,1 1))'
 ```
 
 #### `tg_geom(input, $index)` {#tg_geom}

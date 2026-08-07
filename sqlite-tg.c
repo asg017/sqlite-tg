@@ -719,6 +719,353 @@ static void tg_line(sqlite3_context *context, int argc,
   sqlite3_free(points);
 }
 
+// tg_ring_new() does not require (or produce) a duplicated closing point: a
+// ring of N points is always treated as closed for geometric purposes (area,
+// segments, predicates all implicitly connect the last point back to the
+// first — see num_segments() in tg.c). But WKT/WKB/GeoJSON serialization
+// echoes back exactly the points supplied (write_ring_points_wkt() et al.
+// iterate ring->npoints with no synthesized closing coordinate), so an
+// "unclosed" input (last point != first point) round-trips to WKT text that
+// itself looks unclosed, e.g. `POLYGON((0 0,10 0,10 10))` instead of
+// `POLYGON((0 0,10 0,10 10,0 0))`. Both forms are geometrically identical
+// inside tg. Callers who want conventional closed-ring WKT/GeoJSON text must
+// repeat the first point as the last argument themselves; tg_ring() itself
+// applies no such transformation.
+static void tg_ring(sqlite3_context *context, int argc,
+                          sqlite3_value **argv) {
+  if (argc == 0) {
+    struct tg_ring *ring = tg_ring_new(NULL, 0);
+    if (!ring) {
+      sqlite3_result_error_nomem(context);
+    } else {
+      resultGeomPointer(context, (struct tg_geom *) ring);
+    }
+    return;
+  }
+
+  struct tg_point *points = sqlite3_malloc(argc * sizeof(struct tg_point));
+  if (!points) {
+    sqlite3_result_error_nomem(context);
+    return;
+  }
+  memset(points, 0, argc * sizeof(struct tg_point));
+
+  for (int i = 0; i < argc; i++) {
+    struct tg_geom *geom;
+    char * errmsg;
+    int rc = geomValue(argv[i], &geom, &errmsg);
+    if (rc != SQLITE_OK) {
+      const char *zErr = sqlite3_mprintf(
+          "argument to tg_ring() at index %i is an invalid geometry: %z",
+          i, errmsg);
+      sqlite3_result_error(context, zErr, -1);
+      sqlite3_free((void *)zErr);
+      sqlite3_free(points);
+      return;
+    }
+
+    if (tg_geom_typeof(geom) != TG_POINT) {
+      const char *zErr = sqlite3_mprintf(
+          "argument to tg_ring() at index %i expected a point, found %s",
+          i, tg_geom_type_string(tg_geom_typeof(geom)));
+      sqlite3_result_error(context, zErr, -1);
+      sqlite3_free((void *)zErr);
+      tg_geom_free(geom);
+      sqlite3_free(points);
+      return;
+    }
+    struct tg_point src = tg_geom_point(geom);
+    struct tg_point *dest = &points[i];
+    dest->x = src.x;
+    dest->y = src.y;
+    tg_geom_free(geom);
+  }
+  struct tg_ring *ring = tg_ring_new(points, argc);
+  if (!ring) {
+    sqlite3_result_error_nomem(context);
+  } else {
+    resultGeomPointer(context, (struct tg_geom *) ring);
+  }
+  sqlite3_free(points);
+}
+
+// Shared by tg_polygon()'s exterior/hole arguments: accepts a bare ring (the
+// upcast pointers produced by tg_ring()/tg_poly_exterior()/tg_holes_each())
+// or a plain Polygon geometry with no holes, in which case the polygon's
+// exterior ring is used — consistent with ringEachCheck()'s precedent below.
+// A Polygon WITH holes is rejected rather than silently used via its
+// exterior, since that would silently drop the holes' data.
+// Always consumes (frees) `geom`. On success returns an owned ring clone the
+// caller must tg_ring_free(). On failure returns NULL and sets *errmsg to a
+// sqlite3_mprintf()-allocated description (no trailing punctuation) meant to
+// be embedded into a per-index caller message; the caller owns *errmsg.
+static struct tg_ring *ringArgFromGeom(struct tg_geom *geom, char **errmsg) {
+  enum tg_geom_type t = tg_geom_typeof(geom);
+  if (t != TG_POLYGON) {
+    *errmsg = sqlite3_mprintf("expected a ring, found %s",
+                              tg_geom_type_string(t));
+    tg_geom_free(geom);
+    return NULL;
+  }
+  const struct tg_poly *poly = tg_geom_poly(geom);
+  if (tg_poly_num_holes(poly) > 0) {
+    *errmsg = sqlite3_mprintf(
+        "expected a ring, found a Polygon with holes (its holes would be "
+        "silently dropped)");
+    tg_geom_free(geom);
+    return NULL;
+  }
+  struct tg_ring *ring = tg_ring_clone(tg_poly_exterior(poly));
+  tg_geom_free(geom);
+  return ring;
+}
+
+// tg_poly_new() clones its exterior/holes arguments internally (tg_ring_clone()
+// for each, see tg_poly_new() in tg.c) rather than taking ownership, so the
+// rings collected below must be freed by us after the tg_poly_new() call
+// regardless of success or failure.
+static void tg_polygon(sqlite3_context *context, int argc,
+                          sqlite3_value **argv) {
+  if (argc == 0) {
+    struct tg_geom *geom = tg_geom_new_polygon_empty();
+    if (!geom) {
+      sqlite3_result_error_nomem(context);
+    } else {
+      resultGeomPointer(context, geom);
+    }
+    return;
+  }
+
+  struct tg_ring **rings = sqlite3_malloc(argc * sizeof(struct tg_ring *));
+  if (!rings) {
+    sqlite3_result_error_nomem(context);
+    return;
+  }
+  memset(rings, 0, argc * sizeof(struct tg_ring *));
+
+  for (int i = 0; i < argc; i++) {
+    struct tg_geom *geom;
+    char * errmsg;
+    int rc = geomValue(argv[i], &geom, &errmsg);
+    if (rc != SQLITE_OK) {
+      const char *zErr = sqlite3_mprintf(
+          "argument to tg_polygon() at index %i is an invalid geometry: %z",
+          i, errmsg);
+      sqlite3_result_error(context, zErr, -1);
+      sqlite3_free((void *)zErr);
+      for (int j = 0; j < i; j++) tg_ring_free(rings[j]);
+      sqlite3_free(rings);
+      return;
+    }
+
+    char *ringerr = NULL;
+    struct tg_ring *ring = ringArgFromGeom(geom, &ringerr);
+    if (!ring) {
+      const char *zErr = sqlite3_mprintf(
+          "argument to tg_polygon() at index %i %z", i, ringerr);
+      sqlite3_result_error(context, zErr, -1);
+      sqlite3_free((void *)zErr);
+      for (int j = 0; j < i; j++) tg_ring_free(rings[j]);
+      sqlite3_free(rings);
+      return;
+    }
+    rings[i] = ring;
+  }
+
+  struct tg_poly *poly = tg_poly_new(rings[0],
+                                     (const struct tg_ring *const *) &rings[1],
+                                     argc - 1);
+  for (int i = 0; i < argc; i++) tg_ring_free(rings[i]);
+  sqlite3_free(rings);
+  if (!poly) {
+    sqlite3_result_error_nomem(context);
+  } else {
+    resultGeomPointer(context, (struct tg_geom *) poly);
+  }
+}
+
+// tg_geom_new_multilinestring() clones each line internally (tg_line_clone(),
+// see tg.c) rather than taking ownership, so the clones collected below must
+// be freed by us after the call regardless of success or failure.
+static void tg_multilinestring(sqlite3_context *context, int argc,
+                          sqlite3_value **argv) {
+  if (argc == 0) {
+    struct tg_geom *geom = tg_geom_new_multilinestring_empty();
+    if (!geom) {
+      sqlite3_result_error_nomem(context);
+    } else {
+      resultGeomPointer(context, geom);
+    }
+    return;
+  }
+
+  struct tg_line **lines = sqlite3_malloc(argc * sizeof(struct tg_line *));
+  if (!lines) {
+    sqlite3_result_error_nomem(context);
+    return;
+  }
+  memset(lines, 0, argc * sizeof(struct tg_line *));
+
+  for (int i = 0; i < argc; i++) {
+    struct tg_geom *geom;
+    char * errmsg;
+    int rc = geomValue(argv[i], &geom, &errmsg);
+    if (rc != SQLITE_OK) {
+      const char *zErr = sqlite3_mprintf(
+          "argument to tg_multilinestring() at index %i is an invalid geometry: %z",
+          i, errmsg);
+      sqlite3_result_error(context, zErr, -1);
+      sqlite3_free((void *)zErr);
+      for (int j = 0; j < i; j++) tg_line_free(lines[j]);
+      sqlite3_free(lines);
+      return;
+    }
+
+    if (tg_geom_typeof(geom) != TG_LINESTRING) {
+      const char *zErr = sqlite3_mprintf(
+          "argument to tg_multilinestring() at index %i expected a LineString, found %s",
+          i, tg_geom_type_string(tg_geom_typeof(geom)));
+      sqlite3_result_error(context, zErr, -1);
+      sqlite3_free((void *)zErr);
+      tg_geom_free(geom);
+      for (int j = 0; j < i; j++) tg_line_free(lines[j]);
+      sqlite3_free(lines);
+      return;
+    }
+    lines[i] = tg_line_clone(tg_geom_line(geom));
+    tg_geom_free(geom);
+  }
+
+  struct tg_geom *geom = tg_geom_new_multilinestring(
+      (const struct tg_line *const *) lines, argc);
+  for (int i = 0; i < argc; i++) tg_line_free(lines[i]);
+  sqlite3_free(lines);
+  if (!geom) {
+    sqlite3_result_error_nomem(context);
+  } else {
+    resultGeomPointer(context, geom);
+  }
+}
+
+// tg_geom_new_multipolygon() clones each polygon internally (tg_poly_clone(),
+// see tg.c) rather than taking ownership, so the clones collected below must
+// be freed by us after the call regardless of success or failure. A bare
+// ring upcast pointer (from tg_ring()/tg_poly_exterior()) reports typeof
+// TG_POLYGON too (see ringEachCheck() below) and is accepted here the same
+// way it's accepted elsewhere in this file.
+static void tg_multipolygon(sqlite3_context *context, int argc,
+                          sqlite3_value **argv) {
+  if (argc == 0) {
+    struct tg_geom *geom = tg_geom_new_multipolygon_empty();
+    if (!geom) {
+      sqlite3_result_error_nomem(context);
+    } else {
+      resultGeomPointer(context, geom);
+    }
+    return;
+  }
+
+  struct tg_poly **polys = sqlite3_malloc(argc * sizeof(struct tg_poly *));
+  if (!polys) {
+    sqlite3_result_error_nomem(context);
+    return;
+  }
+  memset(polys, 0, argc * sizeof(struct tg_poly *));
+
+  for (int i = 0; i < argc; i++) {
+    struct tg_geom *geom;
+    char * errmsg;
+    int rc = geomValue(argv[i], &geom, &errmsg);
+    if (rc != SQLITE_OK) {
+      const char *zErr = sqlite3_mprintf(
+          "argument to tg_multipolygon() at index %i is an invalid geometry: %z",
+          i, errmsg);
+      sqlite3_result_error(context, zErr, -1);
+      sqlite3_free((void *)zErr);
+      for (int j = 0; j < i; j++) tg_poly_free(polys[j]);
+      sqlite3_free(polys);
+      return;
+    }
+
+    if (tg_geom_typeof(geom) != TG_POLYGON) {
+      const char *zErr = sqlite3_mprintf(
+          "argument to tg_multipolygon() at index %i expected a Polygon, found %s",
+          i, tg_geom_type_string(tg_geom_typeof(geom)));
+      sqlite3_result_error(context, zErr, -1);
+      sqlite3_free((void *)zErr);
+      tg_geom_free(geom);
+      for (int j = 0; j < i; j++) tg_poly_free(polys[j]);
+      sqlite3_free(polys);
+      return;
+    }
+    polys[i] = tg_poly_clone(tg_geom_poly(geom));
+    tg_geom_free(geom);
+  }
+
+  struct tg_geom *geom = tg_geom_new_multipolygon(
+      (const struct tg_poly *const *) polys, argc);
+  for (int i = 0; i < argc; i++) tg_poly_free(polys[i]);
+  sqlite3_free(polys);
+  if (!geom) {
+    sqlite3_result_error_nomem(context);
+  } else {
+    resultGeomPointer(context, geom);
+  }
+}
+
+// tg_geom_new_geometrycollection() clones each geometry internally
+// (tg_geom_clone(), see tg.c) rather than taking ownership, so the clones
+// collected below must be freed by us after the call regardless of success
+// or failure. Unlike the other multi-constructors, any geometry type
+// (including nested collections) is accepted.
+static void tg_geometrycollection(sqlite3_context *context, int argc,
+                          sqlite3_value **argv) {
+  if (argc == 0) {
+    struct tg_geom *geom = tg_geom_new_geometrycollection_empty();
+    if (!geom) {
+      sqlite3_result_error_nomem(context);
+    } else {
+      resultGeomPointer(context, geom);
+    }
+    return;
+  }
+
+  struct tg_geom **geoms = sqlite3_malloc(argc * sizeof(struct tg_geom *));
+  if (!geoms) {
+    sqlite3_result_error_nomem(context);
+    return;
+  }
+  memset(geoms, 0, argc * sizeof(struct tg_geom *));
+
+  for (int i = 0; i < argc; i++) {
+    struct tg_geom *geom;
+    char * errmsg;
+    int rc = geomValue(argv[i], &geom, &errmsg);
+    if (rc != SQLITE_OK) {
+      const char *zErr = sqlite3_mprintf(
+          "argument to tg_geometrycollection() at index %i is an invalid geometry: %z",
+          i, errmsg);
+      sqlite3_result_error(context, zErr, -1);
+      sqlite3_free((void *)zErr);
+      for (int j = 0; j < i; j++) tg_geom_free(geoms[j]);
+      sqlite3_free(geoms);
+      return;
+    }
+    geoms[i] = tg_geom_clone(geom);
+    tg_geom_free(geom);
+  }
+
+  struct tg_geom *geom = tg_geom_new_geometrycollection(
+      (const struct tg_geom *const *) geoms, argc);
+  for (int i = 0; i < argc; i++) tg_geom_free(geoms[i]);
+  sqlite3_free(geoms);
+  if (!geom) {
+    sqlite3_result_error_nomem(context);
+  } else {
+    resultGeomPointer(context, geom);
+  }
+}
+
 struct Array {
   size_t element_size;
   size_t length;
@@ -2567,11 +2914,16 @@ int sqlite3_tg_init(sqlite3 *db, char **pzErrMsg,
       {(char *)"tg_to_wkb",         1, tg_to_wkb,     NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_to_geojson",     1, tg_to_geojson, NULL,             NULL,         DEFAULT_FLAGS | SQLITE_RESULT_SUBTYPE},
 
-      {(char *)"tg_multipoint",    -1, tg_multipoint, NULL,             NULL,         DEFAULT_FLAGS},
-      {(char *)"tg_point",          2, tg_point,      NULL,             NULL,         DEFAULT_FLAGS},
-      {(char *)"tg_line",          -1, tg_line,      NULL,             NULL,         DEFAULT_FLAGS},
-
-      {(char *)"tg_poly_exterior", 1, tg_poly_exterior_,      NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_geometrycollection", -1, tg_geometrycollection, NULL,        NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_line",               -1, tg_line,               NULL,       NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_linestring",         -1, tg_line,               NULL,       NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_multilinestring",    -1, tg_multilinestring,    NULL,       NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_multipoint",         -1, tg_multipoint,         NULL,       NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_multipolygon",       -1, tg_multipolygon,       NULL,       NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_point",               2, tg_point,              NULL,       NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_polygon",            -1, tg_polygon,            NULL,       NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_poly_exterior",       1, tg_poly_exterior_,     NULL,       NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_ring",               -1, tg_ring,               NULL,       NULL,         DEFAULT_FLAGS},
       // clang-format on
 
   };
