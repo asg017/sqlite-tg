@@ -70,6 +70,13 @@ int main(int argc, char *argv[]) {
       "tg_ring(tg_point(0, 0), tg_point(10, 0), tg_point(10, 10), tg_point(0, 10), tg_point(0, 0)), "
       "tg_ring(tg_point(1, 1), tg_point(2, 1), tg_point(2, 2), tg_point(1, 2), tg_point(1, 1))))",
       "select tg_to_wkt(tg_polygon('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'))",
+      "select tg_to_wkt(tg_rect(0, 0, 1, 1))",
+      "select tg_to_wkt(tg_rect(tg_point(0, 0), tg_point(1, 1)))",
+      "select tg_to_wkt(tg_rect(1, 1, 0, 0))",
+      "select tg_intersects(tg_rect(0, 0, 10, 10), tg_point(5, 5))",
+      "select tg_to_wkt(tg_segment(0, 0, 1, 1))",
+      "select tg_to_wkt(tg_segment(tg_point(0, 0), tg_point(1, 1)))",
+      "select tg_intersects(tg_segment(0, 0, 2, 2), tg_segment(0, 2, 2, 0))",
       "select tg_to_wkt(tg_multilinestring())",
       "select tg_to_wkt(tg_multilinestring("
       "tg_line(tg_point(0, 0), tg_point(1, 1)), tg_line(tg_point(2, 2), tg_point(3, 3))))",
@@ -165,6 +172,14 @@ int main(int argc, char *argv[]) {
       "tg_point(0, 0)), 'not a ring')",
       "select tg_polygon('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), "
       "(1 1, 2 1, 2 2, 1 2, 1 1))')",
+      "select tg_rect('a', 0, 1, 1)",
+      "select tg_rect(0, 0, 1, 'a')",
+      "select tg_rect('not a geometry', tg_point(1, 1))",
+      "select tg_rect(tg_point(0, 0), 'LINESTRING(0 0, 1 1)')",
+      "select tg_segment('a', 0, 1, 1)",
+      "select tg_segment(0, 0, 1, 'a')",
+      "select tg_segment('not a geometry', tg_point(1, 1))",
+      "select tg_segment(tg_point(0, 0), 'LINESTRING(0 0, 1 1)')",
       "select tg_multilinestring(tg_line(tg_point(0, 0), tg_point(1, 1)), "
       "tg_line(tg_point(2, 2), tg_point(3, 3)), 'POINT(1 1)')",
       "select tg_multipolygon('POLYGON((0 0, 1 0, 1 1, 0 0))', "

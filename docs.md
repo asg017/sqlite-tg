@@ -221,6 +221,42 @@ select tg_to_wkt(
 -- 'POLYGON((30 10,40 40,20 40,10 20,30 10))'
 ```
 
+#### `tg_rect(minX, minY, maxX, maxY)` / `tg_rect(minP, maxP)` {#tg_rect}
+
+A [pointer function](#pointer-functions) that returns the equivalent closed-ring Polygon geometry for the given rectangle: `POLYGON((minx miny, maxx miny, maxx maxy, minx maxy, minx miny))`, with counter-clockwise winding and the closing point repeated. `tg` has no `tg_geom` representation of a rect (see `struct tg_rect`), so this is how it composes with every other `sqlite-tg` function. The two-argument form takes Point geometries, in any [supported format](#supported-formats), for the min/max corners.
+
+```sql
+select tg_to_wkt(tg_rect(0, 0, 1, 1));
+-- 'POLYGON((0 0,1 0,1 1,0 1,0 0))'
+select tg_to_wkt(tg_rect(tg_point(0, 0), tg_point(1, 1)));
+-- 'POLYGON((0 0,1 0,1 1,0 1,0 0))'
+```
+
+No normalization is applied: if `minX > maxX` (or `minY > maxY`), the polygon is built exactly as given, since neither `tg_ring_new()` nor `tg_poly_new()` validate point ordering.
+
+```sql
+select tg_to_wkt(tg_rect(1, 1, 0, 0));
+-- 'POLYGON((1 1,0 1,0 0,1 0,1 1))'
+```
+
+Since the result is an ordinary Polygon geometry, it composes with predicates like any other geometry.
+
+```sql
+select tg_intersects(tg_rect(0, 0, 10, 10), tg_point(5, 5));
+-- 1
+```
+
+#### `tg_segment(aX, aY, bX, bY)` / `tg_segment(aP, bP)` {#tg_segment}
+
+A [pointer function](#pointer-functions) that returns the equivalent 2-point LineString geometry for the given segment: `LINESTRING(ax ay, bx by)`. `tg` has no `tg_geom` representation of a segment (see `struct tg_segment`), so this is how it composes with every other `sqlite-tg` function. The two-argument form takes Point geometries, in any [supported format](#supported-formats), for the two endpoints.
+
+```sql
+select tg_to_wkt(tg_segment(0, 0, 1, 1));
+-- 'LINESTRING(0 0,1 1)'
+select tg_to_wkt(tg_segment(tg_point(0, 0), tg_point(1, 1)));
+-- 'LINESTRING(0 0,1 1)'
+```
+
 ### Aggregate Constructors
 
 These are [aggregate functions](https://www.sqlite.org/lang_aggfunc.html) that build a single geometry from a group of rows. Note that the order of aggregated rows is only guaranteed when the query has an explicit `order by`.

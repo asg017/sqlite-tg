@@ -719,6 +719,73 @@ static void tg_line(sqlite3_context *context, int argc,
   sqlite3_free(points);
 }
 
+// tg_segment isn't a tg_geom in tg's model (see struct tg_segment in tg.h) so
+// it can't flow through resultGeomPointer()/geomValue() unchanged. Instead it
+// is represented at the SQL boundary as its equivalent 2-point LineString
+// geometry: LINESTRING(ax ay, bx by). This composes for free with every
+// existing predicate/serializer; a dedicated pointer subtype (with
+// tg_segment_intersects_segment()-style fast paths) is deferred until a perf
+// need is shown (see todos/update/11-rect-segment-constructors.md, option b).
+static void tg_segment(sqlite3_context *context, int argc,
+                        sqlite3_value **argv) {
+  struct tg_point points[2];
+
+  if (argc == 4) {
+    static const char *names[] = {"aX", "aY", "bX", "bY"};
+    double vals[4];
+    for (int i = 0; i < 4; i++) {
+      int type = sqlite3_value_type(argv[i]);
+      if (type != SQLITE_INTEGER && type != SQLITE_FLOAT) {
+        const char *zErr = sqlite3_mprintf(
+            "segment %s value must be an integer or float", names[i]);
+        sqlite3_result_error(context, zErr, -1);
+        sqlite3_free((void *)zErr);
+        return;
+      }
+      vals[i] = sqlite3_value_double(argv[i]);
+    }
+    points[0].x = vals[0];
+    points[0].y = vals[1];
+    points[1].x = vals[2];
+    points[1].y = vals[3];
+  } else {
+    // argc == 2: both arguments must be Point geometries, in any supported
+    // format (WKT/WKB/GeoJSON/pointer) — same per-index error style as
+    // tg_ring().
+    for (int i = 0; i < 2; i++) {
+      struct tg_geom *geom;
+      char *errmsg;
+      int rc = geomValue(argv[i], &geom, &errmsg);
+      if (rc != SQLITE_OK) {
+        const char *zErr = sqlite3_mprintf(
+            "argument to tg_segment() at index %i is an invalid geometry: %z",
+            i, errmsg);
+        sqlite3_result_error(context, zErr, -1);
+        sqlite3_free((void *)zErr);
+        return;
+      }
+      if (tg_geom_typeof(geom) != TG_POINT) {
+        const char *zErr = sqlite3_mprintf(
+            "argument to tg_segment() at index %i expected a point, found %s",
+            i, tg_geom_type_string(tg_geom_typeof(geom)));
+        sqlite3_result_error(context, zErr, -1);
+        sqlite3_free((void *)zErr);
+        tg_geom_free(geom);
+        return;
+      }
+      points[i] = tg_geom_point(geom);
+      tg_geom_free(geom);
+    }
+  }
+
+  struct tg_geom *geom = (struct tg_geom *) tg_line_new(points, 2);
+  if (!geom) {
+    sqlite3_result_error_nomem(context);
+  } else {
+    resultGeomPointer(context, geom);
+  }
+}
+
 // tg_ring_new() does not require (or produce) a duplicated closing point: a
 // ring of N points is always treated as closed for geometric purposes (area,
 // segments, predicates all implicitly connect the last point back to the
@@ -881,6 +948,90 @@ static void tg_polygon(sqlite3_context *context, int argc,
     sqlite3_result_error_nomem(context);
   } else {
     resultGeomPointer(context, (struct tg_geom *) poly);
+  }
+}
+
+// tg_rect isn't a tg_geom in tg's model (see struct tg_rect in tg.h) so it
+// can't flow through resultGeomPointer()/geomValue() unchanged. Instead it is
+// represented at the SQL boundary as its equivalent closed-ring Polygon
+// geometry: POLYGON((minx miny, maxx miny, maxx maxy, minx maxy, minx miny)),
+// counter-clockwise winding, with the closing point repeated explicitly
+// (tg_ring_new() does not synthesize one — see comment above tg_ring()). This
+// composes for free with every existing predicate/serializer; a dedicated
+// pointer subtype (with tg_rect_intersects_rect()-style fast paths) is
+// deferred until a perf need is shown (see
+// todos/update/11-rect-segment-constructors.md, option b).
+//
+// No normalization: if minX > maxX (or minY > maxY), the polygon is built
+// exactly as given. Neither tg_ring_new() nor tg_poly_new() validate point
+// ordering, so there's nothing in tg to break — the result is just a
+// geometrically "backwards" rect (e.g. self-intersecting/CW winding), the
+// same "garbage in, garbage geometry out" behavior tg_ring() already has for
+// arbitrary points.
+static void tg_rect(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  double minx, miny, maxx, maxy;
+
+  if (argc == 4) {
+    static const char *names[] = {"minX", "minY", "maxX", "maxY"};
+    double vals[4];
+    for (int i = 0; i < 4; i++) {
+      int type = sqlite3_value_type(argv[i]);
+      if (type != SQLITE_INTEGER && type != SQLITE_FLOAT) {
+        const char *zErr = sqlite3_mprintf(
+            "rect %s value must be an integer or float", names[i]);
+        sqlite3_result_error(context, zErr, -1);
+        sqlite3_free((void *)zErr);
+        return;
+      }
+      vals[i] = sqlite3_value_double(argv[i]);
+    }
+    minx = vals[0];
+    miny = vals[1];
+    maxx = vals[2];
+    maxy = vals[3];
+  } else {
+    // argc == 2: both arguments must be Point geometries, in any supported
+    // format (WKT/WKB/GeoJSON/pointer) — same per-index error style as
+    // tg_ring().
+    struct tg_point pts[2];
+    for (int i = 0; i < 2; i++) {
+      struct tg_geom *geom;
+      char *errmsg;
+      int rc = geomValue(argv[i], &geom, &errmsg);
+      if (rc != SQLITE_OK) {
+        const char *zErr = sqlite3_mprintf(
+            "argument to tg_rect() at index %i is an invalid geometry: %z", i,
+            errmsg);
+        sqlite3_result_error(context, zErr, -1);
+        sqlite3_free((void *)zErr);
+        return;
+      }
+      if (tg_geom_typeof(geom) != TG_POINT) {
+        const char *zErr = sqlite3_mprintf(
+            "argument to tg_rect() at index %i expected a point, found %s", i,
+            tg_geom_type_string(tg_geom_typeof(geom)));
+        sqlite3_result_error(context, zErr, -1);
+        sqlite3_free((void *)zErr);
+        tg_geom_free(geom);
+        return;
+      }
+      pts[i] = tg_geom_point(geom);
+      tg_geom_free(geom);
+    }
+    minx = pts[0].x;
+    miny = pts[0].y;
+    maxx = pts[1].x;
+    maxy = pts[1].y;
+  }
+
+  struct tg_point ring[] = {
+      {minx, miny}, {maxx, miny}, {maxx, maxy}, {minx, maxy}, {minx, miny},
+  };
+  struct tg_ring *r = tg_ring_new(ring, 5);
+  if (!r) {
+    sqlite3_result_error_nomem(context);
+  } else {
+    resultGeomPointer(context, (struct tg_geom *) r);
   }
 }
 
@@ -3153,7 +3304,11 @@ int sqlite3_tg_init(sqlite3 *db, char **pzErrMsg,
       {(char *)"tg_point",               2, tg_point,              NULL,       NULL,         DEFAULT_FLAGS},
       {(char *)"tg_polygon",            -1, tg_polygon,            NULL,       NULL,         DEFAULT_FLAGS},
       {(char *)"tg_poly_exterior",       1, tg_poly_exterior_,     NULL,       NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_rect",                2, tg_rect,               NULL,       NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_rect",                4, tg_rect,               NULL,       NULL,         DEFAULT_FLAGS},
       {(char *)"tg_ring",               -1, tg_ring,               NULL,       NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_segment",             2, tg_segment,            NULL,       NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_segment",             4, tg_segment,            NULL,       NULL,         DEFAULT_FLAGS},
       // clang-format on
 
   };

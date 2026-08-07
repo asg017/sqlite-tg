@@ -101,7 +101,11 @@ FUNCTIONS = [
     "tg_point",
     "tg_poly_exterior",
     "tg_polygon",
+    "tg_rect",
+    "tg_rect",
     "tg_ring",
+    "tg_segment",
+    "tg_segment",
     "tg_to_geojson",
     "tg_to_wkb",
     "tg_to_wkt",
@@ -1015,6 +1019,135 @@ def test_tg_polygon():
     ):
         tg_polygon(
             "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))"
+        )
+
+
+def test_tg_rect():
+    # 4-scalar form
+    assert (
+        db.execute("select tg_to_wkt(tg_rect(0, 0, 1, 1))").fetchone()[0]
+        == "POLYGON((0 0,1 0,1 1,0 1,0 0))"
+    )
+    # counter-clockwise winding, closing point repeated
+    assert (
+        db.execute("select tg_to_wkt(tg_rect(0, 0, 10, 5))").fetchone()[0]
+        == "POLYGON((0 0,10 0,10 5,0 5,0 0))"
+    )
+
+    # 2-point form, incl. pointer inputs
+    assert (
+        db.execute(
+            "select tg_to_wkt(tg_rect(tg_point(0, 0), tg_point(1, 1)))"
+        ).fetchone()[0]
+        == "POLYGON((0 0,1 0,1 1,0 1,0 0))"
+    )
+    assert (
+        db.execute(
+            "select tg_to_wkt(tg_rect('POINT(0 0)', 'POINT(1 1)'))"
+        ).fetchone()[0]
+        == "POLYGON((0 0,1 0,1 1,0 1,0 0))"
+    )
+
+    # no normalization: minX > maxX / minY > maxY is passed through as given
+    assert (
+        db.execute("select tg_to_wkt(tg_rect(1, 1, 0, 0))").fetchone()[0]
+        == "POLYGON((1 1,0 1,0 0,1 0,1 1))"
+    )
+
+    # composes with predicates like any other geometry
+    assert (
+        db.execute(
+            "select tg_intersects(tg_rect(0, 0, 10, 10), tg_point(5, 5))"
+        ).fetchone()[0]
+        == 1
+    )
+
+    # error cases: wrong scalar arg type
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape("rect minX value must be an integer or float"),
+    ):
+        db.execute("select tg_rect('a', 0, 1, 1)")
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape("rect maxY value must be an integer or float"),
+    ):
+        db.execute("select tg_rect(0, 0, 1, 'a')")
+
+    # error cases: 2-arg form requires Point geometries
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape("argument to tg_rect() at index 0 is an invalid geometry"),
+    ):
+        db.execute("select tg_rect('not a geometry', tg_point(1, 1))")
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_rect() at index 1 expected a point, found LineString"
+        ),
+    ):
+        db.execute(
+            "select tg_rect(tg_point(0, 0), 'LINESTRING(0 0, 1 1)')"
+        )
+
+
+def test_tg_segment():
+    # 4-scalar form
+    assert (
+        db.execute("select tg_to_wkt(tg_segment(0, 0, 1, 1))").fetchone()[0]
+        == "LINESTRING(0 0,1 1)"
+    )
+
+    # 2-point form, incl. pointer inputs
+    assert (
+        db.execute(
+            "select tg_to_wkt(tg_segment(tg_point(0, 0), tg_point(1, 1)))"
+        ).fetchone()[0]
+        == "LINESTRING(0 0,1 1)"
+    )
+    assert (
+        db.execute(
+            "select tg_to_wkt(tg_segment('POINT(0 0)', 'POINT(1 1)'))"
+        ).fetchone()[0]
+        == "LINESTRING(0 0,1 1)"
+    )
+
+    # composes with predicates like any other geometry
+    assert (
+        db.execute(
+            "select tg_intersects(tg_segment(0, 0, 2, 2), tg_segment(0, 2, 2, 0))"
+        ).fetchone()[0]
+        == 1
+    )
+
+    # error cases: wrong scalar arg type
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape("segment aX value must be an integer or float"),
+    ):
+        db.execute("select tg_segment('a', 0, 1, 1)")
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape("segment bY value must be an integer or float"),
+    ):
+        db.execute("select tg_segment(0, 0, 1, 'a')")
+
+    # error cases: 2-arg form requires Point geometries
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_segment() at index 0 is an invalid geometry"
+        ),
+    ):
+        db.execute("select tg_segment('not a geometry', tg_point(1, 1))")
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=re.escape(
+            "argument to tg_segment() at index 1 expected a point, found LineString"
+        ),
+    ):
+        db.execute(
+            "select tg_segment(tg_point(0, 0), 'LINESTRING(0 0, 1 1)')"
         )
 
 

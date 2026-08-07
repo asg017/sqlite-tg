@@ -40,11 +40,8 @@ from businesses;
 - [x] `tg_multipolygon(p1, p2)`
 - [ ] `tg_group_multipolygon(p)`
 
-tg_rect(minX, minY, maxX, maxY)
-tg_rect(minP, maxP)
-
-tg_segment(aX, aY, bX, bY)
-tg_segment(aP, bP)
+- [x] `tg_rect(minX, minY, maxX, maxY)` / `tg_rect(minP, maxP)` -- represented at the SQL boundary as the equivalent closed-ring Polygon (ticket 11, option a); no dedicated pointer subtype
+- [x] `tg_segment(aX, aY, bX, bY)` / `tg_segment(aP, bP)` -- represented at the SQL boundary as the equivalent 2-point LineString (ticket 11, option a); no dedicated pointer subtype
 
 ## geom table functions
 
@@ -101,7 +98,7 @@ US congressional district + opiod
 - some sample GIS dataset ppl can query
 - URL params for sharing queries
 
-rectangle to geojson
+rectangle to geojson -- falls out for free via `tg_to_geojson(tg_rect(minX, minY, maxX, maxY))` (ticket 11)
 
 ## managed rtree
 

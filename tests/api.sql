@@ -281,6 +281,42 @@ from str_lines(tg_debug()); -- @snap debug
   select tg_polygon('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))'); -- error: argument to tg_polygon() at index 0 expected a ring, found a Polygon with holes (its holes would be silently dropped)
 -- #endregion
 
+-- #region tg_rect
+  -- tg_rect isn't a tg_geom in tg's model, so it's represented at the SQL
+  -- boundary as the equivalent closed-ring Polygon (counter-clockwise
+  -- winding, closing point repeated).
+  select tg_to_wkt(tg_rect(0, 0, 1, 1)); -- 'POLYGON((0 0,1 0,1 1,0 1,0 0))'
+  select tg_to_wkt(tg_rect(tg_point(0, 0), tg_point(1, 1))); -- 'POLYGON((0 0,1 0,1 1,0 1,0 0))'
+  select tg_to_wkt(tg_rect('POINT(0 0)', 'POINT(1 1)')); -- 'POLYGON((0 0,1 0,1 1,0 1,0 0))'
+
+  -- no normalization: minX > maxX / minY > maxY is passed through as given
+  select tg_to_wkt(tg_rect(1, 1, 0, 0)); -- 'POLYGON((1 1,0 1,0 0,1 0,1 1))'
+
+  -- composes with predicates like any other geometry
+  select tg_intersects(tg_rect(0, 0, 10, 10), tg_point(5, 5)); -- 1
+
+  select tg_rect('a', 0, 1, 1); -- error: rect minX value must be an integer or float
+  select tg_rect(0, 0, 1, 'a'); -- error: rect maxY value must be an integer or float
+  select tg_rect('not a geometry', tg_point(1, 1)); -- error: argument to tg_rect() at index 0 is an invalid geometry: ParseError: invalid type specifier, expected 'Z', 'M', 'ZM', or 'EMPTY'
+  select tg_rect(tg_point(0, 0), 'LINESTRING(0 0, 1 1)'); -- error: argument to tg_rect() at index 1 expected a point, found LineString
+-- #endregion
+
+-- #region tg_segment
+  -- tg_segment isn't a tg_geom in tg's model, so it's represented at the SQL
+  -- boundary as the equivalent 2-point LineString.
+  select tg_to_wkt(tg_segment(0, 0, 1, 1)); -- 'LINESTRING(0 0,1 1)'
+  select tg_to_wkt(tg_segment(tg_point(0, 0), tg_point(1, 1))); -- 'LINESTRING(0 0,1 1)'
+  select tg_to_wkt(tg_segment('POINT(0 0)', 'POINT(1 1)')); -- 'LINESTRING(0 0,1 1)'
+
+  -- composes with predicates like any other geometry
+  select tg_intersects(tg_segment(0, 0, 2, 2), tg_segment(0, 2, 2, 0)); -- 1
+
+  select tg_segment('a', 0, 1, 1); -- error: segment aX value must be an integer or float
+  select tg_segment(0, 0, 1, 'a'); -- error: segment bY value must be an integer or float
+  select tg_segment('not a geometry', tg_point(1, 1)); -- error: argument to tg_segment() at index 0 is an invalid geometry: ParseError: invalid type specifier, expected 'Z', 'M', 'ZM', or 'EMPTY'
+  select tg_segment(tg_point(0, 0), 'LINESTRING(0 0, 1 1)'); -- error: argument to tg_segment() at index 1 expected a point, found LineString
+-- #endregion
+
 -- #region tg_multilinestring
   select tg_to_wkt(tg_multilinestring()); -- 'MULTILINESTRING EMPTY'
   select tg_to_wkt(
