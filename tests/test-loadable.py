@@ -67,6 +67,7 @@ FUNCTIONS = [
     "tg_covers",
     "tg_debug",
     "tg_disjoint",
+    "tg_equals",
     "tg_extra_json",
     "tg_geom",
     "tg_geom",
@@ -170,6 +171,25 @@ def test_tg_intersects():
             tg_intersects(*[getattr(shapely, f"to_{format}")(l) for l in LINE_SEPARATE])
             == 0
         )
+
+
+def test_tg_equals():
+    tg_equals = lambda *args: db.execute("select tg_equals(?, ?)", args).fetchone()[0]
+
+    POINT_A = shapely.from_wkt("POINT (1 1)")
+    POINT_A_AGAIN = shapely.from_wkt("POINT (1 1)")
+    POINT_B = shapely.from_wkt("POINT (2 2)")
+
+    for format in ("wkt", "wkb", "geojson"):
+        to_format = getattr(shapely, f"to_{format}")
+        assert tg_equals(to_format(POINT_A), to_format(POINT_A_AGAIN)) == 1
+        assert tg_equals(to_format(POINT_A), to_format(POINT_B)) == 0
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="invalid geometry input",
+    ):
+        tg_equals(None, "POINT(1 1)")
 
 
 def test_tg_type():

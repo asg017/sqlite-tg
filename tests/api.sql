@@ -425,6 +425,8 @@ select
   tg_covers(b, a),
   tg_disjoint(a, b),
   tg_disjoint(b, a),
+  tg_equals(a, b),
+  tg_equals(b, a),
   tg_intersects(a, b),
   tg_intersects(b, a),
   tg_touches(a, b),
@@ -432,6 +434,9 @@ select
   tg_within(a, b),
   tg_within(b, a)
 from predicate_test_cases; -- @snap predicates
+
+select tg_equals('POINT (1 1)', 'POINT (2 2)'); -- 0
+select tg_equals(NULL, 'POINT (1 1)'); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
 -- #endregion
 
 -- #region tg_geom

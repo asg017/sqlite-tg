@@ -68,7 +68,7 @@ Returns the version string of `sqlite-tg`.
 
 ```sql
 select tg_version();
--- 'v0.0.1-alpha.19'
+-- 'v0.0.1-alpha.21'
 ```
 
 #### `tg_debug()` {#tg_debug}
@@ -486,6 +486,17 @@ Returns `1` if the `a` geometry touches the `b` geometry — they share at least
 select tg_touches('POINT(0 1)', 'POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))');
 -- 1
 select tg_touches('POINT(1 1)', 'POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))');
+-- 0
+```
+
+#### `tg_equals(a, b)` {#tg_equals}
+
+Returns `1` if the `a` geometry is spatially equal to the `b` geometry, otherwise returns `0`. Based on [`tg_geom_equals()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_equals).
+
+```sql
+select tg_equals('POINT(1 1)', 'POINT(1 1)');
+-- 1
+select tg_equals('POINT(1 1)', 'POINT(2 2)');
 -- 0
 ```
 

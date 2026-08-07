@@ -125,7 +125,7 @@ select rowid from ca_block_groups_index where tg_intersects(boundary, :my_polygo
 select rowid from ca_block_groups_index where tg_covers(:my_polygon, boundary);
 ```
 
-equals
+equals (done: tg_equals())
 intersects/disjoint (for pip)
 contains/within (swap)
 covers/coveredby (swap)
