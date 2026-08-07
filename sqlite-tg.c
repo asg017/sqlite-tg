@@ -1457,6 +1457,8 @@ static sqlite3_module tg_bboxModule = {
 #define TG0_FUNC_WITHIN     SQLITE_INDEX_CONSTRAINT_FUNCTION + 3
 #define TG0_FUNC_COVERS     SQLITE_INDEX_CONSTRAINT_FUNCTION + 4
 #define TG0_FUNC_COVEREDBY  SQLITE_INDEX_CONSTRAINT_FUNCTION + 5
+#define TG0_FUNC_TOUCHES    SQLITE_INDEX_CONSTRAINT_FUNCTION + 6
+#define TG0_FUNC_EQUALS     SQLITE_INDEX_CONSTRAINT_FUNCTION + 7
 // clang-format on
 
 enum TG0_PLAN {
@@ -1464,6 +1466,10 @@ enum TG0_PLAN {
   FULLSCAN,
   // only emit boundaries that interect a query geometry
   INTERSECT,
+  // only emit boundaries that touch a query geometry
+  TOUCHES,
+  // only emit boundaries that equal a query geometry
+  EQUALS,
   // TODO disjoint/contains/within/covers/coveredby
 };
 
@@ -1664,7 +1670,8 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
     int op = pIdxInfo->aConstraint[i].op;
     if (op == TG0_FUNC_INTERSECTS || op == TG0_FUNC_DISJOINT ||
         op == TG0_FUNC_CONTAINS || op == TG0_FUNC_WITHIN ||
-        op == TG0_FUNC_COVERS || op == TG0_FUNC_COVEREDBY) {
+        op == TG0_FUNC_COVERS || op == TG0_FUNC_COVEREDBY ||
+        op == TG0_FUNC_TOUCHES || op == TG0_FUNC_EQUALS) {
       if (iPredicateTerm >= 0) {
         sqlite3_free(pVtab->zErrMsg);
         pVtab->zErrMsg = sqlite3_mprintf(
@@ -1693,6 +1700,62 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
 
 // forward delcaration bc tg0Filter uses it
 static int tg0Next(sqlite3_vtab_cursor *cur);
+
+// Prepares pCur->stmt as an rtree scan over every entry whose bbox intersects
+// the query geometry's bbox, and sets pCur->queryGeom to the parsed query
+// geometry. This is a safe over-approximation for INTERSECT, TOUCHES, and
+// EQUALS plans alike (touching/equal geometries always have intersecting
+// bboxes; equal geometries in fact have identical bboxes, but we don't
+// bother with the tighter bbox-equality constraint here — bbox-intersects is
+// simple and already narrows the rtree scan, and tg0Next() applies the exact
+// predicate as a post-filter regardless).
+static int tg0FilterBboxIntersect(sqlite3_vtab_cursor *pVtabCursor,
+                                  sqlite3_value *queryValue) {
+  tg0_cursor *pCur = (tg0_cursor *)pVtabCursor;
+  tg0_vtab *p = (tg0_vtab *)pVtabCursor->pVtab;
+
+  char * errmsg;
+  int rc = geomValue(queryValue, &pCur->queryGeom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_free(pVtabCursor->pVtab->zErrMsg);
+    pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("%s", errmsg);
+    sqlite3_free(errmsg);
+    return SQLITE_ERROR;
+  }
+  struct tg_rect rect = tg_geom_rect(pCur->queryGeom);
+
+  sqlite3_str *strSqlIntersect = sqlite3_str_new(NULL);
+  sqlite3_str_appendall(strSqlIntersect, "SELECT id, _shape");
+  for (int i = 0; i < p->numAuxColumns; i++) {
+    sqlite3_str_appendf(strSqlIntersect, ", c%d", i + 1);
+  }
+  sqlite3_str_appendf(strSqlIntersect, " FROM \"%w\".\"%w_rtree\" as r ",
+                      p->schemaName, p->tableName);
+  sqlite3_str_appendall(strSqlIntersect, "WHERE r.minX <= ?1  "
+                                         "AND r.maxX >= ?2 "
+                                         "AND r.minY <= ?3 "
+                                         "AND r.maxY >= ?4");
+
+  const char *zSql = sqlite3_str_finish(strSqlIntersect);
+  if (!zSql) {
+    // TODO what needs to be freed here
+    return SQLITE_NOMEM;
+  }
+
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, &pCur->stmt, NULL);
+  sqlite3_free((void *)zSql);
+
+  if (rc != SQLITE_OK) {
+    sqlite3_free(pVtabCursor->pVtab->zErrMsg);
+    pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("prep error");
+    return SQLITE_ERROR;
+  }
+  sqlite3_bind_double(pCur->stmt, 1, rect.max.x);
+  sqlite3_bind_double(pCur->stmt, 2, rect.min.x);
+  sqlite3_bind_double(pCur->stmt, 3, rect.max.y);
+  sqlite3_bind_double(pCur->stmt, 4, rect.min.y);
+  return SQLITE_OK;
+}
 
 static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
                      const char *idxStr, int argc, sqlite3_value **argv) {
@@ -1736,47 +1799,26 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
     switch (idxNum) {
     case TG0_FUNC_INTERSECTS: {
       pCur->plan = INTERSECT;
-
-      char * errmsg;
-      int rc = geomValue(argv[0], &pCur->queryGeom, &errmsg);
+      int rc = tg0FilterBboxIntersect(pVtabCursor, argv[0]);
       if (rc != SQLITE_OK) {
-        sqlite3_free(pVtabCursor->pVtab->zErrMsg);
-        pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("%s", errmsg);
-        sqlite3_free(errmsg);
-        return SQLITE_ERROR;
+        return rc;
       }
-      struct tg_rect rect = tg_geom_rect(pCur->queryGeom);
-
-      sqlite3_str *strSqlIntersect = sqlite3_str_new(NULL);
-      sqlite3_str_appendall(strSqlIntersect, "SELECT id, _shape");
-      for (int i = 0; i < p->numAuxColumns; i++) {
-        sqlite3_str_appendf(strSqlIntersect, ", c%d", i + 1);
-      }
-      sqlite3_str_appendf(strSqlIntersect, " FROM \"%w\".\"%w_rtree\" as r ",
-                          p->schemaName, p->tableName);
-      sqlite3_str_appendall(strSqlIntersect, "WHERE r.minX <= ?1  "
-                                             "AND r.maxX >= ?2 "
-                                             "AND r.minY <= ?3 "
-                                             "AND r.maxY >= ?4");
-
-      const char *zSql = sqlite3_str_finish(strSqlIntersect);
-      if (!zSql) {
-        // TODO what needs to be freed here
-        return SQLITE_NOMEM;
-      }
-
-      rc = sqlite3_prepare_v2(p->db, zSql, -1, &pCur->stmt, NULL);
-      sqlite3_free((void *)zSql);
-
+      break;
+    }
+    case TG0_FUNC_TOUCHES: {
+      pCur->plan = TOUCHES;
+      int rc = tg0FilterBboxIntersect(pVtabCursor, argv[0]);
       if (rc != SQLITE_OK) {
-        sqlite3_free(pVtabCursor->pVtab->zErrMsg);
-        pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("prep error");
-        return SQLITE_ERROR;
+        return rc;
       }
-      sqlite3_bind_double(pCur->stmt, 1, rect.max.x);
-      sqlite3_bind_double(pCur->stmt, 2, rect.min.x);
-      sqlite3_bind_double(pCur->stmt, 3, rect.max.y);
-      sqlite3_bind_double(pCur->stmt, 4, rect.min.y);
+      break;
+    }
+    case TG0_FUNC_EQUALS: {
+      pCur->plan = EQUALS;
+      int rc = tg0FilterBboxIntersect(pVtabCursor, argv[0]);
+      if (rc != SQLITE_OK) {
+        return rc;
+      }
       break;
     }
     case TG0_FUNC_DISJOINT:
@@ -1831,7 +1873,9 @@ static int tg0Next(sqlite3_vtab_cursor *cur) {
       stop = 1;
       break;
     }
-    case INTERSECT: {
+    case INTERSECT:
+    case TOUCHES:
+    case EQUALS: {
 
       struct tg_geom *geom;
       char * errmsg;
@@ -1844,7 +1888,20 @@ static int tg0Next(sqlite3_vtab_cursor *cur) {
         return SQLITE_ERROR;
       }
 
-      if (tg_geom_intersects(geom, pCur->queryGeom)) {
+      bool matches;
+      switch (pCur->plan) {
+      case TOUCHES:
+        matches = tg_geom_touches(geom, pCur->queryGeom);
+        break;
+      case EQUALS:
+        matches = tg_geom_equals(geom, pCur->queryGeom);
+        break;
+      default:
+        matches = tg_geom_intersects(geom, pCur->queryGeom);
+        break;
+      }
+
+      if (matches) {
         stop = 1;
       } else {
         stop = 0;
@@ -2047,6 +2104,16 @@ static int tg0FindFunction(sqlite3_vtab *pVtab, int nArg, const char *zName,
     *pxFunc = tg_predicate_impl;
     *ppArg = tg_geom_coveredby;
     return TG0_FUNC_COVEREDBY;
+  }
+  if (sqlite3_stricmp(zName, "tg_touches") == 0 && nArg == 2) {
+    *pxFunc = tg_predicate_impl;
+    *ppArg = tg_geom_touches;
+    return TG0_FUNC_TOUCHES;
+  }
+  if (sqlite3_stricmp(zName, "tg_equals") == 0 && nArg == 2) {
+    *pxFunc = tg_predicate_impl;
+    *ppArg = tg_geom_equals;
+    return TG0_FUNC_EQUALS;
   }
   return 0;
 };

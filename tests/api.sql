@@ -463,6 +463,8 @@ select id, minX, maxX, minY, maxY from tg_demo1_rtree; -- @snap tg0-rtree
 explain query plan select * from tg_demo1; -- @snap tg0-eqp-scan
 explain query plan select * from tg_demo1 where tg_intersects(_shape, ''); -- @snap tg0-eqp-intersects
 explain query plan select * from tg_demo1 where tg_contains(_shape, ''); -- @snap tg0-eqp-contains
+explain query plan select * from tg_demo1 where tg_touches(_shape, ''); -- @snap tg0-eqp-touches
+explain query plan select * from tg_demo1 where tg_equals(_shape, ''); -- @snap tg0-eqp-equals
 select rowid, * from tg_demo1; -- @snap tg0-rows-star
 -- #endregion
 

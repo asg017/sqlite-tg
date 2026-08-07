@@ -563,6 +563,14 @@ def test_tg0(snapshot):
         "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 152:predicate",
         explain_query_plan("select * from tg_demo1 where tg_contains(_shape, '')"),
     )
+    assert re.match(
+        "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 156:predicate",
+        explain_query_plan("select * from tg_demo1 where tg_touches(_shape, '')"),
+    )
+    assert re.match(
+        "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 157:predicate",
+        explain_query_plan("select * from tg_demo1 where tg_equals(_shape, '')"),
+    )
     # TODO rest of predicates?
 
     def intersecting(feature):
@@ -634,6 +642,79 @@ def test_tg0(snapshot):
 
     db.execute("drop table tg_demo1;")
     assert execute_all(db, "select name from sqlite_master where name like 'tg%'") == []
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_touches_and_equals():
+    db.execute("create virtual table tg_demo3 using tg0();")
+    # rowid 0 and rowid 1 share the edge x=2 (touch, but don't overlap).
+    # rowid 3 is an exact duplicate of rowid 0 (equals). rowid 2 is disjoint
+    # from everything else.
+    db.execute(
+        "insert into tg_demo3(rowid, _shape) select key, value from json_each(?)",
+        [
+            json.dumps(
+                [
+                    "POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0))",
+                    "POLYGON ((2 0, 4 0, 4 2, 2 2, 2 0))",
+                    "POLYGON ((10 10, 12 10, 12 12, 10 12, 10 10))",
+                    "POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0))",
+                ]
+            )
+        ],
+    )
+
+    # both predicates use the rtree index (not a full-scan) when applied
+    # directly to the _shape column.
+    assert re.match(
+        "SCAN (TABLE )?tg_demo3 VIRTUAL TABLE INDEX 156:predicate",
+        explain_query_plan("select * from tg_demo3 where tg_touches(_shape, '')"),
+    )
+    assert re.match(
+        "SCAN (TABLE )?tg_demo3 VIRTUAL TABLE INDEX 157:predicate",
+        explain_query_plan("select * from tg_demo3 where tg_equals(_shape, '')"),
+    )
+
+    def indexed(predicate, feature):
+        return sorted(
+            row[0]
+            for row in db.execute(
+                f"select rowid from tg_demo3 where {predicate}(_shape, ?)", [feature]
+            ).fetchall()
+        )
+
+    def unindexed(predicate, feature):
+        # wrapping the column in tg_to_wkt() defeats tg0's xFindFunction
+        # interception, so this runs the plain scalar predicate over a
+        # full-table scan instead of the rtree-accelerated plan.
+        return sorted(
+            row[0]
+            for row in db.execute(
+                f"select rowid from tg_demo3 where {predicate}(tg_to_wkt(_shape), ?)",
+                [feature],
+            ).fetchall()
+        )
+
+    assert re.match(
+        "SCAN (TABLE )?tg_demo3 VIRTUAL TABLE INDEX 0:fullscan",
+        explain_query_plan(
+            "select * from tg_demo3 where tg_touches(tg_to_wkt(_shape), '')"
+        ),
+    )
+
+    RIGHT_SQUARE = "POLYGON ((2 0, 4 0, 4 2, 2 2, 2 0))"
+    LEFT_SQUARE = "POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0))"
+    FAR_AWAY = "POLYGON ((20 20, 22 20, 22 22, 20 22, 20 20))"
+
+    assert indexed("tg_touches", RIGHT_SQUARE) == [0, 3]
+    assert indexed("tg_touches", RIGHT_SQUARE) == unindexed("tg_touches", RIGHT_SQUARE)
+    assert indexed("tg_touches", FAR_AWAY) == []
+    assert indexed("tg_touches", FAR_AWAY) == unindexed("tg_touches", FAR_AWAY)
+
+    assert indexed("tg_equals", LEFT_SQUARE) == [0, 3]
+    assert indexed("tg_equals", LEFT_SQUARE) == unindexed("tg_equals", LEFT_SQUARE)
+    assert indexed("tg_equals", FAR_AWAY) == []
+    assert indexed("tg_equals", FAR_AWAY) == unindexed("tg_equals", FAR_AWAY)
 
 
 @pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")

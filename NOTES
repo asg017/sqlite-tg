@@ -129,4 +129,4 @@ equals (done: tg_equals())
 intersects/disjoint (for pip)
 contains/within (swap)
 covers/coveredby (swap)
-touches
+touches (done: tg0 index acceleration for tg_touches and tg_equals via TG0_FUNC_TOUCHES/TG0_FUNC_EQUALS)

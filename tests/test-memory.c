@@ -61,6 +61,7 @@ int main(int argc, char *argv[]) {
       "select tg_to_wkt(tg_poly_exterior("
       "'POLYGON ((30 10, 40 40, 20 40, 10 20, 30 10), (20 30, 35 35, 30 20, 20 30))'))",
       "select tg_intersects('LINESTRING (0 0, 2 2)', 'LINESTRING (1 0, 1 2)')",
+      "select tg_equals('POINT(1 1)', 'POINT(1 1)')",
       "select tg_valid_wkt('POINT(1 1)'), tg_valid_wkt('nope')",
       "select tg_to_wkt(point) from tg_points_each('MULTIPOINT (10 40, 40 30)')",
       "select tg_to_wkt(geometry) from tg_geometries_each("
@@ -82,6 +83,10 @@ int main(int argc, char *argv[]) {
       "values (1, tg_geom('POINT(1 1)'), 'a'), (2, tg_geom('POINT(9 9)'), 'b')",
       "select rowid, label from temp.demo "
       "where tg_intersects(_shape, 'POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))')",
+      "select rowid, label from temp.demo "
+      "where tg_touches(_shape, 'LINESTRING(1 1, 5 5)')",
+      "select rowid, label from temp.demo "
+      "where tg_equals(_shape, 'POINT(1 1)')",
       "delete from temp.demo where rowid = 1",
       "drop table temp.demo",
   };
@@ -92,6 +97,7 @@ int main(int argc, char *argv[]) {
       "select tg_poly_exterior('POINT(1 1)')",
       "select tg_multipoint('LINESTRING(0 0, 1 1)')",
       "select tg_intersects('POINT(1 1)', 'nope')",
+      "select tg_equals('POINT(1 1)', 'nope')",
       "select tg_to_wkt(tg_group_multipoint(value)) "
       "from json_each('[\"LINESTRING(0 0, 1 1)\"]')",
   };
