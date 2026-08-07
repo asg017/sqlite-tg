@@ -66,6 +66,7 @@ FUNCTIONS = [
     "tg_coveredby",
     "tg_covers",
     "tg_debug",
+    "tg_dims",
     "tg_disjoint",
     "tg_equals",
     "tg_extra_json",
@@ -79,7 +80,11 @@ FUNCTIONS = [
     "tg_group_multipoint",
     "tg_group_multipolygon",
     "tg_intersects",
+    "tg_is_empty",
+    "tg_is_feature",
+    "tg_is_featurecollection",
     "tg_line",
+    "tg_memsize",
     "tg_multipoint",
     "tg_point",
     "tg_poly_exterior",
@@ -214,6 +219,90 @@ def test_tg_type():
     )
 
     db.execute("select tg_type(tg_point(1, 2)) from json_each('[1,2,3]')").fetchall()
+
+
+def test_tg_dims():
+    tg_dims = lambda *args: db.execute("select tg_dims(?)", args).fetchone()[0]
+    for format in ("wkt", "wkb", "geojson"):
+        assert tg_dims(getattr(shapely, f"to_{format}")(LINE_A)) == 2
+    assert db.execute("select tg_dims(tg_point(1, 2))").fetchone()[0] == 2
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="invalid geometry input",
+    ):
+        tg_dims(None)
+
+
+def test_tg_is_empty():
+    tg_is_empty = lambda *args: db.execute("select tg_is_empty(?)", args).fetchone()[0]
+    assert tg_is_empty("POINT EMPTY") == 1
+    assert tg_is_empty("POINT (1 1)") == 0
+    assert tg_is_empty(shapely.to_wkb(LINE_A)) == 0
+    assert tg_is_empty(shapely.to_geojson(LINE_A)) == 0
+    assert db.execute("select tg_is_empty(tg_point(1, 2))").fetchone()[0] == 0
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="invalid geometry input",
+    ):
+        tg_is_empty(None)
+
+
+def test_tg_is_feature():
+    tg_is_feature = lambda *args: db.execute("select tg_is_feature(?)", args).fetchone()[
+        0
+    ]
+    assert (
+        tg_is_feature(
+            '{"type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{}}'
+        )
+        == 1
+    )
+    assert tg_is_feature('{"type":"Point","coordinates":[1,2]}') == 0
+    assert tg_is_feature('{"type":"FeatureCollection","features":[]}') == 0
+    assert tg_is_feature("POINT (1 2)") == 0
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="invalid geometry input",
+    ):
+        tg_is_feature(None)
+
+
+def test_tg_is_featurecollection():
+    tg_is_featurecollection = lambda *args: db.execute(
+        "select tg_is_featurecollection(?)", args
+    ).fetchone()[0]
+    assert (
+        tg_is_featurecollection('{"type":"FeatureCollection","features":[]}') == 1
+    )
+    assert tg_is_featurecollection('{"type":"Point","coordinates":[1,2]}') == 0
+    assert (
+        tg_is_featurecollection(
+            '{"type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{}}'
+        )
+        == 0
+    )
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="invalid geometry input",
+    ):
+        tg_is_featurecollection(None)
+
+
+def test_tg_memsize():
+    tg_memsize = lambda *args: db.execute("select tg_memsize(?)", args).fetchone()[0]
+    for format in ("wkt", "wkb", "geojson"):
+        assert tg_memsize(getattr(shapely, f"to_{format}")(LINE_A)) > 0
+    assert db.execute("select tg_memsize(tg_point(1, 2))").fetchone()[0] > 0
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match="invalid geometry input",
+    ):
+        tg_memsize(None)
 
 
 def test_tg_to_wkt():

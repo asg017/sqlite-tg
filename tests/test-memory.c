@@ -69,6 +69,12 @@ int main(int argc, char *argv[]) {
       "select tg_to_wkt(hole) from tg_holes_each("
       "'POLYGON ((0 0, 10 0, 10 10, 0 0), (1 1, 2 1, 2 2, 1 1))')",
       "select count(*) from tg_holes_each('POINT(1 1)')",
+      "select tg_dims(tg_point(1, 2))",
+      "select tg_is_empty('POINT EMPTY')",
+      "select tg_is_feature('{\"type\": \"Feature\", \"geometry\": "
+      "{\"type\": \"Point\", \"coordinates\": [1, 2]}, \"properties\": {}}')",
+      "select tg_is_featurecollection('{\"type\": \"FeatureCollection\", \"features\": []}')",
+      "select tg_memsize(tg_point(1, 2))",
       "select * from tg_bbox('LINESTRING (30 10, 10 30, 40 40)')",
       "select tg_to_wkt(tg_group_multipoint(tg_point(value, value))) "
       "from json_each('[1, 2, 3]')",
@@ -96,6 +102,11 @@ int main(int argc, char *argv[]) {
       "select tg_geom('POINT(0 1)', 'not-an-index')",
       "select tg_poly_exterior('POINT(1 1)')",
       "select tg_multipoint('LINESTRING(0 0, 1 1)')",
+      "select tg_dims(NULL)",
+      "select tg_is_empty('not a geometry')",
+      "select tg_is_feature(NULL)",
+      "select tg_is_featurecollection('not a geometry')",
+      "select tg_memsize(NULL)",
       "select tg_intersects('POINT(1 1)', 'nope')",
       "select tg_equals('POINT(1 1)', 'nope')",
       "select tg_to_wkt(tg_group_multipoint(value)) "

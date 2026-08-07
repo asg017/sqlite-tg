@@ -358,6 +358,81 @@ static void tg_extra_json(sqlite3_context *context, int argc,
 
   tg_geom_free(geom);
 }
+
+static void tg_dims(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  sqlite3_result_int(context, tg_geom_dims(geom));
+
+  tg_geom_free(geom);
+}
+
+static void tg_is_empty(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  sqlite3_result_int(context, tg_geom_is_empty(geom));
+
+  tg_geom_free(geom);
+}
+
+static void tg_is_feature(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  sqlite3_result_int(context, tg_geom_is_feature(geom));
+
+  tg_geom_free(geom);
+}
+
+static void tg_is_featurecollection(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  sqlite3_result_int(context, tg_geom_is_featurecollection(geom));
+
+  tg_geom_free(geom);
+}
+
+static void tg_memsize(sqlite3_context *context, int argc, sqlite3_value **argv) {
+  struct tg_geom *geom;
+  char * errmsg;
+  int rc = geomValue(argv[0], &geom, &errmsg);
+  if (rc != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+
+  sqlite3_result_int64(context, (sqlite3_int64) tg_geom_memsize(geom));
+
+  tg_geom_free(geom);
+}
 #pragma endregion
 
 #pragma region constructors
@@ -2215,11 +2290,11 @@ int sqlite3_tg_init(sqlite3 *db, char **pzErrMsg,
       {(char *)"tg_valid_wkb",      1, tg_valid_wkb,           NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_valid_wkt",      1, tg_valid_wkt,           NULL,             NULL,         DEFAULT_FLAGS},
 
-      //{(char *)"tg_dims",                 1, tg_dims,                 NULL,             NULL,         DEFAULT_FLAGS},
-      //{(char *)"tg_is_empty",             1, tg_is_empty,             NULL,             NULL,         DEFAULT_FLAGS},
-      //{(char *)"tg_is_feature",           1, tg_is_feature,           NULL,             NULL,         DEFAULT_FLAGS},
-      //{(char *)"tg_is_featurecollection", 1, tg_is_featurecollection, NULL,             NULL,         DEFAULT_FLAGS},
-      //{(char *)"tg_memsize",     1, tg_memsize, NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_dims",                 1, tg_dims,                 NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_is_empty",             1, tg_is_empty,             NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_is_feature",           1, tg_is_feature,           NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_is_featurecollection", 1, tg_is_featurecollection, NULL,             NULL,         DEFAULT_FLAGS},
+      {(char *)"tg_memsize",              1, tg_memsize,              NULL,             NULL,         DEFAULT_FLAGS},
 
       {(char *)"tg_to_wkt",         1, tg_to_wkt,     NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_to_wkb",         1, tg_to_wkb,     NULL,             NULL,         DEFAULT_FLAGS},

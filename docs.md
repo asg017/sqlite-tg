@@ -321,6 +321,57 @@ select tg_extra_json('{
 -- '{"id":"ASG0017","properties":{"color": "red"}}'
 ```
 
+#### `tg_dims(geometry)` {#tg_dims}
+
+Returns the number of coordinate dimensions of the given `geometry`: `2` for plain X/Y geometries, `3` when it carries a Z or M coordinate, and `4` when it carries both. Inputs can be in [any supported formats](#supported-formats), including WKT, WKB, and GeoJSON. Based on [`tg_geom_dims()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_dims).
+
+```sql
+select tg_dims('POINT(0 1)');
+-- 2
+```
+
+#### `tg_is_empty(geometry)` {#tg_is_empty}
+
+Returns `1` if the given `geometry` is an empty geometry (such as `POINT EMPTY`), `0` otherwise. Inputs can be in [any supported formats](#supported-formats), including WKT, WKB, and GeoJSON. Based on [`tg_geom_is_empty()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_is_empty).
+
+```sql
+select tg_is_empty('POINT EMPTY');
+-- 1
+select tg_is_empty('POINT(0 1)');
+-- 0
+```
+
+#### `tg_is_feature(geometry)` {#tg_is_feature}
+
+Returns `1` if the given `geometry` was parsed from a GeoJSON `Feature`, `0` otherwise. Based on [`tg_geom_is_feature()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_is_feature).
+
+```sql
+select tg_is_feature('{"type":"Feature","geometry":{"type":"Point","coordinates":[0,1]},"properties":{}}');
+-- 1
+select tg_is_feature('{"type":"Point","coordinates":[0,1]}');
+-- 0
+```
+
+#### `tg_is_featurecollection(geometry)` {#tg_is_featurecollection}
+
+Returns `1` if the given `geometry` was parsed from a GeoJSON `FeatureCollection`, `0` otherwise. Based on [`tg_geom_is_featurecollection()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_is_featurecollection).
+
+```sql
+select tg_is_featurecollection('{"type":"FeatureCollection","features":[]}');
+-- 1
+select tg_is_featurecollection('{"type":"Point","coordinates":[0,1]}');
+-- 0
+```
+
+#### `tg_memsize(geometry)` {#tg_memsize}
+
+Returns the number of bytes of memory used to store the given `geometry` in its parsed, in-memory representation. Useful for estimating the cost of indexed blobs, such as those created with `tg_geom(x, 'ystripes')`. Based on [`tg_geom_memsize()`](https://github.com/tidwall/tg/blob/main/docs/API.md#tg_geom_memsize).
+
+```sql
+select tg_memsize('POINT(0 1)');
+-- 24
+```
+
 #### `tg_valid_geojson(text)` {#tg_valid_geojson}
 
 Returns `1` if the given text is valid GeoJSON, `0` otherwise.

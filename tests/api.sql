@@ -191,6 +191,37 @@ from str_lines(tg_debug()); -- @snap debug
   select tg_type(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
 -- #endregion
 
+-- #region tg_dims
+  select tg_dims('POINT (0 1)'); -- 2
+  select tg_dims(tg_point(1, 2)); -- 2
+  select tg_dims(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
+-- #region tg_is_empty
+  select tg_is_empty('POINT EMPTY'); -- 1
+  select tg_is_empty('POINT (0 1)'); -- 0
+  select tg_is_empty(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
+-- #region tg_is_feature
+  select tg_is_feature('{"type":"Feature","geometry":{"type":"Point","coordinates":[0,1]},"properties":{}}'); -- 1
+  select tg_is_feature('{"type":"Point","coordinates":[0,1]}'); -- 0
+  select tg_is_feature('{"type":"FeatureCollection","features":[]}'); -- 0
+  select tg_is_feature(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
+-- #region tg_is_featurecollection
+  select tg_is_featurecollection('{"type":"FeatureCollection","features":[]}'); -- 1
+  select tg_is_featurecollection('{"type":"Point","coordinates":[0,1]}'); -- 0
+  select tg_is_featurecollection('{"type":"Feature","geometry":{"type":"Point","coordinates":[0,1]},"properties":{}}'); -- 0
+  select tg_is_featurecollection(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
+-- #region tg_memsize
+  select tg_memsize('POINT (0 1)'); -- 24
+  select tg_memsize(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
 -- #region tg_poly_exterior
   select tg_to_wkt(tg_poly_exterior('POLYGON ((1 2, 3 4, 5 6, 1 2))')); -- 'POLYGON((1 2,3 4,5 6,1 2))'
   select tg_to_wkt(tg_poly_exterior('POLYGON ((1 2, 3 4, 5 6, 1 2), (7 8, 9 10, 11 12, 7 8))')); -- 'POLYGON((1 2,3 4,5 6,1 2))'
