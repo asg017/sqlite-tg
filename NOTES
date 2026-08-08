@@ -6,6 +6,26 @@
 
 UPCASTING: only `tg_line`, `tg_ring`, and `tg_poly` can upcast to tg_geom.
 
+## vendored tg patches
+
+Local fixes on top of tg v0.4.0 live as one patch file per fix in
+`vendor/tg/patches/`; `vendor/tg/update.ts` re-applies them automatically
+after fetching a fresh amalgamation. Each patch has its full story in its
+header, uses tg-repo-relative paths (so it can become an upstream PR
+as-is), and should be dropped once a tg release includes the fix:
+
+1. `0001-writers-dispatch-on-base-*`: recursive geojson/wkt/wkb writers
+   segfault on upcast collection children (committed back in 2024 as
+   34bc35d, now carried as a patch).
+2. `0002-parse_wkb_posns-*`: uint32 overflow in the WKB point-count bounds
+   check → out-of-bounds read from a crafted blob.
+3. `0003-parse_wkb-multi-*`: multiline/multipolygon parsers store NULL
+   child members from corrupted WKB → NULL deref in consumers.
+
+0002 and 0003 were found by the WKB corruption fuzzer in
+`tests/test-memory.c`; both are reachable from any WKB entry point
+(`tg_to_wkt(<blob>)`, `tg_geom(<blob>)`, tg0 `_shape` inserts).
+
 ## geom idx
 
 ```sql

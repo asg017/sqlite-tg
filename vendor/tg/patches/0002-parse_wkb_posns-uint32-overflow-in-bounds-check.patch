@@ -1,0 +1,36 @@
+parse_wkb_posns: fix uint32 overflow in the point-count bounds check
+
+The fast path for 2-D native-endian WKB validates the point count with
+`len-i >= count*2*8`. The right-hand side is evaluated in uint32_t, so any
+count >= 0x10000000 wraps (e.g. count = 0x20000000 gives count*16 == 0).
+A crafted WKB blob with such a count passes the bounds check and
+process_points then reads far past the end of the input buffer.
+
+Compare in the size_t domain instead, and do the index advance with the
+count widened to size_t.
+
+Found by fuzzing WKB inputs through sqlite-tg; reachable from any WKB
+parse entry point (tg_parse_wkb and friends).
+
+diff --git a/tg.c b/tg.c
+--- a/tg.c
++++ b/tg.c
+@@ -12272,11 +12272,15 @@ static size_t parse_wkb_posns(enum base base, int dims,
+     uint32_t count;
+     read_uint32(count);
+     if (count == 0) return i;
+-    if (dims == 2 && !swap && len-i >= count*2*8) {
+-        // Use the point data directly. No allocations. 
++    // PATCH(sqlite-tg): compare in the size_t domain. The upstream check
++    // `len-i >= count*2*8` evaluates the right side in uint32_t, which wraps
++    // for count >= 0x10000000, letting a crafted WKB point count pass the
++    // bounds check and drive an out-of-bounds read in process_points.
++    if (dims == 2 && !swap && (size_t)count <= (len-i)/16) {
++        // Use the point data directly. No allocations.
+         *points = (void*)(wkb+i);
+         *npoints = count;
+-        i += count*2*8; 
++        i += (size_t)count*16;
+     } else {
+         for (uint32_t j = 0 ; j < count; j++) {
+             read_posn(posn);

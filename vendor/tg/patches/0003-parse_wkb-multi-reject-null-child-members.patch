@@ -1,0 +1,51 @@
+parse_wkb_multilinestring/multipolygon: reject NULL child members
+
+A corrupted WKB child inside a MultiLineString can be linestring-typed yet
+carry a NULL tg_line (same for polygon-typed children of a MultiPolygon and
+tg_poly). The parser stored the NULL member in the multi geometry, and any
+consumer that assumes members are non-NULL — the WKT writer, for one —
+then dereferences NULL.
+
+Treat a NULL member as an invalid child at parse time, the same way a
+wrongly-typed child is rejected.
+
+Found by fuzzing WKB inputs through sqlite-tg; reachable from any WKB
+parse entry point (tg_parse_wkb and friends).
+
+diff --git a/tg.c b/tg.c
+--- a/tg.c
++++ b/tg.c
+@@ -12611,7 +12611,15 @@ static size_t parse_wkb_multilinestring(const uint8_t *wkb, size_t len,
+             gerr = make_parse_error(wkb_invalid_child_type());
+             goto fail;
+         }
+-        struct tg_line *line = tg_line_clone(tg_geom_line(child));
++        // PATCH(sqlite-tg): a corrupted WKB child can be linestring-typed yet
++        // carry a NULL line; upstream stores it and every consumer that
++        // assumes a non-NULL member (e.g. the WKT writer) then derefs NULL.
++        const struct tg_line *cline = tg_geom_line(child);
++        if (!cline) {
++            gerr = make_parse_error(wkb_invalid_child_type());
++            goto fail;
++        }
++        struct tg_line *line = tg_line_clone(cline);
+         if (!lvec_append(&lines, line)) {
+             tg_line_free(line);
+             goto fail;
+@@ -12692,7 +12700,15 @@ static size_t parse_wkb_multipolygon(const uint8_t *wkb, size_t len,
+             gerr = make_parse_error(wkb_invalid_child_type());
+             goto fail;
+         }
+-        struct tg_poly *poly = tg_poly_clone(tg_geom_poly(child));
++        // PATCH(sqlite-tg): see the multilinestring parser above — reject a
++        // polygon-typed child that carries a NULL poly rather than letting a
++        // NULL member reach the writer and other consumers.
++        const struct tg_poly *cpoly = tg_geom_poly(child);
++        if (!cpoly) {
++            gerr = make_parse_error(wkb_invalid_child_type());
++            goto fail;
++        }
++        struct tg_poly *poly = tg_poly_clone(cpoly);
+         if (!pvec_append(&polys, poly)) {
+             tg_poly_free(poly);
+             goto fail;

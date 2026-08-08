@@ -12272,11 +12272,15 @@ static size_t parse_wkb_posns(enum base base, int dims,
     uint32_t count;
     read_uint32(count);
     if (count == 0) return i;
-    if (dims == 2 && !swap && len-i >= count*2*8) {
-        // Use the point data directly. No allocations. 
+    // PATCH(sqlite-tg): compare in the size_t domain. The upstream check
+    // `len-i >= count*2*8` evaluates the right side in uint32_t, which wraps
+    // for count >= 0x10000000, letting a crafted WKB point count pass the
+    // bounds check and drive an out-of-bounds read in process_points.
+    if (dims == 2 && !swap && (size_t)count <= (len-i)/16) {
+        // Use the point data directly. No allocations.
         *points = (void*)(wkb+i);
         *npoints = count;
-        i += count*2*8; 
+        i += (size_t)count*16;
     } else {
         for (uint32_t j = 0 ; j < count; j++) {
             read_posn(posn);
@@ -12607,7 +12611,15 @@ static size_t parse_wkb_multilinestring(const uint8_t *wkb, size_t len,
             gerr = make_parse_error(wkb_invalid_child_type());
             goto fail;
         }
-        struct tg_line *line = tg_line_clone(tg_geom_line(child));
+        // PATCH(sqlite-tg): a corrupted WKB child can be linestring-typed yet
+        // carry a NULL line; upstream stores it and every consumer that
+        // assumes a non-NULL member (e.g. the WKT writer) then derefs NULL.
+        const struct tg_line *cline = tg_geom_line(child);
+        if (!cline) {
+            gerr = make_parse_error(wkb_invalid_child_type());
+            goto fail;
+        }
+        struct tg_line *line = tg_line_clone(cline);
         if (!lvec_append(&lines, line)) {
             tg_line_free(line);
             goto fail;
@@ -12688,7 +12700,15 @@ static size_t parse_wkb_multipolygon(const uint8_t *wkb, size_t len,
             gerr = make_parse_error(wkb_invalid_child_type());
             goto fail;
         }
-        struct tg_poly *poly = tg_poly_clone(tg_geom_poly(child));
+        // PATCH(sqlite-tg): see the multilinestring parser above — reject a
+        // polygon-typed child that carries a NULL poly rather than letting a
+        // NULL member reach the writer and other consumers.
+        const struct tg_poly *cpoly = tg_geom_poly(child);
+        if (!cpoly) {
+            gerr = make_parse_error(wkb_invalid_child_type());
+            goto fail;
+        }
+        struct tg_poly *poly = tg_poly_clone(cpoly);
         if (!pvec_append(&polys, poly)) {
             tg_poly_free(poly);
             goto fail;
