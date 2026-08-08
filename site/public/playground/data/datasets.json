@@ -1,0 +1,31 @@
+[
+  {
+    "id": "us-states",
+    "label": "US States (polygons)",
+    "file": "us-states.geojson",
+    "table": "states",
+    "nameProperty": "name",
+    "description": "US state boundaries (US Census cartographic boundaries, simplified). Columns: name TEXT, geometry TEXT (GeoJSON).",
+    "exampleSql": "-- Which state contains this point?\nselect name\nfrom states\nwhere tg_intersects(geometry, tg_point(-111.02, 35.03));"
+  },
+  {
+    "id": "world-countries",
+    "label": "World Countries (polygons)",
+    "file": "world-countries.geojson",
+    "table": "countries",
+    "nameProperty": "name",
+    "extraProperties": { "continent": "TEXT" },
+    "description": "Country boundaries (Natural Earth 1:110m admin-0). Columns: name TEXT, continent TEXT, geometry TEXT (GeoJSON).",
+    "exampleSql": "-- Which country contains this point?\nselect name, continent\nfrom countries\nwhere tg_intersects(geometry, tg_point(2.35, 48.86));"
+  },
+  {
+    "id": "world-cities",
+    "label": "World Cities (points)",
+    "file": "world-cities.geojson",
+    "table": "cities",
+    "nameProperty": "name",
+    "extraProperties": { "population": "INTEGER" },
+    "description": "Populated places (Natural Earth 1:110m). Columns: name TEXT, population INTEGER, geometry TEXT (GeoJSON).",
+    "exampleSql": "-- Largest cities within a bounding box around Europe\nselect name, population\nfrom cities\nwhere tg_within(geometry, tg_geom('POLYGON((-10 35, 30 35, 30 60, -10 60, -10 35))'))\norder by population desc\nlimit 10;"
+  }
+]
