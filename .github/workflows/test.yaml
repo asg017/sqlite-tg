@@ -44,6 +44,10 @@ jobs:
           version: "latest"
       - run: make sqlite-tg.h
       - run: make wasm
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: make test-wasm
       - uses: actions/upload-artifact@v4
         with:
           name: sqlite-tg-wasm32-emscripten

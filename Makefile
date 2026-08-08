@@ -146,8 +146,8 @@ WASM_DIR=$(prefix)/.wasm
 $(WASM_DIR): $(prefix)
 	mkdir -p $@
 
-SQLITE_WASM_VERSION=3450300
-SQLITE_WASM_YEAR=2024
+SQLITE_WASM_VERSION=3530400
+SQLITE_WASM_YEAR=2026
 SQLITE_WASM_SRCZIP=$(BUILD_DIR)/sqlite-src.zip
 SQLITE_WASM_COMPILED_SQLITE3C=$(BUILD_DIR)/sqlite-src-$(SQLITE_WASM_VERSION)/sqlite3.c
 SQLITE_WASM_COMPILED_MJS=$(BUILD_DIR)/sqlite-src-$(SQLITE_WASM_VERSION)/ext/wasm/jswasm/sqlite3.mjs
@@ -186,5 +186,8 @@ $(TARGET_WASM_WASM): $(SQLITE_WASM_COMPILED_WASM)
 	cp $< $@
 
 wasm: $(TARGET_WASM)
+
+test-wasm:
+	deno test -A examples/wasm/test-wasm.ts
 
 # ███████████████████████████████   END WASM   ███████████████████████████████
