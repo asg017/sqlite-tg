@@ -141,6 +141,41 @@
 }
 
 /**
+ * Component: Open in playground
+ *
+ * Rendered at build time by the fence-renderer wrapper in config.mts: a
+ * `.playground-fence` div wrapping the code block plus a trailing
+ * `.open-in-playground` link. Subtle by default, clearer while hovering the
+ * fence.
+ * -------------------------------------------------------------------------- */
+
+/* Tuck the link right under its code block (no negative margin on the link
+   itself — the fence's <pre> has z-index: 1 and would swallow clicks). */
+.playground-fence div[class*="language-"] {
+  margin-bottom: 4px;
+}
+
+.open-in-playground {
+  margin: 0 0 16px;
+  text-align: right;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.open-in-playground a {
+  color: var(--vp-c-text-3);
+  transition: color 0.25s;
+}
+
+.playground-fence:hover .open-in-playground a {
+  color: var(--vp-c-text-2);
+}
+
+.open-in-playground a:hover {
+  color: var(--vp-c-brand-1);
+}
+
+/**
  * Component: Custom Block
  * -------------------------------------------------------------------------- */
 

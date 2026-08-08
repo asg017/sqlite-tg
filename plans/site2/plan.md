@@ -103,7 +103,7 @@ Update this table as tickets complete.
 | 03-datasets | DONE |
 | 04-content | DONE |
 | 05-playground | DONE |
-| 06-open-in-playground | TODO |
+| 06-open-in-playground | DONE |
 | 07-deploy | DONE |
 
 ## Verification

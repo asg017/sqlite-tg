@@ -6,6 +6,9 @@ import { tabsMarkdownPlugin } from "vitepress-plugin-tabs";
 
 const PROJECT = "sqlite-tg";
 const description = "A SQLite extension for fast geospatial operations";
+// Site base path — also baked into the "Open in playground" fence links at
+// build time (the markdown renderer has no access to `withBase`).
+const BASE = "/sqlite-tg/";
 
 const VERSION = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "..", "..", "VERSION"),
@@ -130,7 +133,7 @@ export default defineConfig({
   description,
   lastUpdated: true,
   head: head(),
-  base: "/sqlite-tg/",
+  base: BASE,
   rewrites: {
     "getting-started/:pkg.md": ":pkg.md",
   },
@@ -157,6 +160,38 @@ export default defineConfig({
     languages: [sqliteLanguage],
     config(md) {
       md.use(tabsMarkdownPlugin);
+
+      // "Open in playground" links on ```sql / ```sqlite fences
+      // (plans/site2/tickets/06-open-in-playground.md). URL contract shared
+      // with theme/playground/urlState.ts: `?sql=<base64url no-pad UTF-8>`
+      // plus optional `&db=<dataset id>`. Fence info string extras:
+      //   ```sql db=us-states   → pre-loads that sample dataset
+      //   ```sql no-playground  → no link
+      const defaultFence = md.renderer.rules.fence!;
+      md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+        const rendered = defaultFence(tokens, idx, options, env, self);
+        const [lang, ...attrs] = tokens[idx].info.trim().split(/\s+/);
+        if (
+          (lang !== "sql" && lang !== "sqlite") ||
+          attrs.includes("no-playground")
+        ) {
+          return rendered;
+        }
+        const db = attrs.find((attr) => attr.startsWith("db="))?.slice(3);
+        // `playground.html` (not `/playground`) so the link also resolves on
+        // static hosts like GitHub Pages without a trailing-slash redirect.
+        let href = `${BASE}playground.html?sql=${Buffer.from(
+          tokens[idx].content,
+          "utf8"
+        ).toString("base64url")}`;
+        if (db) href += `&db=${encodeURIComponent(db)}`;
+        return (
+          `<div class="playground-fence">${rendered}` +
+          `<div class="open-in-playground">` +
+          `<a href="${md.utils.escapeHtml(href)}">Open in playground ↗</a>` +
+          `</div></div>`
+        );
+      };
     },
   },
 });

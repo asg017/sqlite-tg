@@ -27,7 +27,7 @@ features:
 
 <div style="margin: auto; max-width: 640px;">
 
-```sqlite
+```sqlite db=us-states
 -- Find the US state a latitude/longitude point lies in
 select name
 from states
