@@ -99,12 +99,12 @@ Update this table as tickets complete.
 | ticket | status |
 |--------|--------|
 | 01-scaffold | DONE |
-| 02-wasm-pipeline | TODO |
-| 03-datasets | TODO |
+| 02-wasm-pipeline | DONE |
+| 03-datasets | DONE |
 | 04-content | DONE |
 | 05-playground | TODO |
 | 06-open-in-playground | TODO |
-| 07-deploy | TODO |
+| 07-deploy | DONE |
 
 ## Verification
 
