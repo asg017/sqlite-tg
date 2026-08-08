@@ -2,9 +2,14 @@ import { assert } from "https://deno.land/std@0.211.0/assert/assert.ts";
 
 // sqlite3.mjs is compiled with -sENVIRONMENT=web,worker. Deno 2 removed the
 // `window` global and added a Node-compat `process` global; adjust both so
-// emscripten's environment detection sees a web-like host.
+// emscripten's environment detection sees a web-like host. The fake
+// `location` carries sqlite3's opfs-disable/opfs-wl-disable flags — without
+// them the async OPFS VFS bootstrap can hang forever outside a browser.
 (globalThis as { window?: unknown }).window = globalThis;
 delete (globalThis as { process?: unknown }).process;
+(globalThis as { location?: unknown }).location = new URL(
+  "http://localhost/?opfs-disable&opfs-wl-disable",
+);
 const { default: init } = await import("../../dist/.wasm/sqlite3.mjs");
 
 // deno-lint-ignore no-explicit-any
