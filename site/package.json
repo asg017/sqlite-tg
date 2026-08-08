@@ -6,6 +6,12 @@
     "docs:preview": "vitepress preview"
   },
   "dependencies": {
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/state": "^6.7.1",
+    "@codemirror/view": "^6.43.8",
+    "@lezer/highlight": "^1.2.3",
+    "codemirror": "^6.0.2",
     "vitepress": "^1.6.4",
     "vue": "^3.5.41"
   },

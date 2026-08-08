@@ -102,7 +102,7 @@ Update this table as tickets complete.
 | 02-wasm-pipeline | DONE |
 | 03-datasets | DONE |
 | 04-content | DONE |
-| 05-playground | TODO |
+| 05-playground | DONE |
 | 06-open-in-playground | TODO |
 | 07-deploy | DONE |
 
