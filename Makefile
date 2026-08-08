@@ -143,7 +143,7 @@ docs-check: loadable
 
 WASM_DIR=$(prefix)/.wasm
 
-$(WASM_DIR): $(prefix)
+$(WASM_DIR): | $(prefix)
 	mkdir -p $@
 
 SQLITE_WASM_VERSION=3530400
@@ -158,17 +158,17 @@ TARGET_WASM_MJS=$(WASM_DIR)/sqlite3.mjs
 TARGET_WASM_WASM=$(WASM_DIR)/sqlite3.wasm
 TARGET_WASM=$(TARGET_WASM_MJS) $(TARGET_WASM_WASM)
 
-$(SQLITE_WASM_SRCZIP): $(BUILD_DIR)
+$(SQLITE_WASM_SRCZIP): | $(BUILD_DIR)
 	curl -o $@ https://www.sqlite.org/$(SQLITE_WASM_YEAR)/sqlite-src-$(SQLITE_WASM_VERSION).zip
 	touch $@
 
-$(SQLITE_WASM_COMPILED_SQLITE3C): $(SQLITE_WASM_SRCZIP) $(BUILD_DIR)
+$(SQLITE_WASM_COMPILED_SQLITE3C): $(SQLITE_WASM_SRCZIP) | $(BUILD_DIR)
 	rm -rf $(BUILD_DIR)/sqlite-src-$(SQLITE_WASM_VERSION)/ || true
 	unzip -q -o $< -d $(BUILD_DIR)
 	(cd $(BUILD_DIR)/sqlite-src-$(SQLITE_WASM_VERSION)/ && ./configure --enable-all && make sqlite3.c)
 	touch $@
 
-$(TARGET_WASM_LIB): examples/wasm/wasm.c sqlite-tg.c $(BUILD_DIR) $(WASM_DIR)
+$(TARGET_WASM_LIB): examples/wasm/wasm.c sqlite-tg.c | $(BUILD_DIR) $(WASM_DIR)
 	emcc -O3  -I./ -Ivendor/sqlite -DSQLITE_CORE -c examples/wasm/wasm.c -o $(BUILD_DIR)/wasm.wasm.o
 	emcc -O3  -I./ -Ivendor/tg -c vendor/tg/tg.c -o $(BUILD_DIR)/tg.wasm.o
 	emcc -O3  -I./ -Ivendor/sqlite -Ivendor/tg -DSQLITE_CORE -c sqlite-tg.c -o $(BUILD_DIR)/sqlite-tg.wasm.o
