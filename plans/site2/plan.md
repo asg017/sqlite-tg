@@ -98,7 +98,7 @@ Update this table as tickets complete.
 
 | ticket | status |
 |--------|--------|
-| 01-scaffold | TODO |
+| 01-scaffold | DONE |
 | 02-wasm-pipeline | TODO |
 | 03-datasets | TODO |
 | 04-content | TODO |
