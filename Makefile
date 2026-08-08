@@ -46,11 +46,8 @@ TARGET_LOADABLE=$(prefix)/tg0.$(LOADABLE_EXTENSION)
 TARGET_STATIC=$(prefix)/libsqlite_tg0.a
 TARGET_STATIC_H=$(prefix)/sqlite-tg.h
 
-TARGET_TEST_MEMORY=$(prefix)/test-memory
-
 loadable: $(TARGET_LOADABLE)
 static: $(TARGET_STATIC)
-test-memory: $(TARGET_TEST_MEMORY)
 sqlite3: $(TARGET_SQLITE3)
 
 BUILD_DIR=$(prefix)/.build
@@ -89,14 +86,8 @@ sqlite-tg.h: sqlite-tg.h.tmpl VERSION
 $(TARGET_STATIC_H): sqlite-tg.h $(prefix)
 	cp $< $@
 
-$(TARGET_TEST_MEMORY): tests/test-memory.c sqlite-tg.c vendor/sqlite/sqlite3.c vendor/tg/tg.c $(prefix)
-	gcc \
-	-Ivendor/sqlite -Ivendor/tg -I./ \
-	-O3 \
-	$(CFLAGS) \
-	-DSQLITE_CORE \
-	-DSQLITE_ENABLE_RTREE \
-	$< vendor/sqlite/sqlite3.c sqlite-tg.c vendor/tg/tg.c -o $@
+# memory-test targets (test-memory, test-memory-asan/-leaks/-gmalloc)
+include tests/test-memory.mk
 
 clean:
 	rm -rf dist/*
