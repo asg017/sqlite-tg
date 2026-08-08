@@ -101,7 +101,7 @@ Update this table as tickets complete.
 | 01-scaffold | DONE |
 | 02-wasm-pipeline | TODO |
 | 03-datasets | TODO |
-| 04-content | TODO |
+| 04-content | DONE |
 | 05-playground | TODO |
 | 06-open-in-playground | TODO |
 | 07-deploy | TODO |

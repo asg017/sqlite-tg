@@ -131,6 +131,9 @@ export default defineConfig({
   lastUpdated: true,
   head: head(),
   base: "/sqlite-tg/",
+  rewrites: {
+    "getting-started/:pkg.md": ":pkg.md",
+  },
   themeConfig: {
     nav: nav(),
     sidebar: sidebar(),

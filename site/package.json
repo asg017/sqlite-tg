@@ -1,7 +1,8 @@
 {
   "scripts": {
     "docs:dev": "vitepress dev",
-    "docs:build": "vitepress build",
+    "ref": "node build-ref.mjs",
+    "docs:build": "npm run ref && vitepress build",
     "docs:preview": "vitepress preview"
   },
   "dependencies": {
@@ -10,6 +11,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
+    "js-yaml": "^5.2.3",
     "vitepress-plugin-tabs": "^0.9.1"
   }
 }
