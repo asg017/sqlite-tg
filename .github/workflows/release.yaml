@@ -33,9 +33,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # emcc 6.x emits wasm "compact imports" (import kind 0x7f) that default
+      # V8/deno/browsers cannot load yet; pin to a 5.x emsdk
       - uses: mymindstorm/setup-emsdk@v12
         with:
-          version: "latest"
+          version: "5.0.4"
       - run: make sqlite-tg.h
       - run: make wasm
       - uses: actions/upload-artifact@v4
