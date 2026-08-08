@@ -1,0 +1,49 @@
+name: Deploy Site
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - main
+    paths:
+      - "site/**"
+      - "VERSION"
+      - "reference.yaml"
+      - "docs.md"
+      - ".github/workflows/site.yaml"
+      # wasm inputs: the playground ships dist/.wasm builds of these
+      - "sqlite-tg.c"
+      - "vendor/**"
+      - "examples/wasm/**"
+      - "Makefile"
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      # emcc 6.x emits wasm "compact imports" (import kind 0x7f) that default
+      # V8/deno/browsers cannot load yet; pin to a 5.x emsdk
+      - uses: mymindstorm/setup-emsdk@v12
+        with:
+          version: "5.0.4"
+      - run: make sqlite-tg.h
+      - run: make wasm
+      - uses: actions/setup-node@v4
+        with:
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+        working-directory: site/
+      - run: make site-build
+      - uses: actions/configure-pages@v2
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site/.vitepress/dist
+      - id: deployment
+        uses: actions/deploy-pages@v4
