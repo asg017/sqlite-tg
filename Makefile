@@ -191,3 +191,42 @@ test-wasm:
 	deno test -A examples/wasm/test-wasm.ts
 
 # ███████████████████████████████   END WASM   ███████████████████████████████
+
+# ███████████████████████████████ SITE SECTION ███████████████████████████████
+
+SITE_DIR=site
+SITE_PLAYGROUND_DIR=$(SITE_DIR)/public/playground
+SITE_WASM_MJS=$(SITE_PLAYGROUND_DIR)/sqlite3.mjs
+SITE_WASM_WASM=$(SITE_PLAYGROUND_DIR)/sqlite3.wasm
+
+$(SITE_PLAYGROUND_DIR):
+	mkdir -p $@
+
+$(SITE_WASM_MJS): $(TARGET_WASM_MJS) | $(SITE_PLAYGROUND_DIR)
+	cp $< $@
+
+$(SITE_WASM_WASM): $(TARGET_WASM_WASM) | $(SITE_PLAYGROUND_DIR)
+	cp $< $@
+
+# Copy the WASM build into the site's static assets. This must never kick off
+# an emsdk build (local contributors may not have emscripten set up):
+#   - if the artifacts are missing, fail with instructions instead of building;
+#   - the sub-make marks the intermediate build outputs as old (-o) so a stale
+#     or partially-cleaned $(BUILD_DIR) chain can't pull in emcc either.
+site-wasm:
+	@if [ ! -f "$(TARGET_WASM_MJS)" ] || [ ! -f "$(TARGET_WASM_WASM)" ]; then \
+		echo "Error: $(TARGET_WASM_MJS) and/or $(TARGET_WASM_WASM) not found."; \
+		echo "Run 'make wasm' first (requires emscripten; see the wasm job in .github/workflows/test.yaml)."; \
+		exit 1; \
+	fi
+	$(MAKE) -o $(SQLITE_WASM_COMPILED_MJS) -o $(SQLITE_WASM_COMPILED_WASM) $(SITE_WASM_MJS) $(SITE_WASM_WASM)
+
+site-build: site-wasm
+	cd $(SITE_DIR) && npm run docs:build
+
+site-dev: site-wasm
+	cd $(SITE_DIR) && npm run docs:dev
+
+.PHONY: site-wasm site-build site-dev
+
+# ███████████████████████████████   END SITE   ███████████████████████████████
