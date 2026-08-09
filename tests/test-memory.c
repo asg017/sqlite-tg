@@ -346,10 +346,10 @@ static const char *OOM_SCENARIO[] = {
     "select tg_to_wkt('not a geometry')", // error path under OOM too
     // tg0 lifecycle: this sweeps the constructor parse, the shadow table DDL
     // (info + content + one rtree per geometry column + rowids for the text
-    // primary key, dropped again on the way out), tg0_free, and the write
+    // primary key, dropped again on the way out), tg0_free, the write
     // path's geometry parse/serialize error branches — INSERT, nochange-aware
-    // UPDATE, and DELETE. Predicate SELECTs are still stubbed mid-rewrite;
-    // read coverage returns in ticket 04.
+    // UPDATE, and DELETE — and the read path's predicate scans (query
+    // geometry parse, rtree prefilter, exact per-candidate post-filter).
     "create virtual table temp.oom using tg0("
     "id text primary key, label text, shape geometry, boundary polygon)",
     "select * from pragma_table_xinfo('oom')",
@@ -357,6 +357,11 @@ static const char *OOM_SCENARIO[] = {
     "('a', 'one', 'POINT(1 2)', 'POLYGON((0 0, 4 0, 4 4, 0 0))')",
     "update temp.oom set label = 'renamed', shape = 'MULTIPOINT(1 1, 2 2)' "
     "where id = 'a'",
+    "select label from temp.oom where tg_intersects(shape, "
+    "'POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))')",
+    "select label from temp.oom where tg_within(boundary, "
+    "'POLYGON((-1 -1, 5 -1, 5 5, -1 5, -1 -1))')",
+    "select count(*) from temp.oom where tg_disjoint(shape, 'POINT(100 100)')",
     "delete from temp.oom where id = 'a'",
     "drop table temp.oom",
 };
@@ -541,10 +546,12 @@ int main(int argc, char *argv[]) {
       "select a.value, tg_to_wkt(b.point) from json_each('[1, 2, 3]') a, "
       "tg_line_points_each('LINESTRING(7 7, 8 8)') b",
       // tg0 lifecycle: the typed-column constructor parse, the shadow table
-      // create/drop DDL, tg0_free, and the full write path — INSERT (WKT
+      // create/drop DDL, tg0_free, the full write path — INSERT (WKT
       // parse + WKB serialize + rtree rows), nochange-aware UPDATE, and
-      // DELETE. Predicate SELECTs are still stubbed mid-rewrite; read
-      // coverage returns in ticket 04.
+      // DELETE — and the read path: point plans, every rtree prefilter
+      // strategy (overlap / contains / within / disjoint-fullscan), and the
+      // exact per-candidate post-filter that parses stored WKB with the
+      // column's indexing= option
       "create virtual table temp.demo using tg0("
       "id integer primary key, label text, shape geometry, "
       "boundary polygon indexing=ystripes)",
@@ -556,15 +563,30 @@ int main(int argc, char *argv[]) {
       "update temp.demo set label = 'renamed' where id = 1",
       "update temp.demo set shape = 'POINT(9 9)', "
       "boundary = 'POLYGON((5 5, 6 5, 6 6, 5 5))' where id = 2",
+      "select label from temp.demo where id = 2",
+      "select label from temp.demo where tg_intersects(shape, "
+      "'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))')",
+      "select label from temp.demo where tg_contains(boundary, 'POINT(1 1)')",
+      "select label from temp.demo where tg_within(shape, "
+      "'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))')",
+      "select label from temp.demo where tg_coveredby(boundary, "
+      "'POLYGON((-1 -1, 7 -1, 7 7, -1 7, -1 -1))')",
+      "select count(*) from temp.demo where tg_disjoint(shape, "
+      "'POINT(100 100)')",
+      "select count(*) from temp.demo where tg_intersects(shape, "
+      "'POINT(9 9)') and tg_touches(boundary, 'POINT(100 100)')",
       "delete from temp.demo where id = 1",
       "delete from temp.demo",
       "drop table temp.demo",
       // text primary keys additionally route every write through the rowids
-      // mapping shadow table
+      // mapping shadow table, and read scans join it back for the id column
       "create virtual table temp.demo_tpk using tg0("
       "id text primary key, shape point)",
       "insert into temp.demo_tpk(id, shape) values ('a', 'POINT(1 2)')",
       "update temp.demo_tpk set shape = 'POINT(3 4)' where id = 'a'",
+      "select id from temp.demo_tpk where id = 'a'",
+      "select id from temp.demo_tpk where tg_intersects(shape, "
+      "'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))')",
       "delete from temp.demo_tpk where id = 'a'",
       "drop table temp.demo_tpk",
   };

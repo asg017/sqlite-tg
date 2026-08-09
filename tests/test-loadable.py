@@ -280,9 +280,9 @@ def test_tg_is_empty():
 
 
 def test_tg_is_feature():
-    tg_is_feature = lambda *args: db.execute("select tg_is_feature(?)", args).fetchone()[
-        0
-    ]
+    tg_is_feature = lambda *args: db.execute(
+        "select tg_is_feature(?)", args
+    ).fetchone()[0]
     assert (
         tg_is_feature(
             '{"type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{}}'
@@ -304,9 +304,7 @@ def test_tg_is_featurecollection():
     tg_is_featurecollection = lambda *args: db.execute(
         "select tg_is_featurecollection(?)", args
     ).fetchone()[0]
-    assert (
-        tg_is_featurecollection('{"type":"FeatureCollection","features":[]}') == 1
-    )
+    assert tg_is_featurecollection('{"type":"FeatureCollection","features":[]}') == 1
     assert tg_is_featurecollection('{"type":"Point","coordinates":[1,2]}') == 0
     assert (
         tg_is_featurecollection(
@@ -500,9 +498,7 @@ def test_tg_line_points_each(snapshot):
         args,
     )
     assert tg_line_points_each("LINESTRING EMPTY") == []
-    assert (
-        tg_line_points_each("LINESTRING (10 10, 20 20, 10 40, 40 40)") == snapshot
-    )
+    assert tg_line_points_each("LINESTRING (10 10, 20 20, 10 40, 40 40)") == snapshot
 
     with pytest.raises(
         sqlite3.OperationalError,
@@ -524,9 +520,7 @@ def test_tg_line_segments_each(snapshot):
         args,
     )
     assert tg_line_segments_each("LINESTRING EMPTY") == []
-    assert (
-        tg_line_segments_each("LINESTRING (10 10, 20 20, 10 40, 40 40)") == snapshot
-    )
+    assert tg_line_segments_each("LINESTRING (10 10, 20 20, 10 40, 40 40)") == snapshot
 
     with pytest.raises(
         sqlite3.OperationalError,
@@ -654,6 +648,7 @@ def test_tg_to_geojson():
 @pytest.mark.skip(reason="TODO")
 def test_tg_point():
     pass
+
 
 def test_tg_point():
     assert db.execute("select tg_point(1, 1)").fetchone()[0] == None
@@ -1018,15 +1013,11 @@ def test_tg_linestring():
         f"select tg_to_wkt(tg_linestring({spread_args(args)}))", args
     ).fetchone()[0]
     assert tg_linestring() == "LINESTRING EMPTY"
-    assert (
-        tg_linestring("point(0 0)", "point(1 1)") == "LINESTRING(0 0,1 1)"
-    )
+    assert tg_linestring("point(0 0)", "point(1 1)") == "LINESTRING(0 0,1 1)"
 
     with pytest.raises(
         sqlite3.OperationalError,
-        match=re.escape(
-            "argument to tg_line() at index 1 is an invalid geometry"
-        ),
+        match=re.escape("argument to tg_line() at index 1 is an invalid geometry"),
     ):
         tg_linestring("point(1 1)", "invalid")
 
@@ -1051,9 +1042,10 @@ def test_tg_ring():
     assert tg_ring("point(0 0)", "point(10 0)", "point(10 10)") == (
         "POLYGON((0 0,10 0,10 10))"
     )
-    assert tg_ring(
-        "point(0 0)", "point(10 0)", "point(10 10)", "point(0 0)"
-    ) == "POLYGON((0 0,10 0,10 10,0 0))"
+    assert (
+        tg_ring("point(0 0)", "point(10 0)", "point(10 10)", "point(0 0)")
+        == "POLYGON((0 0,10 0,10 10,0 0))"
+    )
 
     with pytest.raises(
         sqlite3.OperationalError,
@@ -1086,16 +1078,17 @@ def test_tg_polygon():
 
     # a Polygon-typed exterior arg (no holes) is accepted, same as a bare
     # ring from tg_ring()/tg_poly_exterior()
-    assert db.execute(
-        "select tg_to_wkt(tg_polygon(tg_ring(tg_point(0,0), tg_point(1,0), "
-        "tg_point(1,1), tg_point(0,0))))"
-    ).fetchone()[0] == "POLYGON((0 0,1 0,1 1,0 0))"
+    assert (
+        db.execute(
+            "select tg_to_wkt(tg_polygon(tg_ring(tg_point(0,0), tg_point(1,0), "
+            "tg_point(1,1), tg_point(0,0))))"
+        ).fetchone()[0]
+        == "POLYGON((0 0,1 0,1 1,0 0))"
+    )
 
     with pytest.raises(
         sqlite3.OperationalError,
-        match=re.escape(
-            "argument to tg_polygon() at index 0 is an invalid geometry"
-        ),
+        match=re.escape("argument to tg_polygon() at index 0 is an invalid geometry"),
     ):
         tg_polygon("invalid")
 
@@ -1116,9 +1109,7 @@ def test_tg_polygon():
             "Polygon with holes (its holes would be silently dropped)"
         ),
     ):
-        tg_polygon(
-            "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))"
-        )
+        tg_polygon("POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (1 1, 2 1, 2 2, 1 2, 1 1))")
 
 
 def test_tg_rect():
@@ -1141,9 +1132,9 @@ def test_tg_rect():
         == "POLYGON((0 0,1 0,1 1,0 1,0 0))"
     )
     assert (
-        db.execute(
-            "select tg_to_wkt(tg_rect('POINT(0 0)', 'POINT(1 1)'))"
-        ).fetchone()[0]
+        db.execute("select tg_to_wkt(tg_rect('POINT(0 0)', 'POINT(1 1)'))").fetchone()[
+            0
+        ]
         == "POLYGON((0 0,1 0,1 1,0 1,0 0))"
     )
 
@@ -1185,9 +1176,7 @@ def test_tg_rect():
             "argument to tg_rect() at index 1 expected a point, found LineString"
         ),
     ):
-        db.execute(
-            "select tg_rect(tg_point(0, 0), 'LINESTRING(0 0, 1 1)')"
-        )
+        db.execute("select tg_rect(tg_point(0, 0), 'LINESTRING(0 0, 1 1)')")
 
 
 def test_tg_segment():
@@ -1234,9 +1223,7 @@ def test_tg_segment():
     # error cases: 2-arg form requires Point geometries
     with pytest.raises(
         sqlite3.OperationalError,
-        match=re.escape(
-            "argument to tg_segment() at index 0 is an invalid geometry"
-        ),
+        match=re.escape("argument to tg_segment() at index 0 is an invalid geometry"),
     ):
         db.execute("select tg_segment('not a geometry', tg_point(1, 1))")
     with pytest.raises(
@@ -1245,9 +1232,7 @@ def test_tg_segment():
             "argument to tg_segment() at index 1 expected a point, found LineString"
         ),
     ):
-        db.execute(
-            "select tg_segment(tg_point(0, 0), 'LINESTRING(0 0, 1 1)')"
-        )
+        db.execute("select tg_segment(tg_point(0, 0), 'LINESTRING(0 0, 1 1)')")
 
 
 def test_tg_multilinestring():
@@ -1313,10 +1298,7 @@ def test_tg_geometrycollection():
         f"select tg_to_wkt(tg_geometrycollection({spread_args(args)}))", args
     ).fetchone()[0]
     assert tg_geometrycollection() == "GEOMETRYCOLLECTION EMPTY"
-    assert (
-        tg_geometrycollection("POINT(1 1)")
-        == "GEOMETRYCOLLECTION(POINT(1 1))"
-    )
+    assert tg_geometrycollection("POINT(1 1)") == "GEOMETRYCOLLECTION(POINT(1 1))"
     assert (
         tg_geometrycollection("POINT(1 1)", "LINESTRING(0 0, 1 1)")
         == "GEOMETRYCOLLECTION(POINT(1 1),LINESTRING(0 0,1 1))"
@@ -1391,8 +1373,8 @@ def test_tg_within():
 
 # ---------------------------------------------------------------------------
 # tg0 constructor (typed-column syntax): CREATE-level coverage. Write coverage
-# lives in the "tg0 write path" section below; read coverage returns when the
-# predicate-driven read path lands in a follow-up change.
+# lives in the "tg0 write path" section below, read coverage in the "tg0 read
+# path" section after it.
 # ---------------------------------------------------------------------------
 
 
@@ -1408,8 +1390,7 @@ def table_xinfo(table):
 
 @pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
 def test_tg0_create_geometry_columns(snapshot):
-    db.execute(
-        """
+    db.execute("""
         create virtual table tg_geoms using tg0(
           a geometry,
           b point,
@@ -1420,8 +1401,7 @@ def test_tg0_create_geometry_columns(snapshot):
           g multipolygon,
           h geometrycollection
         )
-        """
-    )
+        """)
     assert table_xinfo("tg_geoms") == snapshot(name="every geometry type xinfo")
     db.execute("drop table tg_geoms")
 
@@ -1678,11 +1658,10 @@ def test_tg0_drop_removes_shadow_tables(snapshot):
 
 
 # ---------------------------------------------------------------------------
-# tg0 write path: INSERT / DELETE / UPDATE. The predicate read path is still
-# stubbed (it lands in the next change), so round-trips are asserted against
+# tg0 write path: INSERT / DELETE / UPDATE. Round-trips are asserted against
 # the shadow tables directly — t_content for stored WKB and data values,
-# t_rtreeNN for bboxes, t_rowids for text primary key mappings — instead of
-# SELECTing from the virtual table itself.
+# t_rtreeNN for bboxes, t_rowids for text primary key mappings — so write
+# bugs can't hide behind the read path.
 # ---------------------------------------------------------------------------
 
 
@@ -2089,6 +2068,276 @@ def test_tg0_write_distance_column(snapshot):
         "insert into tg_wdist(shape, distance) values ('POINT(1 1)', 1)"
     ) == snapshot(name="insert into distance")
     db.execute("drop table tg_wdist")
+
+
+# ---------------------------------------------------------------------------
+# tg0 read path: xBestIndex plans (fullscan / point / predicate) and all 8
+# predicates, exact results driven by an rtree bbox prefilter + exact tg
+# post-filter.
+# ---------------------------------------------------------------------------
+
+# Query geometry: the 10x10 square at the origin.
+TG0_READ_QUERY = "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"
+
+# Fixture rows with known relationships to TG0_READ_QUERY.
+TG0_READ_FIXTURE = [
+    # small polygon strictly inside the query square
+    ("in_poly", "POLYGON((2 2, 4 2, 4 4, 2 4, 2 2))"),
+    # polygon touching the query square at exactly one corner, (10, 10)
+    ("corner_poly", "POLYGON((10 10, 12 10, 12 12, 10 12, 10 10))"),
+    # line crossing all the way through the query square
+    ("cross_line", "LINESTRING(-2 5, 12 5)"),
+    # polygon far away from the query square
+    ("far_poly", "POLYGON((20 20, 30 20, 30 30, 20 30, 20 20))"),
+    # polygon strictly containing the query square
+    ("cover_poly", "POLYGON((-2 -2, 12 -2, 12 12, -2 12, -2 -2))"),
+    # polygon exactly equal to the query square
+    ("equal_poly", "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"),
+    # point strictly inside the query square
+    ("in_point", "POINT(5 5)"),
+    # point outside the query square
+    ("out_point", "POINT(15 15)"),
+    # point on the query square's boundary
+    ("edge_point", "POINT(0 5)"),
+    # one point inside the query square, one outside
+    ("multi", "MULTIPOINT(1 1, 20 1)"),
+]
+
+# Hand-computed: which fixture rows relate to TG0_READ_QUERY under each
+# predicate, per tg's semantics — tg_within/tg_contains are false on
+# boundary-only contact (edge_point), tg_coveredby/tg_covers include it, and
+# tg_touches needs a common point with disjoint interiors (corner_poly,
+# edge_point).
+TG0_READ_EXPECTED = {
+    "tg_intersects": [
+        "in_poly",
+        "corner_poly",
+        "cross_line",
+        "cover_poly",
+        "equal_poly",
+        "in_point",
+        "edge_point",
+        "multi",
+    ],
+    "tg_disjoint": ["far_poly", "out_point"],
+    "tg_contains": ["cover_poly", "equal_poly"],
+    "tg_within": ["in_poly", "equal_poly", "in_point"],
+    "tg_covers": ["cover_poly", "equal_poly"],
+    "tg_coveredby": ["in_poly", "equal_poly", "in_point", "edge_point"],
+    "tg_touches": ["corner_poly", "edge_point"],
+    "tg_equals": ["equal_poly"],
+}
+
+
+@pytest.fixture
+def tg0_read_table():
+    db.execute("create virtual table tg_rd using tg0(shape geometry, label text)")
+    for label, wkt in TG0_READ_FIXTURE:
+        db.execute("insert into tg_rd(shape, label) values (?, ?)", [wkt, label])
+    yield "tg_rd"
+    db.execute("drop table tg_rd")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_read_all_predicates(tg0_read_table):
+    for predicate, expected in TG0_READ_EXPECTED.items():
+        rows = db.execute(
+            f"select label from tg_rd where {predicate}(shape, ?) order by rowid",
+            [TG0_READ_QUERY],
+        ).fetchall()
+        assert [row["label"] for row in rows] == expected, predicate
+        # cross-check against a manual scan that cannot be intercepted by
+        # xBestIndex (the predicate's first argument is not a bare column)
+        manual = db.execute(
+            f"select label from tg_rd where {predicate}(tg_to_wkb(shape), ?) "
+            "order by rowid",
+            [TG0_READ_QUERY],
+        ).fetchall()
+        assert [row["label"] for row in manual] == expected, predicate
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_read_two_predicates(tg0_read_table):
+    # two predicates in one WHERE clause: one is consumed for the rtree plan,
+    # the other post-evaluates as a scalar function — results intersect
+    rows = db.execute(
+        "select label from tg_rd where tg_intersects(shape, ?) "
+        "and tg_coveredby(shape, ?) order by rowid",
+        [TG0_READ_QUERY, TG0_READ_QUERY],
+    ).fetchall()
+    assert [row["label"] for row in rows] == TG0_READ_EXPECTED["tg_coveredby"]
+    # disjoint + a non-disjoint predicate: the non-disjoint one drives the
+    # rtree; disjoint-from-far_poly then filters far_poly's own row out
+    rows = db.execute(
+        "select label from tg_rd where tg_disjoint(shape, ?) "
+        "and tg_intersects(shape, ?) order by rowid",
+        ["POLYGON((20 20, 30 20, 30 30, 20 30, 20 20))", TG0_READ_QUERY],
+    ).fetchall()
+    assert [row["label"] for row in rows] == TG0_READ_EXPECTED["tg_intersects"]
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_read_data_column_predicate_not_intercepted(tg0_read_table):
+    # a predicate on a data column is NOT intercepted by xBestIndex: it runs
+    # as the plain scalar function, which errors on non-geometry input with
+    # the exact same message
+    with pytest.raises(sqlite3.OperationalError) as vtab_err:
+        db.execute(
+            "select label from tg_rd where tg_intersects(label, ?)",
+            [TG0_READ_QUERY],
+        ).fetchall()
+    with pytest.raises(sqlite3.OperationalError) as scalar_err:
+        db.execute("select tg_intersects('in_poly', ?)", [TG0_READ_QUERY]).fetchone()
+    assert str(vtab_err.value) == str(scalar_err.value)
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_read_point_plans(tg0_read_table):
+    row = db.execute("select rowid, label from tg_rd where rowid = 3").fetchone()
+    assert (row["rowid"], row["label"]) == (3, "cross_line")
+
+    db.execute(
+        "create virtual table tg_rdp using tg0(id text primary key, shape point)"
+    )
+    db.execute("insert into tg_rdp(id, shape) values ('a', 'POINT(1 1)')")
+    db.execute("insert into tg_rdp(id, shape) values ('b', 'POINT(2 2)')")
+    rows = execute_all(
+        db, "select id, tg_to_wkt(shape) as wkt from tg_rdp where id = 'b'"
+    )
+    assert rows == [{"id": "b", "wkt": "POINT(2 2)"}]
+    db.execute("drop table tg_rdp")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_read_multi_geometry_columns():
+    db.execute("create virtual table tg_rdm using tg0(center point, boundary polygon)")
+    db.execute(
+        "insert into tg_rdm(center, boundary) values "
+        "('POINT(2 2)', 'POLYGON((1 1, 3 1, 3 3, 1 3, 1 1))')"
+    )
+    db.execute(
+        "insert into tg_rdm(center, boundary) values "
+        "('POINT(20 20)', 'POLYGON((19 19, 21 19, 21 21, 19 21, 19 19))')"
+    )
+    q = "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"
+    assert (
+        db.execute(
+            "select count(*) from tg_rdm where tg_within(center, ?)", [q]
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        db.execute(
+            "select count(*) from tg_rdm where tg_within(boundary, ?)", [q]
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        db.execute(
+            "select count(*) from tg_rdm where tg_intersects(boundary, 'POINT(20 20)')"
+        ).fetchone()[0]
+        == 1
+    )
+    db.execute("drop table tg_rdm")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_read_eqp(tg0_read_table, snapshot):
+    # idxStr surfaces in the VIRTUAL TABLE INDEX detail: header '1' fullscan /
+    # '2' point / '3' predicate + [kind][geom-col][op][strategy]
+    plans = {
+        "fullscan": "select * from tg_rd",
+        "point rowid": "select * from tg_rd where rowid = 1",
+        "overlap (intersects)": "select * from tg_rd "
+        "where tg_intersects(shape, 'POINT(1 1)')",
+        "contains (contains)": "select * from tg_rd "
+        "where tg_contains(shape, 'POINT(1 1)')",
+        "within (within)": "select * from tg_rd "
+        "where tg_within(shape, 'POINT(1 1)')",
+        "fullscan-exact (disjoint)": "select * from tg_rd "
+        "where tg_disjoint(shape, 'POINT(1 1)')",
+        "two predicates keep one": "select * from tg_rd "
+        "where tg_disjoint(shape, 'POINT(1 1)') and tg_touches(shape, 'POINT(2 2)')",
+        "data column predicate not intercepted": "select * from tg_rd "
+        "where tg_intersects(label, 'POINT(1 1)')",
+    }
+    for name, sql in plans.items():
+        assert explain_query_plan(sql) == snapshot(name=name)
+
+    db.execute(
+        "create virtual table tg_rdp using tg0(id text primary key, shape point)"
+    )
+    assert explain_query_plan("select * from tg_rdp where id = 'a'") == snapshot(
+        name="point text pk"
+    )
+    db.execute("drop table tg_rdp")
+
+    db.execute("create virtual table tg_rdm using tg0(center point, boundary polygon)")
+    assert explain_query_plan(
+        "select * from tg_rdm where tg_intersects(center, 'POINT(1 1)')"
+    ) == snapshot(name="multi-geometry first column")
+    assert explain_query_plan(
+        "select * from tg_rdm where tg_intersects(boundary, 'POINT(1 1)')"
+    ) == snapshot(name="multi-geometry second column")
+    db.execute("drop table tg_rdm")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_read_float32_ulp_regression():
+    import struct
+
+    # The rtree rounds stored bboxes outward to float32. Pick a candidate
+    # whose true bbox sits inside the query bbox by less than one float32
+    # ulp: both 10.000000001 (query min corner) and 10.000000002 (candidate
+    # min corner) round DOWN to 10.0 in float32, so the stored rtree minX
+    # (10.0) lands below the exact query minX (10.000000001). Unless the
+    # query bbox is also rounded outward before binding, the within-strategy
+    # prefilter would false-negative this true match.
+    q_min, cand_min = 10.000000001, 10.000000002
+    as_f32 = lambda v: struct.unpack("f", struct.pack("f", v))[0]
+    assert as_f32(q_min) == 10.0 and as_f32(cand_min) == 10.0
+    assert 10.0 < q_min < cand_min
+
+    query = (
+        f"POLYGON(({q_min} {q_min}, 20 {q_min}, 20 20, {q_min} 20, {q_min} {q_min}))"
+    )
+    candidate = (
+        f"POLYGON(({cand_min} {cand_min}, 11 {cand_min}, 11 11, "
+        f"{cand_min} 11, {cand_min} {cand_min}))"
+    )
+    db.execute("create virtual table tg_ulp using tg0(shape polygon)")
+    db.execute("insert into tg_ulp(shape) values (?)", [candidate])
+    # sanity: the exact predicates agree this is a true match
+    assert tuple(
+        db.execute(
+            "select tg_within(?, ?), tg_coveredby(?, ?)",
+            [candidate, query, candidate, query],
+        ).fetchone()
+    ) == (1, 1)
+    assert (
+        db.execute(
+            "select count(*) from tg_ulp where tg_within(shape, ?)", [query]
+        ).fetchone()[0]
+        == 1
+    )
+    assert (
+        db.execute(
+            "select count(*) from tg_ulp where tg_coveredby(shape, ?)", [query]
+        ).fetchone()[0]
+        == 1
+    )
+    db.execute("drop table tg_ulp")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_read_knn_reserved(tg0_read_table, snapshot):
+    # the MATCH / distance-constraint surface is reserved for KNN (plan '4')
+    with pytest.raises(sqlite3.OperationalError) as excinfo:
+        db.execute("select * from tg_rd where shape match 'POINT(1 1)'").fetchall()
+    assert str(excinfo.value) == snapshot(name="match")
+    with pytest.raises(sqlite3.OperationalError) as excinfo:
+        db.execute("select * from tg_rd where distance < 10").fetchall()
+    assert str(excinfo.value) == snapshot(name="distance constraint")
 
 
 @pytest.mark.skip(reason="TODO not needeD?")

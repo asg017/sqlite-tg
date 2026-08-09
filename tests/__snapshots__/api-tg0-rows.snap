@@ -1,0 +1,52 @@
+Source: ../api.sql
+select id, label, typeof(shape), tg_to_wkt(shape) from tg_demo1;
+---
+{
+	 id: 1
+	 label: 'in_poly'
+	 typeof(shape): 'blob'
+	 tg_to_wkt(shape): 'POLYGON((2 2,4 2,4 4,2 4,2 2))'
+}
+{
+	 id: 2
+	 label: 'corner_poly'
+	 typeof(shape): 'blob'
+	 tg_to_wkt(shape): 'POLYGON((10 10,12 10,12 12,10 12,10 10))'
+}
+{
+	 id: 3
+	 label: 'cross_line'
+	 typeof(shape): 'blob'
+	 tg_to_wkt(shape): 'LINESTRING(-2 5,12 5)'
+}
+{
+	 id: 4
+	 label: 'far_poly'
+	 typeof(shape): 'blob'
+	 tg_to_wkt(shape): 'POLYGON((20 20,30 20,30 30,20 30,20 20))'
+}
+{
+	 id: 5
+	 label: 'cover_poly'
+	 typeof(shape): 'blob'
+	 tg_to_wkt(shape): 'POLYGON((-2 -2,12 -2,12 12,-2 12,-2 -2))'
+}
+{
+	 id: 6
+	 label: 'equal_poly'
+	 typeof(shape): 'blob'
+	 tg_to_wkt(shape): 'POLYGON((0 0,10 0,10 10,0 10,0 0))'
+}
+{
+	 id: 7
+	 label: 'in_point'
+	 typeof(shape): 'blob'
+	 tg_to_wkt(shape): 'POINT(5 5)'
+}
+{
+	 id: 8
+	 label: 'out_point'
+	 typeof(shape): 'blob'
+	 tg_to_wkt(shape): 'POINT(15 15)'
+}
+

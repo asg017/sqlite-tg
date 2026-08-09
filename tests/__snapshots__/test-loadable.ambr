@@ -428,6 +428,45 @@
 # name: test_tg0_old_syntax_migration_hint[bare identifier hint]
   "tg0 constructor error: could not parse 'tzid'. tg0's syntax changed in v0.0.1-alpha.22: columns now require types, and the _shape column was removed. Drop and recreate this table. See https://github.com/asg017/sqlite-tg/blob/main/docs.md#tg0 for details."
 # ---
+# name: test_tg0_read_eqp[contains (contains)]
+  'SCAN tg_rd VIRTUAL TABLE INDEX 0:3PACC'
+# ---
+# name: test_tg0_read_eqp[data column predicate not intercepted]
+  'SCAN tg_rd VIRTUAL TABLE INDEX 0:1'
+# ---
+# name: test_tg0_read_eqp[fullscan-exact (disjoint)]
+  'SCAN tg_rd VIRTUAL TABLE INDEX 0:3PADF'
+# ---
+# name: test_tg0_read_eqp[fullscan]
+  'SCAN tg_rd VIRTUAL TABLE INDEX 0:1'
+# ---
+# name: test_tg0_read_eqp[multi-geometry first column]
+  'SCAN tg_rdm VIRTUAL TABLE INDEX 0:3PAIO'
+# ---
+# name: test_tg0_read_eqp[multi-geometry second column]
+  'SCAN tg_rdm VIRTUAL TABLE INDEX 0:3PBIO'
+# ---
+# name: test_tg0_read_eqp[overlap (intersects)]
+  'SCAN tg_rd VIRTUAL TABLE INDEX 0:3PAIO'
+# ---
+# name: test_tg0_read_eqp[point rowid]
+  'SCAN tg_rd VIRTUAL TABLE INDEX 0:2'
+# ---
+# name: test_tg0_read_eqp[point text pk]
+  'SCAN tg_rdp VIRTUAL TABLE INDEX 0:2'
+# ---
+# name: test_tg0_read_eqp[two predicates keep one]
+  'SCAN tg_rd VIRTUAL TABLE INDEX 0:3PATO'
+# ---
+# name: test_tg0_read_eqp[within (within)]
+  'SCAN tg_rd VIRTUAL TABLE INDEX 0:3PAWW'
+# ---
+# name: test_tg0_read_knn_reserved[distance constraint]
+  'KNN queries are not supported on tg0 tables yet'
+# ---
+# name: test_tg0_read_knn_reserved[match]
+  'KNN queries are not supported on tg0 tables yet'
+# ---
 # name: test_tg0_reopen_connects[reopened shadow tables]
   list([
     dict({

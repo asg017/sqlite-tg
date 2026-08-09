@@ -1,0 +1,13 @@
+Source: ../api.sql
+select label from tg_demo1 where tg_within(shape, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))');
+---
+{
+	 label: 'in_poly'
+}
+{
+	 label: 'equal_poly'
+}
+{
+	 label: 'in_point'
+}
+

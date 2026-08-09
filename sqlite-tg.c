@@ -6,6 +6,7 @@ SQLITE_EXTENSION_INIT1
 #include "sqlite-tg.h"
 #include <ctype.h>
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2622,6 +2623,39 @@ static sqlite3_module tg_bboxModule = {
 // clang-format on
 
 // ---------------------------------------------------------------------------
+// tg0 idxStr encoding (plan.md "Query plans / idxStr encoding")
+//
+// idxNum is unused. idxStr is a header character naming the plan, followed by
+// one fixed-width 4-character block per consumed argv slot:
+//
+//   idxStr := header block*
+//   header := '1'   -- fullscan: iterate t_content directly, no argv
+//           | '2'   -- point: rowid EQ / text-pk id EQ, argv[0] = the key
+//           | '3'   -- predicate: rtree prefilter + exact tg predicate,
+//                      argv[0] = the query geometry
+//           | '4'   -- reserved for KNN (decision 9); never emitted today
+//   block  := [kind][column][op][strategy]
+//
+// The only block kind so far is 'P', a predicate block ('&' pushdown blocks
+// arrive with ticket 05): [column] is 'A' + the geometry column's index into
+// geometry_columns[], [op] identifies the tg predicate, and [strategy] the
+// rtree prefilter (see tg0_predicate_plans[] for both alphabets).
+// ---------------------------------------------------------------------------
+
+#define TG0_PLAN_FULLSCAN '1'
+#define TG0_PLAN_POINT '2'
+#define TG0_PLAN_PREDICATE '3'
+#define TG0_PLAN_KNN '4' // reserved, unimplemented
+
+#define TG0_IDXSTR_KIND_PREDICATE 'P'
+
+// rtree prefilter strategies for predicate plans
+#define TG0_STRATEGY_OVERLAP 'O'  // stored bbox overlaps the query bbox
+#define TG0_STRATEGY_CONTAINS 'C' // stored bbox contains the query bbox
+#define TG0_STRATEGY_WITHIN 'W'   // stored bbox within the query bbox
+#define TG0_STRATEGY_FULLSCAN 'F' // no prefilter (disjoint): exact test only
+
+// ---------------------------------------------------------------------------
 // tg0 constructor parser
 //
 // Hand-rolled tokenizer + parsers for the arguments of
@@ -3390,10 +3424,65 @@ typedef struct tg0_cursor tg0_cursor;
 struct tg0_cursor {
   sqlite3_vtab_cursor base;
   // current scan over t_content (joined with t_rowids on text-primary-key
-  // tables), prepared by tg0Filter. NULL before the first xFilter call
+  // tables and, on predicate plans, the geometry column's rtree), prepared
+  // by tg0Filter. NULL before the first xFilter call
   sqlite3_stmt *stmt;
+  // 1 only on real scan completion (SQLITE_DONE). A mid-scan step failure
+  // returns its error from xFilter/xNext and leaves eof unset, so the
+  // failure can never read as a clean end-of-results
   int eof;
+  // the current plan's idxStr header character (TG0_PLAN_*)
+  char plan;
+  // predicate plans only: index into p->geometry_columns[] of the scanned
+  // geometry column, the exact tg predicate applied per candidate row, and
+  // the parsed query geometry (owned; freed on re-Filter and xClose)
+  int predGeomIdx;
+  GeomPredicateFunc predFunc;
+  struct tg_geom *queryGeom;
 };
+
+// One row per intercepted predicate: the xFindFunction constraint op, its
+// idxStr [op] letter, its rtree prefilter [strategy] letter (plan.md decision
+// 8), and the exact tg predicate applied to each candidate row. The exact
+// predicate is always called as func(candidate, query), matching
+// tg_predicate_impl's tg_pred(column-value, argument) argument order.
+static const struct {
+  int constraintOp; // TG0_FUNC_*
+  char opChar;
+  char strategy;
+  GeomPredicateFunc func;
+} tg0_predicate_plans[] = {
+    {TG0_FUNC_INTERSECTS, 'I', TG0_STRATEGY_OVERLAP, tg_geom_intersects},
+    {TG0_FUNC_TOUCHES, 'T', TG0_STRATEGY_OVERLAP, tg_geom_touches},
+    {TG0_FUNC_EQUALS, 'E', TG0_STRATEGY_OVERLAP, tg_geom_equals},
+    {TG0_FUNC_CONTAINS, 'C', TG0_STRATEGY_CONTAINS, tg_geom_contains},
+    {TG0_FUNC_COVERS, 'V', TG0_STRATEGY_CONTAINS, tg_geom_covers},
+    {TG0_FUNC_WITHIN, 'W', TG0_STRATEGY_WITHIN, tg_geom_within},
+    {TG0_FUNC_COVEREDBY, 'B', TG0_STRATEGY_WITHIN, tg_geom_coveredby},
+    {TG0_FUNC_DISJOINT, 'D', TG0_STRATEGY_FULLSCAN, tg_geom_disjoint},
+};
+#define TG0_NUM_PREDICATE_PLANS                                                \
+  ((int)(sizeof(tg0_predicate_plans) / sizeof(tg0_predicate_plans[0])))
+
+// The tg0_predicate_plans[] row for an xBestIndex constraint op, or -1.
+static int tg0_predicate_plan_by_op(int constraintOp) {
+  for (int i = 0; i < TG0_NUM_PREDICATE_PLANS; i++) {
+    if (tg0_predicate_plans[i].constraintOp == constraintOp) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// The tg0_predicate_plans[] row for an idxStr [op] letter, or -1.
+static int tg0_predicate_plan_by_char(char opChar) {
+  for (int i = 0; i < TG0_NUM_PREDICATE_PLANS; i++) {
+    if (tg0_predicate_plans[i].opChar == opChar) {
+      return i;
+    }
+  }
+  return -1;
+}
 
 void tg_vtab_set_error(sqlite3_vtab *pVTab, const char *zFormat, ...) {
   va_list args;
@@ -3678,6 +3767,7 @@ static int tg0Open(sqlite3_vtab *p, sqlite3_vtab_cursor **ppCursor) {
 static int tg0Close(sqlite3_vtab_cursor *cur) {
   tg0_cursor *pCur = (tg0_cursor *)cur;
   sqlite3_finalize(pCur->stmt);
+  tg_geom_free(pCur->queryGeom);
   sqlite3_free(pCur);
   return SQLITE_OK;
 }
@@ -3686,7 +3776,8 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
   tg0_vtab *p = (tg0_vtab *)pVtab;
   int iPointTerm = -1;
   int iPredicateTerm = -1;
-  int predicate = 0;
+  int predicatePlan = -1;
+  int predicateGeomIdx = -1;
 
   for (int i = 0; i < pIdxInfo->nConstraint; i++) {
     if (!pIdxInfo->aConstraint[i].usable)
@@ -3694,6 +3785,21 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
 
     int iColumn = pIdxInfo->aConstraint[i].iColumn;
     int op = pIdxInfo->aConstraint[i].op;
+
+    // the KNN surface (plan '4', decision 9) is reserved but unimplemented:
+    // its query shapes — MATCH on a geometry column, or any constraint on
+    // the hidden distance column — get a clear error instead of a crash.
+    // LIMIT/OFFSET constraints are excluded: their iColumn is documented as
+    // meaningless and must not be mistaken for the distance column
+    if (op == SQLITE_INDEX_CONSTRAINT_MATCH ||
+        (iColumn == tg0_column_distance_idx(p) &&
+         op != SQLITE_INDEX_CONSTRAINT_LIMIT &&
+         op != SQLITE_INDEX_CONSTRAINT_OFFSET)) {
+      tg_vtab_set_error(pVtab, "KNN queries are not supported on tg0 tables "
+                               "yet");
+      return SQLITE_ERROR;
+    }
+
     // rowid EQ — or primary key EQ, the declared primary key is always
     // column 0 — becomes a single content-table point lookup
     if (op == SQLITE_INDEX_CONSTRAINT_EQ &&
@@ -3703,55 +3809,81 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
       }
       continue;
     }
-    if (op == TG0_FUNC_INTERSECTS || op == TG0_FUNC_DISJOINT ||
-        op == TG0_FUNC_CONTAINS || op == TG0_FUNC_WITHIN ||
-        op == TG0_FUNC_COVERS || op == TG0_FUNC_COVEREDBY ||
-        op == TG0_FUNC_TOUCHES || op == TG0_FUNC_EQUALS) {
-      if (iPredicateTerm >= 0) {
-        sqlite3_free(pVtab->zErrMsg);
-        pVtab->zErrMsg = sqlite3_mprintf(
-            "only 1 predicate is allowed on tg0 WHERE clauses.");
-        return SQLITE_ERROR;
+
+    int iPlan = tg0_predicate_plan_by_op(op);
+    if (iPlan >= 0) {
+      tg0_user_column_kind kind;
+      int idx;
+      // only intercept a predicate whose first argument is one of this
+      // table's geometry columns. Predicates on the primary key or on data
+      // columns are left unconsumed, and run as ordinary scalar functions
+      // over the values xColumn returns — exactly like outside a tg0 WHERE
+      // clause (fixes the old aux-interception bug)
+      if (tg0_column_lookup(p, iColumn, &kind, &idx) != SQLITE_OK ||
+          kind != TG0_USER_COLUMN_KIND_GEOMETRY) {
+        continue;
       }
-      iPredicateTerm = i;
-      predicate = op;
+      // consume exactly one predicate for the rtree plan, preferring the
+      // first non-disjoint one: disjoint's matches live outside the query
+      // bbox, so its prefilter is a fullscan. Every other predicate stays
+      // unconsumed and SQLite post-evaluates it as a scalar function over
+      // the returned WKB — multiple predicates in one WHERE clause simply
+      // intersect (decision 8)
+      if (iPredicateTerm < 0 ||
+          (tg0_predicate_plans[predicatePlan].strategy ==
+               TG0_STRATEGY_FULLSCAN &&
+           tg0_predicate_plans[iPlan].strategy != TG0_STRATEGY_FULLSCAN)) {
+        iPredicateTerm = i;
+        predicatePlan = iPlan;
+        predicateGeomIdx = idx;
+      }
     }
   }
+
+  char *idxStr;
   if (iPointTerm >= 0) {
-    pIdxInfo->idxStr = (char *)"point";
+    idxStr = sqlite3_mprintf("%c", TG0_PLAN_POINT);
     pIdxInfo->aConstraintUsage[iPointTerm].argvIndex = 1;
     pIdxInfo->estimatedCost = 1.0;
     pIdxInfo->estimatedRows = 1;
   } else if (iPredicateTerm >= 0) {
-    pIdxInfo->idxStr = (char *)"predicate";
-    pIdxInfo->idxNum = predicate;
+    idxStr = sqlite3_mprintf("%c%c%c%c%c", TG0_PLAN_PREDICATE,
+                             TG0_IDXSTR_KIND_PREDICATE, 'A' + predicateGeomIdx,
+                             tg0_predicate_plans[predicatePlan].opChar,
+                             tg0_predicate_plans[predicatePlan].strategy);
     pIdxInfo->aConstraintUsage[iPredicateTerm].argvIndex = 1;
     pIdxInfo->aConstraintUsage[iPredicateTerm].omit = 1;
     pIdxInfo->estimatedCost = 30.0;
     pIdxInfo->estimatedRows = 10;
   } else {
-    pIdxInfo->idxStr = (char *)"fullscan";
+    idxStr = sqlite3_mprintf("%c", TG0_PLAN_FULLSCAN);
     pIdxInfo->estimatedCost = 3000000.0;
     pIdxInfo->estimatedRows = 100000;
   }
+  if (!idxStr) {
+    return SQLITE_NOMEM;
+  }
+  pIdxInfo->idxStr = idxStr;
+  pIdxInfo->needToFreeIdxStr = 1;
 
   return SQLITE_OK;
 }
 
 // ---------------------------------------------------------------------------
-// tg0 minimal read path.
+// tg0 read path.
 //
-// Fullscans and rowid/primary-key point lookups run directly against
-// t_content (joined with t_rowids on text-primary-key tables). This is the
-// minimum surface SQLite needs to drive DELETE and UPDATE statements — both
-// scan the table to find their target rows, and UPDATE fetches values it
-// needs through xColumn. Predicate-driven scans (tg_intersects(...) etc. in
-// a WHERE clause) still error until the full xBestIndex/xFilter rework with
-// rtree prefilters lands in the read-path change.
+// Every plan scans t_content (joined with t_rowids on text-primary-key
+// tables) through the same SELECT shape; the plans differ only in how the
+// candidate rows are narrowed:
+//
+//   fullscan  ('1'): iterate t_content directly.
+//   point     ('2'): WHERE c.rowid = ?1 (or r.id = ?1 for text pks).
+//   predicate ('3'): join the geometry column's rtree on a bbox condition
+//                    per the strategy letter, then apply the exact tg
+//                    predicate to each candidate row in tg0_cursor_step —
+//                    the rtree is only ever a prefilter, correctness comes
+//                    from the exact test.
 // ---------------------------------------------------------------------------
-
-#define TG0_TEMPORARILY_UNAVAILABLE                                            \
-  "tg0 %s are temporarily unavailable while the tg0 rewrite lands"
 
 // Number of leading header columns (c.rowid, then r.id on text-primary-key
 // tables) in a tg0_cursor's content scan, before the geomNN/dataNN columns.
@@ -3759,37 +3891,109 @@ static int tg0_scan_header_columns(tg0_vtab *p) {
   return p->pkColumnType == SQLITE_TEXT ? 2 : 1;
 }
 
-// Advances the cursor's content scan one row, setting eof at the end.
+// Round v to the nearest float32-representable double at or below (down) /
+// at or above (up) v. Used to grow query bboxes outward before binding them
+// against rtree coordinates, mirroring the outward float32 rounding the
+// rtree module applies to stored bboxes.
+static double tg0_f32_down(double v) {
+  float f = (float)v;
+  if ((double)f > v) {
+    f = nextafterf(f, -INFINITY);
+  }
+  return (double)f;
+}
+static double tg0_f32_up(double v) {
+  float f = (float)v;
+  if ((double)f < v) {
+    f = nextafterf(f, INFINITY);
+  }
+  return (double)f;
+}
+
+// Advances the cursor's scan to the next result row, setting eof at the end.
+// On predicate plans this steps until a candidate passes the exact tg
+// predicate: the candidate's stored WKB is parsed with the geometry column's
+// indexing= option (decision 7) and tested as func(candidate, query) —
+// tg_predicate_impl's argument order for tg_pred(column-value, argument).
+// A step or parse failure returns its error with eof still unset, so a
+// mid-scan failure never reads as a clean end of results.
 static int tg0_cursor_step(tg0_cursor *pCur) {
   tg0_vtab *p = (tg0_vtab *)pCur->base.pVtab;
-  int rc = sqlite3_step(pCur->stmt);
-  if (rc == SQLITE_ROW) {
-    return SQLITE_OK;
+  while (1) {
+    int rc = sqlite3_step(pCur->stmt);
+    if (rc == SQLITE_DONE) {
+      pCur->eof = 1;
+      return SQLITE_OK;
+    }
+    if (rc != SQLITE_ROW) {
+      tg_vtab_set_error(&p->base, "Error stepping tg0 content rows: %s",
+                        sqlite3_errmsg(p->db));
+      return rc;
+    }
+    if (pCur->plan != TG0_PLAN_PREDICATE) {
+      return SQLITE_OK;
+    }
+    // exact post-filter for predicate plans
+    int iScan = tg0_scan_header_columns(p) + pCur->predGeomIdx;
+    const void *wkb = sqlite3_column_blob(pCur->stmt, iScan);
+    int nWkb = sqlite3_column_bytes(pCur->stmt, iScan);
+    struct tg_geom *candidate = tg_parse_wkb_ix(
+        wkb, nWkb, p->geometry_columns[pCur->predGeomIdx].indexing);
+    if (tg_geom_error(candidate)) {
+      tg_vtab_set_error(&p->base, "Error parsing tg0 stored geometry in %s.%s: %s",
+                        p->tableName,
+                        p->geometry_columns[pCur->predGeomIdx].name,
+                        tg_geom_error(candidate));
+      tg_geom_free(candidate);
+      return SQLITE_ERROR;
+    }
+    bool matches = pCur->predFunc(candidate, pCur->queryGeom);
+    tg_geom_free(candidate);
+    if (matches) {
+      return SQLITE_OK;
+    }
   }
-  pCur->eof = 1;
-  if (rc == SQLITE_DONE) {
-    return SQLITE_OK;
-  }
-  tg_vtab_set_error(&p->base, "Error stepping tg0 content rows: %s",
-                    sqlite3_errmsg(p->db));
-  return rc;
 }
 
 static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
                      const char *idxStr, int argc, sqlite3_value **argv) {
   tg0_cursor *pCur = (tg0_cursor *)pVtabCursor;
   tg0_vtab *p = (tg0_vtab *)pVtabCursor->pVtab;
-  int isPoint = strcmp(idxStr, "point") == 0;
+  char strategy = 0;
+  struct tg_rect queryRect = {{0, 0}, {0, 0}};
   int rc;
 
+  // cursors are reused: tear down the previous scan's state entirely
   sqlite3_finalize(pCur->stmt);
   pCur->stmt = NULL;
+  tg_geom_free(pCur->queryGeom);
+  pCur->queryGeom = NULL;
+  pCur->predFunc = NULL;
+  pCur->predGeomIdx = -1;
   pCur->eof = 0;
+  pCur->plan = idxStr[0];
 
-  if (!isPoint && strcmp(idxStr, "fullscan") != 0) {
-    tg_vtab_set_error(&p->base, TG0_TEMPORARILY_UNAVAILABLE,
-                      "predicate queries");
-    return SQLITE_ERROR;
+  if (pCur->plan == TG0_PLAN_PREDICATE) {
+    // idxStr = '3' + [kind][geom-col][op][strategy], argv[0] = query geometry
+    int iPlan = strlen(idxStr) >= 5 ? tg0_predicate_plan_by_char(idxStr[3]) : -1;
+    pCur->predGeomIdx = strlen(idxStr) >= 5 ? idxStr[2] - 'A' : -1;
+    if (iPlan < 0 || idxStr[1] != TG0_IDXSTR_KIND_PREDICATE ||
+        pCur->predGeomIdx < 0 || pCur->predGeomIdx >= p->numGeometryColumns ||
+        argc < 1) {
+      tg_vtab_set_error(&p->base, "Internal tg0 error: bad predicate plan '%s'",
+                        idxStr);
+      return SQLITE_ERROR;
+    }
+    pCur->predFunc = tg0_predicate_plans[iPlan].func;
+    strategy = idxStr[4];
+
+    char *errmsg = NULL;
+    if (geomValue(argv[0], &pCur->queryGeom, &errmsg) != SQLITE_OK) {
+      tg_vtab_set_error(&p->base, "%s", errmsg);
+      sqlite3_free(errmsg);
+      return SQLITE_ERROR;
+    }
+    queryRect = tg_geom_rect(pCur->queryGeom);
   }
 
   sqlite3_str *str = sqlite3_str_new(NULL);
@@ -3811,10 +4015,30 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
                         " AS r ON r.rowid = c.rowid",
                         p->schemaName, p->tableName);
   }
-  if (isPoint) {
+  if (pCur->plan == TG0_PLAN_POINT) {
     sqlite3_str_appendall(str, p->pkColumnType == SQLITE_TEXT
                                    ? " WHERE r.id = ?1"
                                    : " WHERE c.rowid = ?1");
+  } else if (pCur->plan == TG0_PLAN_PREDICATE &&
+             strategy != TG0_STRATEGY_FULLSCAN) {
+    // rtree bbox prefilter. Bind order: ?1=qminX ?2=qmaxX ?3=qminY ?4=qmaxY
+    sqlite3_str_appendf(str,
+                        " JOIN " TG0_SHADOW_RTREE_NAME " AS i ON i.id = c.rowid",
+                        p->schemaName, p->tableName, pCur->predGeomIdx);
+    switch (strategy) {
+    case TG0_STRATEGY_OVERLAP:
+      sqlite3_str_appendall(str, " WHERE i.minX <= ?2 AND i.maxX >= ?1"
+                                 " AND i.minY <= ?4 AND i.maxY >= ?3");
+      break;
+    case TG0_STRATEGY_CONTAINS:
+      sqlite3_str_appendall(str, " WHERE i.minX <= ?1 AND i.maxX >= ?2"
+                                 " AND i.minY <= ?3 AND i.maxY >= ?4");
+      break;
+    case TG0_STRATEGY_WITHIN:
+      sqlite3_str_appendall(str, " WHERE i.minX >= ?1 AND i.maxX <= ?2"
+                                 " AND i.minY >= ?3 AND i.maxY <= ?4");
+      break;
+    }
   }
   char *zSql = sqlite3_str_finish(str);
   if (!zSql) {
@@ -3827,8 +4051,35 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
                       sqlite3_errmsg(p->db));
     return SQLITE_ERROR;
   }
-  if (isPoint && argc > 0) {
+  if (pCur->plan == TG0_PLAN_POINT && argc > 0) {
     sqlite3_bind_value(pCur->stmt, 1, argv[0]);
+  } else if (pCur->plan == TG0_PLAN_PREDICATE &&
+             strategy != TG0_STRATEGY_FULLSCAN) {
+    // The rtree stores each bbox as float32 rounded *outward* (min
+    // coordinates toward -inf, max toward +inf — the rtree module's own
+    // rounding), so a stored bbox is a superset of the row's true float64
+    // bbox. The query bbox is grown outward to float32 the same way before
+    // binding (plan.md "Float32 caveat"):
+    //
+    // - WITHIN ('W', stored.min >= qmin AND stored.max <= qmax): required
+    //   for correctness. A true match's stored.min can round below an exact
+    //   qmin bind, which would false-negative it; binding
+    //   f32down(qmin)/f32up(qmax) keeps every outward-rounded stored bbox
+    //   inside the comparison.
+    // - CONTAINS ('C', stored.min <= qmin AND stored.max >= qmax): safe and
+    //   lossless. A true match already has stored.min <= true.min <= qmin,
+    //   and because stored values are float32, `stored.min <= f32down(qmin)`
+    //   admits exactly the same stored values as `stored.min <= qmin`
+    //   (f32down(qmin) is the largest float32 <= qmin) — likewise for max.
+    // - OVERLAP ('O'): grows the query bbox by under one float32 ulp per
+    //   edge, a harmless over-approximation.
+    //
+    // Any over-included candidate is discarded by the exact predicate in
+    // tg0_cursor_step, so outward rounding never changes results.
+    sqlite3_bind_double(pCur->stmt, 1, tg0_f32_down(queryRect.min.x));
+    sqlite3_bind_double(pCur->stmt, 2, tg0_f32_up(queryRect.max.x));
+    sqlite3_bind_double(pCur->stmt, 3, tg0_f32_down(queryRect.min.y));
+    sqlite3_bind_double(pCur->stmt, 4, tg0_f32_up(queryRect.max.y));
   }
   return tg0_cursor_step(pCur);
 }

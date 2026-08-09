@@ -1,0 +1,4 @@
+Source: ../api.sql
+select label from tg_demo1 where tg_equals(shape, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))');
+---
+'equal_poly'
