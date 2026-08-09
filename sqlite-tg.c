@@ -3263,21 +3263,23 @@ static int tg0_column_name_taken(tg0_vtab *p, const char *name, int nName) {
 }
 
 // Validates a newly parsed user column name against the reserved names and
-// the columns declared so far. Returns NULL when the name is fine, or an
-// sqlite3_mprintf'd error message.
-static char *tg0_check_column_name(tg0_vtab *p, const char *arg,
-                                   const char *name, int nName) {
+// the columns declared so far. Returns SQLITE_OK when the name is fine,
+// SQLITE_ERROR with *pzErr set to an sqlite3_mprintf'd message when it is
+// not, or SQLITE_NOMEM when building that message fails — so an OOM can
+// never read as the name having passed the check.
+static int tg0_check_column_name(tg0_vtab *p, const char *arg,
+                                 const char *name, int nName, char **pzErr) {
+  const char *zProblem;
   if (tg0_column_name_reserved(name, nName)) {
-    return sqlite3_mprintf(TG0_CONSTRUCTOR_ERROR
-                           "reserved column name '%.*s' in '%s'",
-                           nName, name, arg);
+    zProblem = "reserved";
+  } else if (tg0_column_name_taken(p, name, nName)) {
+    zProblem = "duplicate";
+  } else {
+    return SQLITE_OK;
   }
-  if (tg0_column_name_taken(p, name, nName)) {
-    return sqlite3_mprintf(TG0_CONSTRUCTOR_ERROR
-                           "duplicate column name '%.*s' in '%s'",
-                           nName, name, arg);
-  }
-  return NULL;
+  *pzErr = sqlite3_mprintf(TG0_CONSTRUCTOR_ERROR "%s column name '%.*s' in '%s'",
+                           zProblem, nName, name, arg);
+  return *pzErr ? SQLITE_ERROR : SQLITE_NOMEM;
 }
 
 // ---------------------------------------------------------------------------
@@ -3608,8 +3610,11 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
             arg);
         goto error;
       }
-      *pzErr = tg0_check_column_name(pNew, arg, cName, nName);
-      if (*pzErr) {
+      rc = tg0_check_column_name(pNew, arg, cName, nName, pzErr);
+      if (rc == SQLITE_NOMEM) {
+        goto nomem;
+      }
+      if (rc != SQLITE_OK) {
         goto error;
       }
       pNew->pkColumnType = columnType;
@@ -3636,8 +3641,11 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
             arg, TG0_MAX_GEOMETRY_COLUMNS);
         goto error;
       }
-      *pzErr = tg0_check_column_name(pNew, arg, cName, nName);
-      if (*pzErr) {
+      rc = tg0_check_column_name(pNew, arg, cName, nName, pzErr);
+      if (rc == SQLITE_NOMEM) {
+        goto nomem;
+      }
+      if (rc != SQLITE_OK) {
         goto error;
       }
       struct tg0_geometry_column *column =
@@ -3671,8 +3679,11 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
             arg, TG0_MAX_DATA_COLUMNS);
         goto error;
       }
-      *pzErr = tg0_check_column_name(pNew, arg, cName, nName);
-      if (*pzErr) {
+      rc = tg0_check_column_name(pNew, arg, cName, nName, pzErr);
+      if (rc == SQLITE_NOMEM) {
+        goto nomem;
+      }
+      if (rc != SQLITE_OK) {
         goto error;
       }
       struct tg0_data_column *column =
@@ -4269,8 +4280,9 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
                       sqlite3_errmsg(p->db));
     return SQLITE_ERROR;
   }
+  rc = SQLITE_OK;
   if (pCur->plan == TG0_PLAN_POINT && argc > 0) {
-    sqlite3_bind_value(pCur->stmt, 1, argv[0]);
+    rc = sqlite3_bind_value(pCur->stmt, 1, argv[0]);
   } else if (pCur->plan == TG0_PLAN_PREDICATE &&
              strategy != TG0_STRATEGY_FULLSCAN) {
     // The rtree stores each bbox as float32 rounded *outward* (min
@@ -4297,12 +4309,19 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
     sqlite3_bind_double(pCur->stmt, 1, tg0_f32_down(queryRect.min.x));
     sqlite3_bind_double(pCur->stmt, 2, tg0_f32_up(queryRect.max.x));
     sqlite3_bind_double(pCur->stmt, 3, tg0_f32_down(queryRect.min.y));
-    sqlite3_bind_double(pCur->stmt, 4, tg0_f32_up(queryRect.max.y));
+    rc = sqlite3_bind_double(pCur->stmt, 4, tg0_f32_up(queryRect.max.y));
   }
-  for (int k = 0; k < nPushdown; k++) {
+  for (int k = 0; k < nPushdown && rc == SQLITE_OK; k++) {
     if (pushdownInclude[k]) {
-      sqlite3_bind_value(pCur->stmt, bindBase + k, argv[argvOffset + k]);
+      rc = sqlite3_bind_value(pCur->stmt, bindBase + k, argv[argvOffset + k]);
     }
+  }
+  if (rc != SQLITE_OK) {
+    // a failed bind (OOM copying an argv value) must error out: stepping the
+    // half-bound statement would silently scan with NULL parameters
+    tg_vtab_set_error(&p->base, "Error binding tg0 content scan: %s",
+                      sqlite3_errmsg(p->db));
+    return rc;
   }
   return tg0_cursor_step(pCur);
 }
@@ -4530,17 +4549,30 @@ static int tg0_resolve_rowid(tg0_vtab *p, sqlite3_value *idValue,
   if (rc != SQLITE_OK) {
     return rc;
   }
-  sqlite3_bind_value(stmt, 1, idValue);
+  rc = sqlite3_bind_value(stmt, 1, idValue);
+  if (rc != SQLITE_OK) {
+    tg_vtab_set_error(&p->base, "Error binding tg0 rowids lookup: %s",
+                      sqlite3_errmsg(p->db));
+    sqlite3_finalize(stmt);
+    return rc;
+  }
   rc = sqlite3_step(stmt);
-  if (rc != SQLITE_ROW) {
+  if (rc == SQLITE_ROW) {
+    *out_rowid = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return SQLITE_OK;
+  }
+  if (rc == SQLITE_DONE) {
+    // clean scan, no mapping row: the primary key does not exist
     tg_vtab_set_error(&p->base, "Could not find a tg0 row with primary key %Q",
                       (const char *)sqlite3_value_text(idValue));
     sqlite3_finalize(stmt);
     return SQLITE_ERROR;
   }
-  *out_rowid = sqlite3_column_int64(stmt, 0);
+  tg_vtab_set_error(&p->base, "Error looking up tg0 primary key: %s",
+                    sqlite3_errmsg(p->db));
   sqlite3_finalize(stmt);
-  return SQLITE_OK;
+  return rc;
 }
 
 // The hidden distance column (reserved for KNN) is read-only: only NULL or
@@ -4646,7 +4678,12 @@ static int tg0_write_insert(tg0_vtab *p, int argc, sqlite3_value **argv,
     if (rc != SQLITE_OK) {
       goto done;
     }
-    sqlite3_bind_value(stmt, 1, idValue);
+    rc = sqlite3_bind_value(stmt, 1, idValue);
+    if (rc != SQLITE_OK) {
+      tg_vtab_set_error(&p->base, "Error binding tg0 rowids insert: %s",
+                        sqlite3_errmsg(p->db));
+      goto done;
+    }
     // a duplicate id surfaces here as the id column's UNIQUE violation
     rc = tg0_write_step(p, stmt, "Error inserting tg0 primary key");
     stmt = NULL;
@@ -5017,6 +5054,196 @@ static int tg0FindFunction(sqlite3_vtab *pVtab, int nArg, const char *zName,
   return 0;
 };
 
+// xRename: `ALTER TABLE ... RENAME TO zNew` renames every shadow table to
+// the new name's prefix — info, content, one rtree per geometry column, and
+// rowids for text-primary-key tables. Renaming each t_rtreeNN (an rtree
+// virtual table) triggers the rtree module's own xRename, which moves its
+// _node/_parent/_rowid shadow tables along with it. On failure the error is
+// reported on the vtab and SQLite rolls back the containing ALTER TABLE
+// statement, un-renaming whatever shadow tables already moved.
+static int tg0Rename(sqlite3_vtab *pVtab, const char *zNew) {
+  tg0_vtab *p = (tg0_vtab *)pVtab;
+  char *zErrMsg = NULL;
+  int rc;
+
+  char *zNewName = sqlite3_mprintf("%s", zNew);
+  if (!zNewName) {
+    return SQLITE_NOMEM;
+  }
+
+  rc = tg0_shadow_sql(p->db,
+                      sqlite3_mprintf("ALTER TABLE " TG0_SHADOW_INFO_NAME
+                                      " RENAME TO \"%w_info\"",
+                                      p->schemaName, p->tableName, zNew),
+                      "Could not rename the tg0 info shadow table", &zErrMsg);
+  if (rc == SQLITE_OK) {
+    rc = tg0_shadow_sql(p->db,
+                        sqlite3_mprintf("ALTER TABLE " TG0_SHADOW_CONTENT_NAME
+                                        " RENAME TO \"%w_content\"",
+                                        p->schemaName, p->tableName, zNew),
+                        "Could not rename the tg0 content shadow table",
+                        &zErrMsg);
+  }
+  for (int i = 0; i < p->numGeometryColumns && rc == SQLITE_OK; i++) {
+    rc = tg0_shadow_sql(
+        p->db,
+        sqlite3_mprintf("ALTER TABLE " TG0_SHADOW_RTREE_NAME
+                        " RENAME TO \"%w_rtree%02d\"",
+                        p->schemaName, p->tableName, i, zNew, i),
+        "Could not rename a tg0 rtree shadow table", &zErrMsg);
+  }
+  if (rc == SQLITE_OK && p->pkColumnType == SQLITE_TEXT) {
+    rc = tg0_shadow_sql(p->db,
+                        sqlite3_mprintf("ALTER TABLE " TG0_SHADOW_ROWIDS_NAME
+                                        " RENAME TO \"%w_rowids\"",
+                                        p->schemaName, p->tableName, zNew),
+                        "Could not rename the tg0 rowids shadow table",
+                        &zErrMsg);
+  }
+  if (rc != SQLITE_OK) {
+    sqlite3_free(zNewName);
+    sqlite3_free(pVtab->zErrMsg);
+    pVtab->zErrMsg = zErrMsg;
+    return rc;
+  }
+  // xRename receives the new table name; the vtab keeps serving this
+  // connection after the ALTER, so its shadow SQL must use the new prefix.
+  // The schema name never changes on a rename.
+  sqlite3_free(p->tableName);
+  p->tableName = zNewName;
+  return SQLITE_OK;
+}
+
+// Runs one integrity probe: zSql is an sqlite3_mprintf'd single-row
+// `SELECT count(*) ...`, freed here. On success *outCount is the count. A
+// NULL zSql or an OOM from SQLite is an internal malfunction (SQLITE_NOMEM);
+// any other prepare/step failure — a missing or malformed shadow table —
+// is itself an integrity problem, reported through *pzProblem with
+// SQLITE_OK, matching xIntegrity's only-malfunctions-error contract.
+static int tg0_integrity_probe(tg0_vtab *p, char *zSql, sqlite3_int64 *outCount,
+                               char **pzProblem) {
+  sqlite3_stmt *stmt = NULL;
+  int rc;
+  *outCount = 0;
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  if (rc == SQLITE_OK) {
+    rc = sqlite3_step(stmt);
+  }
+  if (rc == SQLITE_ROW) {
+    *outCount = sqlite3_column_int64(stmt, 0);
+    rc = SQLITE_OK;
+  } else if (rc == SQLITE_NOMEM) {
+    // fall through: internal malfunction
+  } else {
+    *pzProblem =
+        sqlite3_mprintf("tg0 table %s: integrity check query failed: %s",
+                        p->tableName, sqlite3_errmsg(p->db));
+    rc = *pzProblem ? SQLITE_OK : SQLITE_NOMEM;
+  }
+  sqlite3_finalize(stmt);
+  sqlite3_free(zSql);
+  return rc;
+}
+
+// xIntegrity (iVersion 4): PRAGMA integrity_check / quick_check hook.
+// Verifies the content↔rtree 1:1 invariant (decision 11: geometry columns
+// are NOT NULL, so every content row has exactly one entry in every rtree)
+// and, for text primary keys, the content↔rowids 1:1 mapping. The first
+// problem found is reported through *pzErr with SQLITE_OK — integrity_check
+// prints the message; only internal malfunctions return non-OK.
+static int tg0Integrity(sqlite3_vtab *pVtab, const char *zSchema,
+                        const char *zTabName, int mFlags, char **pzErr) {
+  tg0_vtab *p = (tg0_vtab *)pVtab;
+  sqlite3_int64 count;
+  int rc;
+  (void)zSchema;
+  (void)zTabName;
+  (void)mFlags;
+  *pzErr = NULL;
+
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    rc = tg0_integrity_probe(
+        p,
+        sqlite3_mprintf("SELECT count(*) FROM " TG0_SHADOW_CONTENT_NAME
+                        " AS c WHERE NOT EXISTS (SELECT 1 FROM "
+                        TG0_SHADOW_RTREE_NAME " AS i WHERE i.id = c.rowid)",
+                        p->schemaName, p->tableName, p->schemaName,
+                        p->tableName, i),
+        &count, pzErr);
+    if (rc != SQLITE_OK || *pzErr) {
+      return rc;
+    }
+    if (count > 0) {
+      *pzErr = sqlite3_mprintf(
+          "tg0 table %s: %lld content row(s) have no %s_rtree%02d entry "
+          "(geometry column \"%w\")",
+          p->tableName, count, p->tableName, i, p->geometry_columns[i].name);
+      return *pzErr ? SQLITE_OK : SQLITE_NOMEM;
+    }
+    rc = tg0_integrity_probe(
+        p,
+        sqlite3_mprintf("SELECT count(*) FROM " TG0_SHADOW_RTREE_NAME
+                        " AS i WHERE NOT EXISTS (SELECT 1 FROM "
+                        TG0_SHADOW_CONTENT_NAME " AS c WHERE c.rowid = i.id)",
+                        p->schemaName, p->tableName, i, p->schemaName,
+                        p->tableName),
+        &count, pzErr);
+    if (rc != SQLITE_OK || *pzErr) {
+      return rc;
+    }
+    if (count > 0) {
+      *pzErr = sqlite3_mprintf(
+          "tg0 table %s: %lld orphaned %s_rtree%02d entr%s with no content "
+          "row (geometry column \"%w\")",
+          p->tableName, count, p->tableName, i, count == 1 ? "y" : "ies",
+          p->geometry_columns[i].name);
+      return *pzErr ? SQLITE_OK : SQLITE_NOMEM;
+    }
+  }
+
+  if (p->pkColumnType == SQLITE_TEXT) {
+    rc = tg0_integrity_probe(
+        p,
+        sqlite3_mprintf("SELECT count(*) FROM " TG0_SHADOW_CONTENT_NAME
+                        " AS c WHERE NOT EXISTS (SELECT 1 FROM "
+                        TG0_SHADOW_ROWIDS_NAME " AS r WHERE r.rowid = c.rowid)",
+                        p->schemaName, p->tableName, p->schemaName,
+                        p->tableName),
+        &count, pzErr);
+    if (rc != SQLITE_OK || *pzErr) {
+      return rc;
+    }
+    if (count > 0) {
+      *pzErr = sqlite3_mprintf("tg0 table %s: %lld content row(s) have no "
+                               "%s_rowids primary key mapping",
+                               p->tableName, count, p->tableName);
+      return *pzErr ? SQLITE_OK : SQLITE_NOMEM;
+    }
+    rc = tg0_integrity_probe(
+        p,
+        sqlite3_mprintf("SELECT count(*) FROM " TG0_SHADOW_ROWIDS_NAME
+                        " AS r WHERE NOT EXISTS (SELECT 1 FROM "
+                        TG0_SHADOW_CONTENT_NAME " AS c WHERE c.rowid = r.rowid)",
+                        p->schemaName, p->tableName, p->schemaName,
+                        p->tableName),
+        &count, pzErr);
+    if (rc != SQLITE_OK || *pzErr) {
+      return rc;
+    }
+    if (count > 0) {
+      *pzErr = sqlite3_mprintf("tg0 table %s: %lld orphaned %s_rowids "
+                               "mapping row(s) with no content row",
+                               p->tableName, count, p->tableName);
+      return *pzErr ? SQLITE_OK : SQLITE_NOMEM;
+    }
+  }
+
+  return SQLITE_OK;
+}
+
 // Claims the tg0 shadow tables (info, content, rowids, rtreeNN) plus the
 // rtree module's own shadow tables underneath each bbox rtree (rtreeNN_node,
 // rtreeNN_parent, rtreeNN_rowid). zName is the suffix after the virtual
@@ -5038,31 +5265,52 @@ static int tg0ShadowName(const char *zName) {
          sqlite3_stricmp(zName, "_rowid") == 0;
 }
 
-static sqlite3_module tg0Module = {
-    /* iVersion      */ 3,
-    /* xCreate       */ tg0Create,
-    /* xConnect      */ tg0Connect,
-    /* xBestIndex    */ tg0BestIndex,
-    /* xDisconnect   */ tg0Disconnect,
-    /* xDestroy      */ tg0Destroy,
-    /* xOpen         */ tg0Open,
-    /* xClose        */ tg0Close,
-    /* xFilter       */ tg0Filter,
-    /* xNext         */ tg0Next,
-    /* xEof          */ tg0Eof,
-    /* xColumn       */ tg0Column,
-    /* xRowid        */ tg0Rowid,
-    /* xUpdate       */ tg0Update,
-    /* xBegin        */ 0,
-    /* xSync         */ 0,
-    /* xCommit       */ 0,
-    /* xRollback     */ 0,
-    /* xFindFunction */ tg0FindFunction,
-    /* xRename       */ 0, // TODO
-    /* xSavepoint    */ 0,
-    /* xRelease      */ 0,
-    /* xRollbackTo   */ 0,
-    /* xShadowName   */ tg0ShadowName};
+// The sqlite3_module fields shared by both tg0Module declarations below.
+// iVersion 4 declares the xIntegrity method (PRAGMA integrity_check
+// support, SQLite 3.44+); older hosts never read past xShadowName.
+#define TG0_MODULE_BASE_FIELDS                                                 \
+    /* iVersion      */ 4,                                                     \
+    /* xCreate       */ tg0Create,                                             \
+    /* xConnect      */ tg0Connect,                                            \
+    /* xBestIndex    */ tg0BestIndex,                                          \
+    /* xDisconnect   */ tg0Disconnect,                                         \
+    /* xDestroy      */ tg0Destroy,                                            \
+    /* xOpen         */ tg0Open,                                               \
+    /* xClose        */ tg0Close,                                              \
+    /* xFilter       */ tg0Filter,                                             \
+    /* xNext         */ tg0Next,                                               \
+    /* xEof          */ tg0Eof,                                                \
+    /* xColumn       */ tg0Column,                                             \
+    /* xRowid        */ tg0Rowid,                                              \
+    /* xUpdate       */ tg0Update,                                             \
+    /* xBegin        */ 0,                                                     \
+    /* xSync         */ 0,                                                     \
+    /* xCommit       */ 0,                                                     \
+    /* xRollback     */ 0,                                                     \
+    /* xFindFunction */ tg0FindFunction,                                       \
+    /* xRename       */ tg0Rename,                                             \
+    /* xSavepoint    */ 0,                                                     \
+    /* xRelease      */ 0,                                                     \
+    /* xRollbackTo   */ 0,                                                     \
+    /* xShadowName   */ tg0ShadowName
+
+#if SQLITE_VERSION_NUMBER >= 3044000
+static sqlite3_module tg0Module = {TG0_MODULE_BASE_FIELDS,
+                                   /* xIntegrity    */ tg0Integrity};
+#else
+// this sqlite3.h predates the xIntegrity field (added in SQLite 3.44), so
+// lay the iVersion-4 module struct out manually: the layouts are identical
+// (xIntegrity sits directly after xShadowName), a 3.44+ host loading this
+// build reads xIntegrity at exactly this offset, and older hosts stop at
+// xShadowName.
+static struct {
+  sqlite3_module base;
+  int (*xIntegrity)(sqlite3_vtab *pVTab, const char *zSchema,
+                    const char *zTabName, int mFlags, char **pzErr);
+} tg0ModuleWithIntegrity = {{TG0_MODULE_BASE_FIELDS},
+                            /* xIntegrity    */ tg0Integrity};
+#define tg0Module (*(sqlite3_module *)&tg0ModuleWithIntegrity)
+#endif
 #pragma endregion
 
 #pragma region entrypoint

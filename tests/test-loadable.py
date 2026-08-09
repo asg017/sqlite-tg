@@ -2524,6 +2524,163 @@ def test_tg0_pushdown_affinity(tg0_pushdown_table):
     db.execute("drop table tg_pd_plain")
 
 
+# ---------------------------------------------------------------------------
+# tg0 xRename: ALTER TABLE ... RENAME TO moves every shadow table (each
+# rtree rename cascades to its own _node/_parent/_rowid tables) and the vtab
+# keeps serving queries and writes under the new name.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_rename_plain(snapshot):
+    db.execute("create virtual table tg_rena using tg0(shape geometry)")
+    db.execute("insert into tg_rena(shape) values ('POINT(1 1)')")
+
+    db.execute("alter table tg_rena rename to tg_renb")
+
+    assert shadow_tables(db, "tg_renb") == snapshot(name="plain renamed shadow tables")
+    # the old name and every old shadow name are gone
+    assert (
+        db.execute(
+            "select count(*) from sqlite_master where name = 'tg_rena' "
+            "or name like 'tg\\_rena\\_%' escape '\\'"
+        ).fetchone()[0]
+        == 0
+    )
+    # predicate query, point lookup, and writes all work post-rename
+    assert execute_all(
+        db,
+        "select rowid, tg_to_wkt(shape) as wkt from tg_renb "
+        "where tg_intersects(shape, 'POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))')",
+    ) == [{"rowid": 1, "wkt": "POINT(1 1)"}]
+    assert execute_all(
+        db, "select tg_to_wkt(shape) as wkt from tg_renb where rowid = 1"
+    ) == [{"wkt": "POINT(1 1)"}]
+    db.execute("insert into tg_renb(shape) values ('POINT(2 2)')")
+    db.execute("update tg_renb set shape = 'POINT(3 3)' where rowid = 2")
+    db.execute("delete from tg_renb where rowid = 1")
+    assert execute_all(db, "select rowid, tg_to_wkt(shape) as wkt from tg_renb") == [
+        {"rowid": 2, "wkt": "POINT(3 3)"}
+    ]
+    db.execute("drop table tg_renb")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_rename_text_pk_multi_geometry(snapshot):
+    db.execute(
+        "create virtual table tg_rentpk using tg0("
+        "id text primary key, center point, boundary polygon, label text)"
+    )
+    for row in [
+        ("a", "POINT(1 1)", "POLYGON((0 0, 4 0, 4 4, 0 0))", "one"),
+        ("b", "POINT(9 9)", "POLYGON((8 8, 10 8, 10 10, 8 8))", "two"),
+    ]:
+        db.execute(
+            "insert into tg_rentpk(id, center, boundary, label) values (?, ?, ?, ?)",
+            row,
+        )
+    query = "POLYGON((0 0, 5 0, 5 5, 0 5, 0 0))"
+    predicate_sql = (
+        "select id, label from {} where tg_intersects(center, ?) order by id"
+    )
+    before = execute_all(db, predicate_sql.format("tg_rentpk"), [query])
+    count_before = db.execute("select count(*) from tg_rentpk").fetchone()[0]
+
+    db.execute("alter table tg_rentpk rename to tg_moved")
+
+    # every shadow table moved: info, content, rowids, one rtree per geometry
+    # column plus the rtree module's own _node/_parent/_rowid underneath each
+    assert shadow_tables(db, "tg_moved") == snapshot(
+        name="text pk multi-geometry renamed shadow tables"
+    )
+    assert (
+        db.execute(
+            "select count(*) from sqlite_master where name = 'tg_rentpk' "
+            "or name like 'tg\\_rentpk\\_%' escape '\\'"
+        ).fetchone()[0]
+        == 0
+    )
+    # data survives: row count and predicate results are identical pre/post
+    assert db.execute("select count(*) from tg_moved").fetchone()[0] == count_before
+    assert execute_all(db, predicate_sql.format("tg_moved"), [query]) == before
+    # point lookups and the full write path keep working post-rename
+    assert execute_all(
+        db, "select label, tg_to_wkt(center) as wkt from tg_moved where id = 'b'"
+    ) == [{"label": "two", "wkt": "POINT(9 9)"}]
+    db.execute(
+        "insert into tg_moved(id, center, boundary, label) values "
+        "('c', 'POINT(2 3)', 'POLYGON((2 2, 3 2, 3 3, 2 2))', 'three')"
+    )
+    db.execute("update tg_moved set label = 'two!' where id = 'b'")
+    db.execute("delete from tg_moved where id = 'a'")
+    assert execute_all(db, "select id, label from tg_moved order by id") == [
+        {"id": "b", "label": "two!"},
+        {"id": "c", "label": "three"},
+    ]
+    assert execute_all(db, predicate_sql.format("tg_moved"), [query]) == [
+        {"id": "c", "label": "three"}
+    ]
+    db.execute("drop table tg_moved")
+
+
+# ---------------------------------------------------------------------------
+# tg0 xIntegrity: PRAGMA integrity_check verifies the content↔rtree 1:1
+# invariant per geometry column, and the content↔rowids mapping on text
+# primary key tables. Shadow tables are corrupted directly via SQL, which is
+# allowed outside of SQLITE_DBCONFIG_DEFENSIVE mode.
+# ---------------------------------------------------------------------------
+
+SUPPORTS_VTAB_INTEGRITY = sqlite3.sqlite_version_info >= (3, 44, 0)
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+@pytest.mark.skipif(
+    not SUPPORTS_VTAB_INTEGRITY,
+    reason="PRAGMA integrity_check calls xIntegrity on SQLite 3.44+",
+)
+def test_tg0_integrity_check(snapshot):
+    db.execute(
+        "create virtual table tg_ic using tg0(id text primary key, shape geometry)"
+    )
+    db.execute("insert into tg_ic(id, shape) values ('a', 'POINT(1 1)')")
+    db.execute("insert into tg_ic(id, shape) values ('b', 'POINT(2 2)')")
+    assert db.execute("pragma integrity_check").fetchone()[0] == "ok"
+
+    # a content row whose bbox is missing from the rtree
+    db.execute("delete from tg_ic_rtree00 where id = 1")
+    assert db.execute("pragma integrity_check").fetchone()[0] == snapshot(
+        name="content row missing from rtree"
+    )
+    db.execute("insert into tg_ic_rtree00 values (1, 1, 1, 1, 1)")
+    assert db.execute("pragma integrity_check").fetchone()[0] == "ok"
+
+    # an rtree entry whose content row is gone
+    db.execute("delete from tg_ic_content where rowid = 2")
+    assert db.execute("pragma integrity_check").fetchone()[0] == snapshot(
+        name="orphaned rtree entry"
+    )
+
+    # rowids mapping rows whose content row is gone
+    db.execute("delete from tg_ic_rtree00 where id = 2")
+    assert db.execute("pragma integrity_check").fetchone()[0] == snapshot(
+        name="orphaned rowids mapping"
+    )
+    db.execute("delete from tg_ic_rowids where rowid = 2")
+    assert db.execute("pragma integrity_check").fetchone()[0] == "ok"
+
+    # a content row with no rowids mapping (text pk tables only)
+    db.execute(
+        "insert into tg_ic_content(rowid, geom00) values (9, ?)", [wkb("POINT(5 5)")]
+    )
+    db.execute("insert into tg_ic_rtree00 values (9, 5, 5, 5, 5)")
+    assert db.execute("pragma integrity_check").fetchone()[0] == snapshot(
+        name="content row missing rowids mapping"
+    )
+
+    db.execute("drop table tg_ic")
+    assert db.execute("pragma integrity_check").fetchone()[0] == "ok"
+
+
 @pytest.mark.skip(reason="TODO not needeD?")
 def test_coverage():
     current_module = inspect.getmodule(inspect.currentframe())

@@ -579,6 +579,17 @@ int main(int argc, char *argv[]) {
       // is consumed as an idxStr '&' block and prefilters the content scan
       "select label from temp.demo where tg_intersects(shape, "
       "'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))') and label <> 'nope'",
+      // ticket 06: ALTER TABLE RENAME moves every shadow table (each rtree
+      // rename cascades to its _node/_parent/_rowid tables) and the vtab
+      // keeps serving reads and writes under the new name
+      "alter table temp.demo rename to demo_renamed",
+      "select label from temp.demo_renamed where id = 2",
+      "select label from temp.demo_renamed where tg_intersects(shape, "
+      "'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))')",
+      "insert into temp.demo_renamed(label, shape, boundary) values "
+      "('three', 'POINT(0 1)', 'POLYGON((0 0, 1 0, 1 1, 0 0))')",
+      "delete from temp.demo_renamed where label = 'three'",
+      "alter table temp.demo_renamed rename to demo",
       "delete from temp.demo where id = 1",
       "delete from temp.demo",
       "drop table temp.demo",

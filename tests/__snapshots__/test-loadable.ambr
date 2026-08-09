@@ -425,6 +425,18 @@
     }),
   ])
 # ---
+# name: test_tg0_integrity_check[content row missing from rtree]
+  'tg0 table tg_ic: 1 content row(s) have no tg_ic_rtree00 entry (geometry column "shape")'
+# ---
+# name: test_tg0_integrity_check[content row missing rowids mapping]
+  'tg0 table tg_ic: 1 content row(s) have no tg_ic_rowids primary key mapping'
+# ---
+# name: test_tg0_integrity_check[orphaned rowids mapping]
+  'tg0 table tg_ic: 1 orphaned tg_ic_rowids mapping row(s) with no content row'
+# ---
+# name: test_tg0_integrity_check[orphaned rtree entry]
+  'tg0 table tg_ic: 1 orphaned tg_ic_rtree00 entry with no content row (geometry column "shape")'
+# ---
 # name: test_tg0_old_syntax_migration_hint[bare identifier hint]
   "tg0 constructor error: could not parse 'tzid'. tg0's syntax changed in v0.0.1-alpha.22: columns now require types, and the _shape column was removed. Drop and recreate this table. See https://github.com/asg017/sqlite-tg/blob/main/docs.md#tg0 for details."
 # ---
@@ -475,6 +487,82 @@
 # ---
 # name: test_tg0_read_knn_reserved[match]
   'KNN queries are not supported on tg0 tables yet'
+# ---
+# name: test_tg0_rename_plain[plain renamed shadow tables]
+  list([
+    dict({
+      'name': 'tg_renb_content',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_renb_info',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_renb_rtree00',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_renb_rtree00_node',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_renb_rtree00_parent',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_renb_rtree00_rowid',
+      'type': 'table',
+    }),
+  ])
+# ---
+# name: test_tg0_rename_text_pk_multi_geometry[text pk multi-geometry renamed shadow tables]
+  list([
+    dict({
+      'name': 'tg_moved_content',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_moved_info',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_moved_rowids',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_moved_rtree00',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_moved_rtree00_node',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_moved_rtree00_parent',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_moved_rtree00_rowid',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_moved_rtree01',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_moved_rtree01_node',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_moved_rtree01_parent',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_moved_rtree01_rowid',
+      'type': 'table',
+    }),
+  ])
 # ---
 # name: test_tg0_reopen_connects[reopened shadow tables]
   list([
