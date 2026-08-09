@@ -1549,6 +1549,134 @@ def test_tg0_old_syntax_migration_hint(snapshot):
     )
 
 
+# ---------------------------------------------------------------------------
+# tg0 shadow tables: t_info, t_content, one t_rtreeNN per geometry column,
+# and t_rowids for text primary keys.
+# ---------------------------------------------------------------------------
+
+
+def shadow_tables(connection, table):
+    # sqlite_master rows for `<table>_*` shadow tables (including the rtree
+    # module's own _node/_parent/_rowid tables underneath each bbox rtree).
+    # LIKE-escape the underscores so they don't match any character.
+    pattern = table.replace("_", "\\_") + "\\_%"
+    return execute_all(
+        connection,
+        "select name, type from sqlite_master where name like ? escape '\\' order by name",
+        [pattern],
+    )
+
+
+def table_sql(name):
+    return db.execute(
+        "select sql from sqlite_master where name = ?", [name]
+    ).fetchone()[0]
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_shadow_tables_no_pk(snapshot):
+    db.execute("create virtual table tg_shadow using tg0(shape geometry)")
+    assert shadow_tables(db, "tg_shadow") == snapshot(name="no pk shadow tables")
+    assert table_sql("tg_shadow_content") == snapshot(name="no pk content sql")
+    assert table_sql("tg_shadow_info") == snapshot(name="no pk info sql")
+    db.execute("drop table tg_shadow")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_shadow_tables_integer_pk(snapshot):
+    # integer primary keys alias the content table's rowid: no extra shadow
+    # table beyond the no-pk layout
+    db.execute(
+        "create virtual table tg_shadow_ipk using tg0("
+        "id integer primary key, shape point, label text)"
+    )
+    assert shadow_tables(db, "tg_shadow_ipk") == snapshot(
+        name="integer pk shadow tables"
+    )
+    assert table_sql("tg_shadow_ipk_content") == snapshot(name="integer pk content sql")
+    db.execute("drop table tg_shadow_ipk")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_shadow_tables_text_pk(snapshot):
+    # text primary keys additionally get a t_rowids mapping table that assigns
+    # the int64 rowids the rtrees and content table are keyed by
+    db.execute(
+        "create virtual table tg_shadow_tpk using tg0("
+        "id text primary key, shape point, label text)"
+    )
+    assert shadow_tables(db, "tg_shadow_tpk") == snapshot(name="text pk shadow tables")
+    assert table_sql("tg_shadow_tpk_content") == snapshot(name="text pk content sql")
+    assert table_sql("tg_shadow_tpk_rowids") == snapshot(name="text pk rowids sql")
+    db.execute("drop table tg_shadow_tpk")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_shadow_tables_multi_geometry(snapshot):
+    # one bbox rtree per geometry column; geomNN/dataNN numbering follows the
+    # declaration-kind order, independent of how they interleave
+    db.execute(
+        "create virtual table tg_shadow_multi using tg0("
+        "center point, label text, boundary polygon, height float, extent geometry)"
+    )
+    assert shadow_tables(db, "tg_shadow_multi") == snapshot(
+        name="multi geometry shadow tables"
+    )
+    assert table_sql("tg_shadow_multi_content") == snapshot(
+        name="multi geometry content sql"
+    )
+    db.execute("drop table tg_shadow_multi")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_info_create_version():
+    db.execute("create virtual table tg_shadow_v using tg0(shape point)")
+    version = db.execute("select tg_version()").fetchone()[0]
+    assert execute_all(db, "select key, value from tg_shadow_v_info") == [
+        {"key": "CREATE_VERSION", "value": version}
+    ]
+    db.execute("drop table tg_shadow_v")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_reopen_connects(tmp_path, snapshot):
+    # CREATE persists a table that xConnect (no DDL) can re-open from disk
+    path = str(tmp_path / "tg0.db")
+    db1 = connect(EXT_PATH, path)
+    db1.execute(
+        "create virtual table tg_reopen using tg0("
+        "id text primary key, shape point, label text)"
+    )
+    db1.commit()
+    db1.close()
+
+    db2 = connect(EXT_PATH, path)
+    assert execute_all(
+        db2, "select * from pragma_table_xinfo('tg_reopen')"
+    ) == snapshot(name="reopened table_xinfo")
+    assert shadow_tables(db2, "tg_reopen") == snapshot(name="reopened shadow tables")
+    db2.close()
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_drop_removes_shadow_tables(snapshot):
+    # the widest layout: text pk (rowids) + multiple geometry columns (rtrees)
+    db.execute(
+        "create virtual table tg_dropme using tg0("
+        "id text primary key, center point, boundary polygon, label text)"
+    )
+    assert shadow_tables(db, "tg_dropme") == snapshot(name="before drop")
+    db.execute("drop table tg_dropme")
+    assert shadow_tables(db, "tg_dropme") == []
+    assert (
+        execute_all(
+            db,
+            "select name from sqlite_master where name like 'tg\\_dropme%' escape '\\'",
+        )
+        == []
+    )
+
+
 @pytest.mark.skip(reason="TODO not needeD?")
 def test_coverage():
     current_module = inspect.getmodule(inspect.currentframe())

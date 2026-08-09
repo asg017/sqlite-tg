@@ -14,7 +14,7 @@
 //
 // Sections:
 //   1. OK statements, one per ownership pattern (constructors, pointer
-//      round-trips, each-vtabs, aggregates, the tg0 rtree table), each run
+//      round-trips, each-vtabs, aggregates, the tg0 shadow tables), each run
 //      three ways: sqlite3_exec to completion; prepare -> step once -> reset
 //      (abandons vtab cursors mid-iteration and unread result rows, so
 //      xClose / value destructors fire early); then re-run to completion on
@@ -344,10 +344,13 @@ static const char *OOM_SCENARIO[] = {
     "select tg_to_wkt(point) from tg_ring_points_each("
     "'POLYGON((0 0, 10 0, 10 10, 0 0))')",
     "select tg_to_wkt('not a geometry')", // error path under OOM too
-    // tg0 CREATE/table_xinfo/DROP only: this sweeps the constructor parse and
-    // tg0_free paths of the typed-column syntax. INSERT/SELECT are stubbed
-    // out mid-rewrite; write/read coverage returns in tickets 03/04.
-    "create virtual table temp.oom using tg0(label text, shape geometry)",
+    // tg0 CREATE/table_xinfo/DROP only: this sweeps the constructor parse,
+    // the shadow table DDL (info + content + one rtree per geometry column +
+    // rowids for the text primary key, dropped again on the way out), and
+    // tg0_free. INSERT/SELECT are stubbed out mid-rewrite; write/read
+    // coverage returns in tickets 03/04.
+    "create virtual table temp.oom using tg0("
+    "id text primary key, label text, shape geometry, boundary polygon)",
     "select * from pragma_table_xinfo('oom')",
     "drop table temp.oom",
 };
@@ -531,15 +534,20 @@ int main(int argc, char *argv[]) {
       "tg_points_each('MULTIPOINT(3 3, 4 4, 5 5)') b",
       "select a.value, tg_to_wkt(b.point) from json_each('[1, 2, 3]') a, "
       "tg_line_points_each('LINESTRING(7 7, 8 8)') b",
-      // tg0 CREATE/table_xinfo/DROP only: the typed-column constructor parse
-      // and tg0_free are the code paths worth checking right now.
-      // INSERT/SELECT are stubbed out mid-rewrite; write/read coverage
-      // returns in tickets 03/04.
+      // tg0 CREATE/table_xinfo/DROP only: the typed-column constructor
+      // parse, the shadow table create/drop DDL, and tg0_free are the code
+      // paths worth checking right now. INSERT/SELECT are stubbed out
+      // mid-rewrite; write/read coverage returns in tickets 03/04.
       "create virtual table temp.demo using tg0("
       "id integer primary key, label text, shape geometry, "
       "boundary polygon indexing=ystripes)",
       "select * from pragma_table_xinfo('demo')",
       "drop table temp.demo",
+      // text primary keys additionally create (and drop) the rowids mapping
+      // shadow table
+      "create virtual table temp.demo_tpk using tg0("
+      "id text primary key, shape point)",
+      "drop table temp.demo_tpk",
   };
   static const char *ERROR_STATEMENTS[] = {
       "select tg_to_wkt('not a geometry')",

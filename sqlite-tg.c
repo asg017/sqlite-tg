@@ -2609,8 +2609,6 @@ static sqlite3_module tg_bboxModule = {
 #define TG0_MAX_DATA_COLUMNS 16
 #define TG0_MAX_USER_COLUMNS (TG0_MAX_GEOMETRY_COLUMNS + TG0_MAX_DATA_COLUMNS)
 
-#define TG0_SQL_RTREE_DROP "DROP TABLE \"%w\".\"%w_rtree\""
-
 // clang-format off
 // The different overloaded and intercepted functions for tg0() tables.
 #define TG0_FUNC_INTERSECTS SQLITE_INDEX_CONSTRAINT_FUNCTION
@@ -3223,6 +3221,171 @@ static char *tg0_check_column_name(tg0_vtab *p, const char *arg,
   return NULL;
 }
 
+// ---------------------------------------------------------------------------
+// tg0 shadow tables
+//
+// For a tg0 table `t` with geometry columns g0..gN and data columns d0..dM
+// (plan.md "Shadow tables"):
+//
+//   t_info(key TEXT PRIMARY KEY, value ANY)   -- 'CREATE_VERSION' row; future
+//                                                migration hook
+//   t_content(rowid INTEGER PRIMARY KEY,
+//             geom00 BLOB NOT NULL, ..., data00, ...)
+//   t_rtree00 .. t_rtreeNN                    -- rtree(id, minX, maxX, minY,
+//                                                maxY), one per geometry column
+//   t_rowids(rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+//            id TEXT UNIQUE NOT NULL)         -- text primary keys only
+//
+// Row data lives in t_content, so rowid/primary key lookups are B-tree point
+// queries, and the rtrees hold nothing but float32 bboxes. Numbered internal
+// names (geom00, data00, rtree00 — NN is the index into geometry_columns[]
+// or data_columns[]) avoid identifier-quoting issues: user column names
+// exist only in declare_vtab. Data columns are declared with no affinity;
+// their declared types are enforced in C on write.
+// ---------------------------------------------------------------------------
+
+// Schema-qualified, %w-quoted shadow table names, filled in with
+// sqlite3_mprintf(..., schemaName, tableName). TG0_SHADOW_RTREE_NAME
+// additionally takes the geometry column's index into geometry_columns[].
+#define TG0_SHADOW_INFO_NAME "\"%w\".\"%w_info\""
+#define TG0_SHADOW_CONTENT_NAME "\"%w\".\"%w_content\""
+#define TG0_SHADOW_ROWIDS_NAME "\"%w\".\"%w_rowids\""
+#define TG0_SHADOW_RTREE_NAME "\"%w\".\"%w_rtree%02d\""
+
+// Prepares and steps a single shadow-table DDL/DML statement. zSql is an
+// sqlite3_mprintf'd string, freed here; a NULL zSql (OOM in the caller's
+// sqlite3_mprintf) returns SQLITE_NOMEM. On a prepare/step failure, returns
+// SQLITE_ERROR with *pzErrMsg (when pzErrMsg is non-NULL) set to an
+// sqlite3_mprintf'd "<zWhat>: <sqlite3_errmsg>" message.
+static int tg0_shadow_sql(sqlite3 *db, char *zSql, const char *zWhat,
+                          char **pzErrMsg) {
+  sqlite3_stmt *stmt = NULL;
+  int rc;
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK || sqlite3_step(stmt) != SQLITE_DONE) {
+    if (pzErrMsg) {
+      *pzErrMsg = sqlite3_mprintf("%s: %s", zWhat, sqlite3_errmsg(db));
+    }
+    rc = SQLITE_ERROR;
+  } else {
+    rc = SQLITE_OK;
+  }
+  sqlite3_finalize(stmt);
+  sqlite3_free(zSql);
+  return rc;
+}
+
+// Creates the shadow tables for a freshly xCreate'd tg0 table and seeds
+// t_info with its CREATE_VERSION row. Stops at the first failure: returns
+// SQLITE_NOMEM, or SQLITE_ERROR with *pzErrMsg set — the caller cleans up
+// whatever was created before the failure with tg0_drop_shadow_tables().
+static int tg0_create_shadow_tables(tg0_vtab *p, char **pzErrMsg) {
+  int rc;
+
+  rc = tg0_shadow_sql(p->db,
+                      sqlite3_mprintf("CREATE TABLE " TG0_SHADOW_INFO_NAME
+                                      "(key TEXT PRIMARY KEY, value ANY)",
+                                      p->schemaName, p->tableName),
+                      "Could not create the tg0 info shadow table", pzErrMsg);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+
+  rc = tg0_shadow_sql(
+      p->db,
+      sqlite3_mprintf("INSERT INTO " TG0_SHADOW_INFO_NAME
+                      "(key, value) VALUES ('CREATE_VERSION', %Q)",
+                      p->schemaName, p->tableName, SQLITE_TG_VERSION),
+      "Could not seed the tg0 info shadow table", pzErrMsg);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+
+  sqlite3_str *strContent = sqlite3_str_new(NULL);
+  sqlite3_str_appendf(strContent,
+                      "CREATE TABLE " TG0_SHADOW_CONTENT_NAME
+                      "(rowid INTEGER PRIMARY KEY",
+                      p->schemaName, p->tableName);
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    sqlite3_str_appendf(strContent, ", geom%02d BLOB NOT NULL", i);
+  }
+  for (int i = 0; i < p->numDataColumns; i++) {
+    sqlite3_str_appendf(strContent, ", data%02d", i);
+  }
+  sqlite3_str_appendall(strContent, ")");
+  rc = tg0_shadow_sql(p->db, sqlite3_str_finish(strContent),
+                      "Could not create the tg0 content shadow table",
+                      pzErrMsg);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    rc = tg0_shadow_sql(
+        p->db,
+        sqlite3_mprintf("CREATE VIRTUAL TABLE " TG0_SHADOW_RTREE_NAME
+                        " USING rtree(id, minX, maxX, minY, maxY)",
+                        p->schemaName, p->tableName, i),
+        "Could not create a tg0 rtree shadow table", pzErrMsg);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+  }
+
+  if (p->pkColumnType == SQLITE_TEXT) {
+    rc = tg0_shadow_sql(
+        p->db,
+        sqlite3_mprintf("CREATE TABLE " TG0_SHADOW_ROWIDS_NAME
+                        "(rowid INTEGER PRIMARY KEY AUTOINCREMENT, "
+                        "id TEXT UNIQUE NOT NULL)",
+                        p->schemaName, p->tableName),
+        "Could not create the tg0 rowids shadow table", pzErrMsg);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+  }
+
+  return SQLITE_OK;
+}
+
+// Drops every shadow table belonging to p: info, content, one rtree per
+// geometry column, and rowids for text-primary-key tables. Every drop is
+// attempted even after a failure (the first failure is the one reported),
+// and IF EXISTS keeps a missing table — a partially-created table being
+// cleaned up after an xCreate failure — from counting as one. Returns
+// SQLITE_OK, or the first failure's SQLITE_NOMEM/SQLITE_ERROR with *pzErrMsg
+// (when pzErrMsg is non-NULL) set to an sqlite3_mprintf'd message.
+static int tg0_drop_shadow_tables(tg0_vtab *p, char **pzErrMsg) {
+  int rc = SQLITE_OK;
+  int n = 0;
+  char *azSql[3 + TG0_MAX_GEOMETRY_COLUMNS];
+
+  azSql[n++] = sqlite3_mprintf("DROP TABLE IF EXISTS " TG0_SHADOW_INFO_NAME,
+                               p->schemaName, p->tableName);
+  azSql[n++] = sqlite3_mprintf("DROP TABLE IF EXISTS " TG0_SHADOW_CONTENT_NAME,
+                               p->schemaName, p->tableName);
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    azSql[n++] = sqlite3_mprintf("DROP TABLE IF EXISTS " TG0_SHADOW_RTREE_NAME,
+                                 p->schemaName, p->tableName, i);
+  }
+  if (p->pkColumnType == SQLITE_TEXT) {
+    azSql[n++] = sqlite3_mprintf("DROP TABLE IF EXISTS " TG0_SHADOW_ROWIDS_NAME,
+                                 p->schemaName, p->tableName);
+  }
+  for (int i = 0; i < n; i++) {
+    int rc2 = tg0_shadow_sql(p->db, azSql[i],
+                             "Could not drop a tg0 shadow table",
+                             rc == SQLITE_OK ? pzErrMsg : NULL);
+    if (rc == SQLITE_OK) {
+      rc = rc2;
+    }
+  }
+  return rc;
+}
+
 typedef struct tg0_cursor tg0_cursor;
 struct tg0_cursor {
   sqlite3_vtab_cursor base;
@@ -3445,33 +3608,13 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
   }
 
   if (isCreate) {
-    // TEMPORARY: the shadow-table layout for the new column model (content
-    // table + one slim rtree per geometry column) lands in the next change.
-    // Until then, create a bare rtree so CREATE and DROP round-trip; reads
-    // and writes are stubbed out below.
-    sqlite3_stmt *stmt = NULL;
-    char *zCreate = sqlite3_mprintf(
-        "CREATE VIRTUAL TABLE \"%w\".\"%w_rtree\" using "
-        "rtree(id, minX, maxX, minY, maxY)",
-        pNew->schemaName, pNew->tableName);
-    if (!zCreate) {
-      goto nomem;
-    }
-    rc = sqlite3_prepare_v2(db, zCreate, -1, &stmt, 0);
-    sqlite3_free(zCreate);
+    rc = tg0_create_shadow_tables(pNew, pzErr);
     if (rc != SQLITE_OK) {
-      sqlite3_finalize(stmt);
-      *pzErr =
-          sqlite3_mprintf("Error preparing rtree shadow table for tg0 table: %s",
-                          sqlite3_errmsg(db));
-      goto error;
-    }
-    rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) {
-      *pzErr =
-          sqlite3_mprintf("Error creating rtree shadow table for tg0 table: %s",
-                          sqlite3_errmsg(db));
+      // best-effort removal of the shadow tables created before the failure
+      tg0_drop_shadow_tables(pNew, NULL);
+      if (rc == SQLITE_NOMEM) {
+        goto nomem;
+      }
       goto error;
     }
   }
@@ -3505,18 +3648,15 @@ static int tg0Disconnect(sqlite3_vtab *pVtab) {
 }
 static int tg0Destroy(sqlite3_vtab *pVtab) {
   tg0_vtab *p = (tg0_vtab *)pVtab;
-  sqlite3_stmt *stmt;
-  const char *zSql =
-      sqlite3_mprintf(TG0_SQL_RTREE_DROP, p->schemaName, p->tableName);
-  int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, 0);
-  sqlite3_free((void *)zSql);
-
-  if (rc == SQLITE_OK) {
-    // ignore if there's an error?
-    sqlite3_step(stmt);
+  char *zErrMsg = NULL;
+  int rc = tg0_drop_shadow_tables(p, &zErrMsg);
+  if (rc != SQLITE_OK) {
+    // the DROP TABLE fails and the virtual table stays connected, so report
+    // the failure on the vtab and leave it alive
+    sqlite3_free(pVtab->zErrMsg);
+    pVtab->zErrMsg = zErrMsg;
+    return rc;
   }
-
-  sqlite3_finalize(stmt);
   tg0Disconnect(pVtab);
   return SQLITE_OK;
 }
@@ -3663,16 +3803,25 @@ static int tg0FindFunction(sqlite3_vtab *pVtab, int nArg, const char *zName,
   return 0;
 };
 
+// Claims the tg0 shadow tables (info, content, rowids, rtreeNN) plus the
+// rtree module's own shadow tables underneath each bbox rtree (rtreeNN_node,
+// rtreeNN_parent, rtreeNN_rowid). zName is the suffix after the virtual
+// table's name; rtree names are matched by prefix + digits rather than a
+// fixed list so every possible NN is covered.
 static int tg0ShadowName(const char *zName) {
-
-  static const char *azName[] = {"rtree", "rtree_node", "rtree_parent",
-                                 "rtree_rowid"};
-
-  for (int i = 0; i < sizeof(azName) / sizeof(azName[0]); i++) {
-    if (sqlite3_stricmp(zName, azName[i]) == 0)
-      return 1;
+  if (sqlite3_stricmp(zName, "info") == 0 ||
+      sqlite3_stricmp(zName, "content") == 0 ||
+      sqlite3_stricmp(zName, "rowids") == 0) {
+    return 1;
   }
-  return 0;
+  if (sqlite3_strnicmp(zName, "rtree", 5) != 0 || !tg0_is_digit(zName[5]) ||
+      !tg0_is_digit(zName[6])) {
+    return 0;
+  }
+  zName += 7;
+  return *zName == '\0' || sqlite3_stricmp(zName, "_node") == 0 ||
+         sqlite3_stricmp(zName, "_parent") == 0 ||
+         sqlite3_stricmp(zName, "_rowid") == 0;
 }
 
 static sqlite3_module tg0Module = {

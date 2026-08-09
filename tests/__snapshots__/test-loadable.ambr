@@ -377,8 +377,294 @@
     }),
   ])
 # ---
+# name: test_tg0_drop_removes_shadow_tables[before drop]
+  list([
+    dict({
+      'name': 'tg_dropme_content',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_dropme_info',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_dropme_rowids',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_dropme_rtree00',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_dropme_rtree00_node',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_dropme_rtree00_parent',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_dropme_rtree00_rowid',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_dropme_rtree01',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_dropme_rtree01_node',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_dropme_rtree01_parent',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_dropme_rtree01_rowid',
+      'type': 'table',
+    }),
+  ])
+# ---
 # name: test_tg0_old_syntax_migration_hint[bare identifier hint]
   "tg0 constructor error: could not parse 'tzid'. tg0's syntax changed in v0.0.1-alpha.22: columns now require types, and the _shape column was removed. Drop and recreate this table. See https://github.com/asg017/sqlite-tg/blob/main/docs.md#tg0 for details."
+# ---
+# name: test_tg0_reopen_connects[reopened shadow tables]
+  list([
+    dict({
+      'name': 'tg_reopen_content',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_reopen_info',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_reopen_rowids',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_reopen_rtree00',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_reopen_rtree00_node',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_reopen_rtree00_parent',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_reopen_rtree00_rowid',
+      'type': 'table',
+    }),
+  ])
+# ---
+# name: test_tg0_reopen_connects[reopened table_xinfo]
+  list([
+    dict({
+      'cid': 0,
+      'dflt_value': None,
+      'hidden': 0,
+      'name': 'id',
+      'notnull': 1,
+      'pk': 1,
+      'type': 'TEXT',
+    }),
+    dict({
+      'cid': 1,
+      'dflt_value': None,
+      'hidden': 0,
+      'name': 'shape',
+      'notnull': 0,
+      'pk': 0,
+      'type': 'point',
+    }),
+    dict({
+      'cid': 2,
+      'dflt_value': None,
+      'hidden': 0,
+      'name': 'label',
+      'notnull': 0,
+      'pk': 0,
+      'type': 'TEXT',
+    }),
+    dict({
+      'cid': 3,
+      'dflt_value': None,
+      'hidden': 1,
+      'name': 'distance',
+      'notnull': 0,
+      'pk': 0,
+      'type': '',
+    }),
+  ])
+# ---
+# name: test_tg0_shadow_tables_integer_pk[integer pk content sql]
+  'CREATE TABLE "tg_shadow_ipk_content"(rowid INTEGER PRIMARY KEY, geom00 BLOB NOT NULL, data00)'
+# ---
+# name: test_tg0_shadow_tables_integer_pk[integer pk shadow tables]
+  list([
+    dict({
+      'name': 'tg_shadow_ipk_content',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_ipk_info',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_ipk_rtree00',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_ipk_rtree00_node',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_ipk_rtree00_parent',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_ipk_rtree00_rowid',
+      'type': 'table',
+    }),
+  ])
+# ---
+# name: test_tg0_shadow_tables_multi_geometry[multi geometry content sql]
+  'CREATE TABLE "tg_shadow_multi_content"(rowid INTEGER PRIMARY KEY, geom00 BLOB NOT NULL, geom01 BLOB NOT NULL, geom02 BLOB NOT NULL, data00, data01)'
+# ---
+# name: test_tg0_shadow_tables_multi_geometry[multi geometry shadow tables]
+  list([
+    dict({
+      'name': 'tg_shadow_multi_content',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_multi_info',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_multi_rtree00',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_multi_rtree00_node',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_multi_rtree00_parent',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_multi_rtree00_rowid',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_multi_rtree01',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_multi_rtree01_node',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_multi_rtree01_parent',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_multi_rtree01_rowid',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_multi_rtree02',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_multi_rtree02_node',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_multi_rtree02_parent',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_multi_rtree02_rowid',
+      'type': 'table',
+    }),
+  ])
+# ---
+# name: test_tg0_shadow_tables_no_pk[no pk content sql]
+  'CREATE TABLE "tg_shadow_content"(rowid INTEGER PRIMARY KEY, geom00 BLOB NOT NULL)'
+# ---
+# name: test_tg0_shadow_tables_no_pk[no pk info sql]
+  'CREATE TABLE "tg_shadow_info"(key TEXT PRIMARY KEY, value ANY)'
+# ---
+# name: test_tg0_shadow_tables_no_pk[no pk shadow tables]
+  list([
+    dict({
+      'name': 'tg_shadow_content',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_info',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_rtree00',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_rtree00_node',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_rtree00_parent',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_rtree00_rowid',
+      'type': 'table',
+    }),
+  ])
+# ---
+# name: test_tg0_shadow_tables_text_pk[text pk content sql]
+  'CREATE TABLE "tg_shadow_tpk_content"(rowid INTEGER PRIMARY KEY, geom00 BLOB NOT NULL, data00)'
+# ---
+# name: test_tg0_shadow_tables_text_pk[text pk rowids sql]
+  'CREATE TABLE "tg_shadow_tpk_rowids"(rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL)'
+# ---
+# name: test_tg0_shadow_tables_text_pk[text pk shadow tables]
+  list([
+    dict({
+      'name': 'tg_shadow_tpk_content',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_tpk_info',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_tpk_rowids',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_tpk_rtree00',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_tpk_rtree00_node',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_tpk_rtree00_parent',
+      'type': 'table',
+    }),
+    dict({
+      'name': 'tg_shadow_tpk_rtree00_rowid',
+      'type': 'table',
+    }),
+  ])
 # ---
 # name: test_tg_geometries_each
   list([
