@@ -428,6 +428,15 @@
 # name: test_tg0_old_syntax_migration_hint[bare identifier hint]
   "tg0 constructor error: could not parse 'tzid'. tg0's syntax changed in v0.0.1-alpha.22: columns now require types, and the _shape column was removed. Drop and recreate this table. See https://github.com/asg017/sqlite-tg/blob/main/docs.md#tg0 for details."
 # ---
+# name: test_tg0_pushdown_eqp[fullscan + data constraint]
+  'SCAN tg_pd VIRTUAL TABLE INDEX 0:1&Bb_'
+# ---
+# name: test_tg0_pushdown_eqp[predicate + data EQ]
+  'SCAN tg_pd VIRTUAL TABLE INDEX 0:3PAIO&Ba_'
+# ---
+# name: test_tg0_pushdown_eqp[predicate + two mixed ops]
+  'SCAN tg_pd VIRTUAL TABLE INDEX 0:3PAIO&Cc_&Af_'
+# ---
 # name: test_tg0_read_eqp[contains (contains)]
   'SCAN tg_rd VIRTUAL TABLE INDEX 0:3PACC'
 # ---

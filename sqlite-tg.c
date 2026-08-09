@@ -2629,17 +2629,29 @@ static sqlite3_module tg_bboxModule = {
 // one fixed-width 4-character block per consumed argv slot:
 //
 //   idxStr := header block*
-//   header := '1'   -- fullscan: iterate t_content directly, no argv
+//   header := '1'   -- fullscan: iterate t_content directly
 //           | '2'   -- point: rowid EQ / text-pk id EQ, argv[0] = the key
 //           | '3'   -- predicate: rtree prefilter + exact tg predicate,
 //                      argv[0] = the query geometry
 //           | '4'   -- reserved for KNN (decision 9); never emitted today
-//   block  := [kind][column][op][strategy]
+//   block  := 'P' [geom-col] [pred-op] [strategy]   -- predicate block
+//           | '&' [data-col] [cmp-op] '_'           -- pushdown block
 //
-// The only block kind so far is 'P', a predicate block ('&' pushdown blocks
-// arrive with ticket 05): [column] is 'A' + the geometry column's index into
-// geometry_columns[], [op] identifies the tg predicate, and [strategy] the
-// rtree prefilter (see tg0_predicate_plans[] for both alphabets).
+// Blocks appear in argv order: the k'th block describes argv[k]. A predicate
+// plan carries exactly one 'P' block, always first: [geom-col] is 'A' + the
+// geometry column's index into geometry_columns[], [pred-op] identifies the
+// tg predicate, and [strategy] the rtree prefilter (see
+// tg0_predicate_plans[] for both alphabets).
+//
+// Predicate and fullscan plans may then carry up to TG0_MAX_PUSHDOWN_BLOCKS
+// '&' pushdown blocks — EQ/NE/LT/LE/GT/GE constraints on plain data columns
+// folded into the content scan's WHERE clause so cheap B-tree compares run
+// before WKB parse + exact predicate (plan.md decision 10). Pure
+// optimization: their omit flag stays 0, so SQLite re-checks every pushed
+// constraint and correctness never depends on the prefilter. [data-col] is
+// 'A' + the column's index into data_columns[] and [cmp-op] is the vec0
+// metadata operator alphabet ('a'= 'b'> 'c'<= 'd'< 'e'>= 'f'!=,
+// sqlite-vec's vec0_metadata_operator).
 // ---------------------------------------------------------------------------
 
 #define TG0_PLAN_FULLSCAN '1'
@@ -2648,6 +2660,19 @@ static sqlite3_module tg_bboxModule = {
 #define TG0_PLAN_KNN '4' // reserved, unimplemented
 
 #define TG0_IDXSTR_KIND_PREDICATE 'P'
+#define TG0_IDXSTR_KIND_PUSHDOWN '&'
+
+// pushdown block [cmp-op] alphabet, mirroring vec0's vec0_metadata_operator
+#define TG0_PUSHDOWN_OP_EQ 'a'
+#define TG0_PUSHDOWN_OP_GT 'b'
+#define TG0_PUSHDOWN_OP_LE 'c'
+#define TG0_PUSHDOWN_OP_LT 'd'
+#define TG0_PUSHDOWN_OP_GE 'e'
+#define TG0_PUSHDOWN_OP_NE 'f'
+
+// cap on consumed '&' pushdown blocks per plan, bounding idxStr size. Extra
+// data-column constraints stay unconsumed; SQLite post-filters them
+#define TG0_MAX_PUSHDOWN_BLOCKS 8
 
 // rtree prefilter strategies for predicate plans
 #define TG0_STRATEGY_OVERLAP 'O'  // stored bbox overlaps the query bbox
@@ -3484,6 +3509,48 @@ static int tg0_predicate_plan_by_char(char opChar) {
   return -1;
 }
 
+// The idxStr pushdown [cmp-op] letter for an xBestIndex constraint op, or 0
+// when the op is not pushdown-eligible.
+static char tg0_pushdown_op_char(int constraintOp) {
+  switch (constraintOp) {
+  case SQLITE_INDEX_CONSTRAINT_EQ:
+    return TG0_PUSHDOWN_OP_EQ;
+  case SQLITE_INDEX_CONSTRAINT_GT:
+    return TG0_PUSHDOWN_OP_GT;
+  case SQLITE_INDEX_CONSTRAINT_LE:
+    return TG0_PUSHDOWN_OP_LE;
+  case SQLITE_INDEX_CONSTRAINT_LT:
+    return TG0_PUSHDOWN_OP_LT;
+  case SQLITE_INDEX_CONSTRAINT_GE:
+    return TG0_PUSHDOWN_OP_GE;
+  case SQLITE_INDEX_CONSTRAINT_NE:
+    return TG0_PUSHDOWN_OP_NE;
+  default:
+    return 0;
+  }
+}
+
+// The SQL comparison operator for an idxStr pushdown [cmp-op] letter, or
+// NULL when the letter is not part of the alphabet.
+static const char *tg0_pushdown_op_sql(char opChar) {
+  switch (opChar) {
+  case TG0_PUSHDOWN_OP_EQ:
+    return "=";
+  case TG0_PUSHDOWN_OP_GT:
+    return ">";
+  case TG0_PUSHDOWN_OP_LE:
+    return "<=";
+  case TG0_PUSHDOWN_OP_LT:
+    return "<";
+  case TG0_PUSHDOWN_OP_GE:
+    return ">=";
+  case TG0_PUSHDOWN_OP_NE:
+    return "<>";
+  default:
+    return NULL;
+  }
+}
+
 void tg_vtab_set_error(sqlite3_vtab *pVTab, const char *zFormat, ...) {
   va_list args;
   sqlite3_free(pVTab->zErrMsg);
@@ -3778,6 +3845,11 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
   int iPredicateTerm = -1;
   int predicatePlan = -1;
   int predicateGeomIdx = -1;
+  // data-column pushdown candidates (decision 10), in constraint order
+  int nPushdown = 0;
+  int pushdownTerm[TG0_MAX_PUSHDOWN_BLOCKS];
+  int pushdownDataIdx[TG0_MAX_PUSHDOWN_BLOCKS];
+  char pushdownOp[TG0_MAX_PUSHDOWN_BLOCKS];
 
   for (int i = 0; i < pIdxInfo->nConstraint; i++) {
     if (!pIdxInfo->aConstraint[i].usable)
@@ -3806,6 +3878,39 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
         (iColumn < 0 || (p->pkColumnName && iColumn == 0))) {
       if (iPointTerm < 0) {
         iPointTerm = i;
+      }
+      continue;
+    }
+
+    // EQ/NE/LT/LE/GT/GE on a plain data column: a pushdown candidate,
+    // folded into the content scan's WHERE clause as a prefilter when a
+    // fullscan or predicate plan is chosen (decision 10). Constraints on
+    // the primary key or on geometry columns are never pushed
+    // (tg0_column_lookup rejects the pk / distance columns, and the kind
+    // check rejects geometry columns)
+    char pushOpChar = tg0_pushdown_op_char(op);
+    if (pushOpChar) {
+      tg0_user_column_kind kind;
+      int idx;
+      if (tg0_column_lookup(p, iColumn, &kind, &idx) == SQLITE_OK &&
+          kind == TG0_USER_COLUMN_KIND_DATA &&
+          nPushdown < TG0_MAX_PUSHDOWN_BLOCKS) {
+        // TEXT columns: the shadow-table prefilter always compares with
+        // BINARY collation (untyped shadow columns, no COLLATE clause), so
+        // only consume the constraint when SQLite itself would compare with
+        // BINARY. Under NOCASE etc. a prefilter miss would be a false
+        // negative that the omit=0 re-check cannot repair — re-checking
+        // only ever removes rows
+        if (p->data_columns[idx].type == SQLITE_TEXT) {
+          const char *collation = sqlite3_vtab_collation(pIdxInfo, i);
+          if (!collation || sqlite3_stricmp(collation, "BINARY") != 0) {
+            continue;
+          }
+        }
+        pushdownTerm[nPushdown] = i;
+        pushdownDataIdx[nPushdown] = idx;
+        pushdownOp[nPushdown] = pushOpChar;
+        nPushdown++;
       }
       continue;
     }
@@ -3842,23 +3947,46 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
 
   char *idxStr;
   if (iPointTerm >= 0) {
+    // point plans consume no pushdown blocks: the scan is already a single
+    // B-tree lookup, and SQLite evaluates the data-column constraints on
+    // the one returned row
     idxStr = sqlite3_mprintf("%c", TG0_PLAN_POINT);
     pIdxInfo->aConstraintUsage[iPointTerm].argvIndex = 1;
     pIdxInfo->estimatedCost = 1.0;
     pIdxInfo->estimatedRows = 1;
-  } else if (iPredicateTerm >= 0) {
-    idxStr = sqlite3_mprintf("%c%c%c%c%c", TG0_PLAN_PREDICATE,
-                             TG0_IDXSTR_KIND_PREDICATE, 'A' + predicateGeomIdx,
-                             tg0_predicate_plans[predicatePlan].opChar,
-                             tg0_predicate_plans[predicatePlan].strategy);
-    pIdxInfo->aConstraintUsage[iPredicateTerm].argvIndex = 1;
-    pIdxInfo->aConstraintUsage[iPredicateTerm].omit = 1;
-    pIdxInfo->estimatedCost = 30.0;
-    pIdxInfo->estimatedRows = 10;
   } else {
-    idxStr = sqlite3_mprintf("%c", TG0_PLAN_FULLSCAN);
-    pIdxInfo->estimatedCost = 3000000.0;
-    pIdxInfo->estimatedRows = 100000;
+    // predicate and fullscan plans share the trailing '&' pushdown blocks:
+    // argv slots are assigned in consumed order — the query geometry (when
+    // present) stays argv[0], pushdown values follow
+    sqlite3_str *str = sqlite3_str_new(NULL);
+    int argvIndex = 1;
+    if (iPredicateTerm >= 0) {
+      sqlite3_str_appendf(str, "%c%c%c%c%c", TG0_PLAN_PREDICATE,
+                          TG0_IDXSTR_KIND_PREDICATE, 'A' + predicateGeomIdx,
+                          tg0_predicate_plans[predicatePlan].opChar,
+                          tg0_predicate_plans[predicatePlan].strategy);
+      pIdxInfo->aConstraintUsage[iPredicateTerm].argvIndex = argvIndex++;
+      pIdxInfo->aConstraintUsage[iPredicateTerm].omit = 1;
+      pIdxInfo->estimatedCost = 30.0;
+      pIdxInfo->estimatedRows = 10;
+    } else {
+      sqlite3_str_appendf(str, "%c", TG0_PLAN_FULLSCAN);
+      pIdxInfo->estimatedCost = 3000000.0;
+      pIdxInfo->estimatedRows = 100000;
+    }
+    for (int k = 0; k < nPushdown; k++) {
+      sqlite3_str_appendf(str, "%c%c%c%c", TG0_IDXSTR_KIND_PUSHDOWN,
+                          'A' + pushdownDataIdx[k], pushdownOp[k], '_');
+      pIdxInfo->aConstraintUsage[pushdownTerm[k]].argvIndex = argvIndex++;
+      // omit stays 0 on pushdown terms: SQLite re-evaluates the original
+      // comparison against xColumn's values with its own affinity and
+      // collation semantics, so the shadow-table prefilter only ever
+      // removes rows. Correctness then only needs the prefilter to avoid
+      // false negatives (tg0Filter documents how); everything subtler stays
+      // exactly SQLite's, and a prefilter clause can be skipped freely
+      pIdxInfo->estimatedCost *= 0.9;
+    }
+    idxStr = sqlite3_str_finish(str);
   }
   if (!idxStr) {
     return SQLITE_NOMEM;
@@ -3962,6 +4090,17 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
   char strategy = 0;
   struct tg_rect queryRect = {{0, 0}, {0, 0}};
   int rc;
+  // parsed '&' pushdown blocks: data_columns[] index, [cmp-op] letter, and
+  // whether the block's prefilter clause is applied to this scan. Block k
+  // describes argv[argvOffset + k] and binds parameter ?(bindBase + k)
+  int nPushdown = 0;
+  int pushdownDataIdx[TG0_MAX_PUSHDOWN_BLOCKS];
+  char pushdownOp[TG0_MAX_PUSHDOWN_BLOCKS];
+  int pushdownInclude[TG0_MAX_PUSHDOWN_BLOCKS];
+  int argvOffset = 0;
+  // pushdown parameter numbers start after the prefilter's own ?1..?4
+  // (point key / rtree bbox); unreferenced lower numbers are harmless
+  int bindBase = 5;
 
   // cursors are reused: tear down the previous scan's state entirely
   sqlite3_finalize(pCur->stmt);
@@ -3994,6 +4133,70 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
       return SQLITE_ERROR;
     }
     queryRect = tg_geom_rect(pCur->queryGeom);
+  }
+
+  // trailing '&' pushdown blocks (fullscan and predicate plans only)
+  if (pCur->plan == TG0_PLAN_FULLSCAN || pCur->plan == TG0_PLAN_PREDICATE) {
+    argvOffset = pCur->plan == TG0_PLAN_PREDICATE ? 1 : 0;
+    const char *block = idxStr + (pCur->plan == TG0_PLAN_PREDICATE ? 5 : 1);
+    for (; *block; block += 4) {
+      if (strlen(block) < 4 || block[0] != TG0_IDXSTR_KIND_PUSHDOWN ||
+          block[1] - 'A' < 0 || block[1] - 'A' >= p->numDataColumns ||
+          !tg0_pushdown_op_sql(block[2]) ||
+          nPushdown >= TG0_MAX_PUSHDOWN_BLOCKS ||
+          argvOffset + nPushdown >= argc) {
+        tg_vtab_set_error(&p->base,
+                          "Internal tg0 error: bad pushdown block in '%s'",
+                          idxStr);
+        return SQLITE_ERROR;
+      }
+      pushdownDataIdx[nPushdown] = block[1] - 'A';
+      pushdownOp[nPushdown] = block[2];
+      nPushdown++;
+    }
+  }
+
+  // Decide, per pushdown block, whether its prefilter clause is applied.
+  // xBestIndex left omit=0 on every pushed constraint, so SQLite re-checks
+  // each one with its own comparison semantics: a skipped clause is always
+  // correct, and an applied clause must only never exclude a row SQLite's
+  // own check would keep (no false negatives).
+  //
+  // Affinity: the shadow data columns are declared typeless (no affinity),
+  // so the prefilter compares by storage class under BINARY collation.
+  // Writes are type-checked, so stored classes always match the declared
+  // column type (integers widen to REAL in float columns at bind time), and
+  // xColumn returns the shadow values verbatim — the values SQLite's own
+  // check compares, after applying the vtab column's declared affinity to
+  // the constraint value. Mirroring that here:
+  //
+  // - INTEGER/FLOAT columns: apply numeric affinity to the argv value
+  //   (sqlite3_value_numeric_type) before binding — the same conversion
+  //   SQLite's comparison applies, so e.g. `size = '5'` prefilters as the
+  //   integer 5 and a non-numeric text RHS stays text (ordering above every
+  //   stored numeric on both sides).
+  // - TEXT columns: a numeric RHS would be text-ified by SQLite's
+  //   TEXT-affinity comparison but compares as a bare storage-class
+  //   mismatch in the shadow table (numerics order below text — false
+  //   negatives for '<'/'<='). Skip the clause instead of reproducing
+  //   SQLite's number->text rendering; text/blob/NULL RHS compare
+  //   identically on both sides (xBestIndex already required BINARY
+  //   collation for TEXT columns).
+  // - BLOB columns: no affinity conversion on either side in either check;
+  //   bind verbatim.
+  // - NULL RHS: always included — `x <op> NULL` matches nothing in the
+  //   shadow scan, exactly SQL's semantics.
+  for (int k = 0; k < nPushdown; k++) {
+    sqlite3_value *value = argv[argvOffset + k];
+    int columnType = p->data_columns[pushdownDataIdx[k]].type;
+    int valueType = sqlite3_value_type(value);
+    pushdownInclude[k] = 1;
+    if (columnType == SQLITE_INTEGER || columnType == SQLITE_FLOAT) {
+      sqlite3_value_numeric_type(value);
+    } else if (columnType == SQLITE_TEXT && (valueType == SQLITE_INTEGER ||
+                                             valueType == SQLITE_FLOAT)) {
+      pushdownInclude[k] = 0;
+    }
   }
 
   sqlite3_str *str = sqlite3_str_new(NULL);
@@ -4040,6 +4243,21 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
       break;
     }
   }
+  // applied pushdown clauses. Fullscan plans and disjoint-strategy
+  // predicate plans have no WHERE clause yet; the first applied clause
+  // starts one
+  int hasWhere = pCur->plan == TG0_PLAN_POINT ||
+                 (pCur->plan == TG0_PLAN_PREDICATE &&
+                  strategy != TG0_STRATEGY_FULLSCAN);
+  for (int k = 0; k < nPushdown; k++) {
+    if (!pushdownInclude[k]) {
+      continue;
+    }
+    sqlite3_str_appendf(str, "%s c.data%02d %s ?%d",
+                        hasWhere ? " AND" : " WHERE", pushdownDataIdx[k],
+                        tg0_pushdown_op_sql(pushdownOp[k]), bindBase + k);
+    hasWhere = 1;
+  }
   char *zSql = sqlite3_str_finish(str);
   if (!zSql) {
     return SQLITE_NOMEM;
@@ -4080,6 +4298,11 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
     sqlite3_bind_double(pCur->stmt, 2, tg0_f32_up(queryRect.max.x));
     sqlite3_bind_double(pCur->stmt, 3, tg0_f32_down(queryRect.min.y));
     sqlite3_bind_double(pCur->stmt, 4, tg0_f32_up(queryRect.max.y));
+  }
+  for (int k = 0; k < nPushdown; k++) {
+    if (pushdownInclude[k]) {
+      sqlite3_bind_value(pCur->stmt, bindBase + k, argv[argvOffset + k]);
+    }
   }
   return tg0_cursor_step(pCur);
 }

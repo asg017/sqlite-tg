@@ -2340,6 +2340,190 @@ def test_tg0_read_knn_reserved(tg0_read_table, snapshot):
     assert str(excinfo.value) == snapshot(name="distance constraint")
 
 
+# ticket 05: data-column constraint pushdown. Pure optimization — every test
+# cross-checks against a form that defeats the pushdown (tg_to_wkb() around
+# the geometry column defeats predicate interception, unary + around the data
+# column defeats constraint pushdown), so results must be identical whether
+# or not the prefilter runs.
+TG0_PUSHDOWN_QUERY = "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"
+
+
+@pytest.fixture
+def tg0_pushdown_table():
+    db.execute(
+        "create virtual table tg_pd using tg0("
+        "shape geometry, name text, size integer, score float)"
+    )
+    rows = [
+        ("POINT(1 1)", "alpha", 1, 1.5),
+        ("POINT(2 2)", "beta", 5, 2.5),
+        ("POINT(3 3)", "beta", 5, None),
+        ("POINT(4 4)", None, 7, 0.5),
+        ("POINT(5 5)", "Beta", 2, 2.5),
+        ("POINT(20 20)", "gamma", 5, 3.5),
+        ("POINT(21 21)", "delta", None, -1.0),
+    ]
+    for row in rows:
+        db.execute("insert into tg_pd(shape, name, size, score) values (?,?,?,?)", row)
+    yield "tg_pd"
+    db.execute("drop table tg_pd")
+
+
+TG0_PUSHDOWN_OPS = ["=", "<>", "<", "<=", ">", ">="]
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+@pytest.mark.parametrize("op", TG0_PUSHDOWN_OPS)
+@pytest.mark.parametrize(
+    "column,value",
+    [
+        ("name", "beta"),
+        ("name", None),
+        ("size", 5),
+        ("size", None),
+        ("score", 2.5),
+        ("score", None),
+    ],
+)
+def test_tg0_pushdown_results_match(tg0_pushdown_table, op, column, value):
+    def rowids(sql, args):
+        return [row["rowid"] for row in db.execute(sql, args).fetchall()]
+
+    # predicate plan + pushdown vs the fully-defeated form
+    pushed = rowids(
+        f"select rowid from tg_pd where tg_intersects(shape, ?) "
+        f"and {column} {op} ? order by rowid",
+        [TG0_PUSHDOWN_QUERY, value],
+    )
+    defeated = rowids(
+        f"select rowid from tg_pd where tg_intersects(tg_to_wkb(shape), ?) "
+        f"and +{column} {op} ? order by rowid",
+        [TG0_PUSHDOWN_QUERY, value],
+    )
+    assert pushed == defeated, f"predicate + {column} {op} {value!r}"
+    if value is None:
+        # x <op> NULL matches nothing, exactly SQL's semantics
+        assert pushed == []
+
+    # fullscan plan + pushdown vs the defeated form
+    pushed = rowids(
+        f"select rowid from tg_pd where {column} {op} ? order by rowid", [value]
+    )
+    defeated = rowids(
+        f"select rowid from tg_pd where +{column} {op} ? order by rowid", [value]
+    )
+    assert pushed == defeated, f"fullscan + {column} {op} {value!r}"
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_pushdown_combinations(tg0_pushdown_table):
+    # predicate + two data constraints, both consumed
+    assert "&" in explain_query_plan(
+        "select * from tg_pd where tg_intersects(shape, 'POINT(1 1)') "
+        "and size = 5 and score > 1.0"
+    )
+    rows = db.execute(
+        "select rowid from tg_pd where tg_intersects(shape, ?) "
+        "and size = 5 and score > 1.0 order by rowid",
+        [TG0_PUSHDOWN_QUERY],
+    ).fetchall()
+    defeated = db.execute(
+        "select rowid from tg_pd where tg_intersects(tg_to_wkb(shape), ?) "
+        "and +size = 5 and +score > 1.0 order by rowid",
+        [TG0_PUSHDOWN_QUERY],
+    ).fetchall()
+    assert [r["rowid"] for r in rows] == [r["rowid"] for r in defeated] == [2]
+
+    # fullscan + one data constraint
+    assert "&" in explain_query_plan("select * from tg_pd where size >= 5")
+    rows = db.execute("select rowid from tg_pd where size >= 5 order by rowid")
+    assert [r["rowid"] for r in rows] == [2, 3, 4, 6]
+
+    # constraints on rowid / an integer primary key are never pushed down
+    assert "&" not in explain_query_plan("select * from tg_pd where rowid > 2")
+    db.execute(
+        "create virtual table tg_pd_pk using tg0(id integer primary key, shape point)"
+    )
+    assert "&" not in explain_query_plan("select * from tg_pd_pk where id > 2")
+    assert "&" not in explain_query_plan(
+        "select * from tg_pd_pk where tg_intersects(shape, 'POINT(1 1)') and id > 2"
+    )
+    db.execute("drop table tg_pd_pk")
+
+    # a non-BINARY collation on a text column is never pushed down: the
+    # shadow-table prefilter always compares BINARY, so consuming the
+    # constraint could false-negative rows SQLite's NOCASE comparison keeps
+    assert "&" not in explain_query_plan(
+        "select * from tg_pd where name = 'BETA' collate nocase"
+    )
+    rows = db.execute(
+        "select rowid from tg_pd where name = 'BETA' collate nocase order by rowid"
+    ).fetchall()
+    assert [r["rowid"] for r in rows] == [2, 3, 5]
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_pushdown_eqp(tg0_pushdown_table, snapshot):
+    # '&' pushdown blocks surface in the idxStr: ['&']['A'+data-col][op]['_']
+    # with op 'a'= 'b'> 'c'<= 'd'< 'e'>= 'f'!=
+    plans = {
+        "predicate + data EQ": "select * from tg_pd "
+        "where tg_intersects(shape, 'POINT(1 1)') and size = 5",
+        "predicate + two mixed ops": "select * from tg_pd "
+        "where tg_intersects(shape, 'POINT(1 1)') and name != 'x' and score <= 2.0",
+        "fullscan + data constraint": "select * from tg_pd where size > 3",
+    }
+    for name, sql in plans.items():
+        assert explain_query_plan(sql) == snapshot(name=name)
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_pushdown_affinity(tg0_pushdown_table):
+    # omit=0 double-evaluation + affinity edge cases: the vtab must answer
+    # exactly like the equivalent plain table, whose columns carry the same
+    # declared types (and therefore the same comparison affinities)
+    db.execute("create table tg_pd_plain(name text, size integer, score float)")
+    db.execute(
+        "insert into tg_pd_plain select name, size, score from tg_pd order by rowid"
+    )
+    cases = [
+        # integer column vs text literal: SQLite applies INTEGER affinity
+        # ('5' -> 5) in its own check; the prefilter mirrors it with
+        # sqlite3_value_numeric_type before binding
+        "size = '5'",
+        "size < '5'",
+        "size >= '05'",
+        # non-numeric text stays text and orders above every stored integer
+        "size < 'abc'",
+        "size = 'abc'",
+        # float column vs text and integer literals
+        "score = '2.5'",
+        "score > '1'",
+        "score <= 2",
+        # text column vs numeric literal: SQLite text-ifies the RHS (TEXT
+        # affinity); the prefilter clause is skipped for this shape and
+        # SQLite alone filters
+        "name > 5",
+        "name < 5",
+        "name = 5",
+    ]
+    for where in cases:
+        vtab = [
+            row["rowid"]
+            for row in db.execute(
+                f"select rowid from tg_pd where {where} order by rowid"
+            )
+        ]
+        plain = [
+            row["rowid"]
+            for row in db.execute(
+                f"select rowid from tg_pd_plain where {where} order by rowid"
+            )
+        ]
+        assert vtab == plain, where
+    db.execute("drop table tg_pd_plain")
+
+
 @pytest.mark.skip(reason="TODO not needeD?")
 def test_coverage():
     current_module = inspect.getmodule(inspect.currentframe())

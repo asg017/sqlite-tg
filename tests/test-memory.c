@@ -575,6 +575,10 @@ int main(int argc, char *argv[]) {
       "'POINT(100 100)')",
       "select count(*) from temp.demo where tg_intersects(shape, "
       "'POINT(9 9)') and tg_touches(boundary, 'POINT(100 100)')",
+      // ticket 05: data-column constraint pushdown — the label comparison
+      // is consumed as an idxStr '&' block and prefilters the content scan
+      "select label from temp.demo where tg_intersects(shape, "
+      "'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))') and label <> 'nope'",
       "delete from temp.demo where id = 1",
       "delete from temp.demo",
       "drop table temp.demo",
