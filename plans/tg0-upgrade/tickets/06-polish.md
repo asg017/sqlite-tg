@@ -1,5 +1,7 @@
 # 06 — Polish: xRename, error paths, OOM audit
 
+## Status: complete (a6a8315)
+
 Ride-along fixes not covered by earlier tickets (decision 15).
 
 ## Tasks

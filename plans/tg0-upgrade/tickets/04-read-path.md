@@ -1,5 +1,7 @@
 # 04 — Read path: xBestIndex / xFilter / xNext / xColumn, all 8 predicates
 
+## Status: complete (52ee1b5)
+
 Query planning + execution for the new layout (decisions 7, 8, 9, 13, 15;
 "Query plans / idxStr encoding" in plan.md). Replaces
 sqlite-tg.c:2822-3095.

@@ -1,5 +1,7 @@
 # 07 — Docs, reference, site, examples migration
 
+## Status: complete (this change)
+
 Make the new tg0 the documented, exemplified default (decision 2 — clean
 break includes migrating everything in-repo).
 

@@ -1,5 +1,7 @@
 # 01 — Constructor tokenizer + column parser + declare_vtab
 
+## Status: complete (0874b04)
+
 New `CREATE VIRTUAL TABLE ... USING tg0(...)` parser per the grammar in
 `plan.md` (decisions 1, 3, 5, 6, 7, 16). Model on sqlite-vec's
 `vec0_token_next` / `vec0_parse_*` (sqlite-vec.c:2072-2540) but fix its known

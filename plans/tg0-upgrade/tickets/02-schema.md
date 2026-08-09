@@ -1,5 +1,7 @@
 # 02 — Shadow tables + lifecycle methods
 
+## Status: complete (5e35fea)
+
 Create/connect/destroy for the new storage layout (decisions 4, 6; "Shadow
 tables" section of plan.md). Replaces the everything-in-rtree layout.
 

@@ -1,5 +1,7 @@
 # 03 — Write path: INSERT / DELETE / UPDATE
 
+## Status: complete (098cad5)
+
 `xUpdate` for the new layout (decisions 11, 12, 14, 15; "Write semantics" in
 plan.md). Replaces sqlite-tg.c:3097-3234.
 

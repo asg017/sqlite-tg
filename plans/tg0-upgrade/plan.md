@@ -269,3 +269,17 @@ Point plan is a single content lookup (via `t_rowids` for text pk).
 | 05 | `05-pushdown.md` — data-column constraint pushdown (optional, can slip) | 04 |
 | 06 | `06-polish.md` — xRename, error paths, OOM audit, valgrind | 04 |
 | 07 | `07-docs-examples.md` — reference.yaml/docs/site/NOTES, migrate examples | 04 (06 ideally) |
+
+## Outcomes
+
+All 7 tickets shipped.
+
+| # | sha | outcome |
+|---|---|---|
+| 01 | 0874b04 | typed-column constructor parser (tokenizer, pk/geometry/data kinds, `indexing=`, old-syntax migration hint) |
+| 02 | 5e35fea | content + slim-rtree shadow layout, `t_info`/`t_rowids`, xCreate/xConnect/xDestroy/xShadowName |
+| 03 | 098cad5 | full write path: INSERT/DELETE/UPDATE, NOT NULL + strict typing, text-pk rowids map, `*pRowid` set |
+| 04 | 52ee1b5 | real query planner: fullscan/point/predicate plans, all 8 predicates, float32 outward-rounding fix |
+| 05 | d6f4a5a | data-column constraint pushdown (`&` idxStr blocks, EQ/NE/LT/LE/GT/GE, omit=0) |
+| 06 | a6a8315 | xRename, xIntegrity (PRAGMA integrity_check), error-path + OOM audit |
+| 07 | (this change) | reference.yaml + docs.md tg0 rewrite, examples migrated to typed syntax, CHANGELOG snippet |

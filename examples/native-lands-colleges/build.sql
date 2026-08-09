@@ -1,46 +1,41 @@
 .load ../../../sqlite-xsv/dist/debug/xsv0.dylib
 .load ../../dist/tg0
+.bail on
 
+-- College Scorecard institution data: https://collegescorecard.ed.gov/data/
 create table colleges as
 select
   row ->> 'UNITID' as id,
   row ->> 'INSTNM' as name,
-  row ->> 'LATITUDE' as latitude,
-  row ->> 'LONGITUDE' as longitude
+  cast(row ->> 'LATITUDE' as real) as latitude,
+  cast(row ->> 'LONGITUDE' as real) as longitude
 from csv_rows(readfile('Most-Recent-Cohorts-Institution.csv'));
 
-create table native_territories as
-select value
-from json_each(readfile('native-lands-territories.geojson'));
-
-
-select * from colleges limit 2;
-select * from native_territories limit 2;
-
-create virtual table tree_index using rtree(
-  id, minX, maxX, minY, maxY,
-  +boundary, +extra
+-- native-land.ca territory shapes mix Polygon and MultiPolygon features,
+-- so the geometry column stays the generic `geometry` type.
+create virtual table territories using tg0(
+  name text,
+  extra text,
+  boundary geometry
 );
 
+insert into territories(rowid, name, extra, boundary)
+  select
+    territory.rowid,
+    territory.value ->> '$.properties.Name' as name,
+    tg_extra_json(territory.value) as extra,
+    tg_to_wkb(territory.value) as boundary
+  from json_each(readfile('native-lands-territories.geojson')) as territory;
 
-select rowid, value
-from native_territories
-where not tg_valid_geojson(value)
-limit 3;
+.mode box
+.header on
 
-select tg_geom(value)
-from native_territories
-where not tg_valid_geojson(value);
-.exit
-
-insert into tree_index
+-- which territories is each college on? The point-in-polygon lookup is
+-- accelerated by the tg0 table's R-Tree index on `boundary`
 select
-  native_territories.rowid,
-  bbox.minX,
-  bbox.maxX,
-  bbox.minY,
-  bbox.maxY,
-  tg_to_wkb(value),
-  tg_extra_json(value)
-from native_territories
-inner join tg_rect_parts(value) as bbox;
+  colleges.name as college,
+  territories.name as territory
+from colleges
+join territories
+  on tg_intersects(territories.boundary, tg_point(colleges.longitude, colleges.latitude))
+limit 20;

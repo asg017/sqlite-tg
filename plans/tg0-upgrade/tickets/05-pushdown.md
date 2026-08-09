@@ -1,5 +1,7 @@
 # 05 — Data-column constraint pushdown (optimization; may slip)
 
+## Status: complete (d6f4a5a)
+
 Fold cheap comparisons on plain data columns into the content-table query so
 they run before WKB parse + exact predicate (decision 10). Pure performance —
 correctness never depends on this ticket; if it slips, SQLite post-filters.
