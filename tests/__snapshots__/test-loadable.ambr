@@ -666,6 +666,54 @@
     }),
   ])
 # ---
+# name: test_tg0_write_data_columns[float into integer]
+  'IntegrityError: tg_wd.n: expected integer value, received float'
+# ---
+# name: test_tg0_write_data_columns[integer into text]
+  'IntegrityError: tg_wd.label: expected text value, received integer'
+# ---
+# name: test_tg0_write_data_columns[text into blob]
+  'IntegrityError: tg_wd.payload: expected blob value, received text'
+# ---
+# name: test_tg0_write_data_columns[text into float]
+  'IntegrityError: tg_wd.height: expected float value, received text'
+# ---
+# name: test_tg0_write_data_columns[text into integer]
+  'IntegrityError: tg_wd.n: expected integer value, received text'
+# ---
+# name: test_tg0_write_distance_column[insert into distance]
+  'OperationalError: tg_wdist.distance: the distance column is reserved and cannot be written to'
+# ---
+# name: test_tg0_write_geometry_type_enforcement[unparseable input]
+  "OperationalError: tg_wt.boundary: ParseError: invalid type specifier, expected 'Z', 'M', 'ZM', or 'EMPTY'"
+# ---
+# name: test_tg0_write_geometry_type_enforcement[wrong subtype]
+  'IntegrityError: tg_wt.boundary: expected a MultiPolygon, received a Polygon'
+# ---
+# name: test_tg0_write_insert_null_geometry[explicit NULL geometry]
+  'IntegrityError: tg_wn.shape: geometry columns cannot be NULL'
+# ---
+# name: test_tg0_write_insert_null_geometry[omitted geometry]
+  'IntegrityError: tg_wn.shape: geometry columns cannot be NULL'
+# ---
+# name: test_tg0_write_text_pk[NULL id]
+  'IntegrityError: tg_wp.id: primary key cannot be NULL'
+# ---
+# name: test_tg0_write_text_pk[duplicate id]
+  'IntegrityError: Error inserting tg0 primary key: UNIQUE constraint failed: tg_wp_rowids.id'
+# ---
+# name: test_tg0_write_text_pk[non-text id]
+  'IntegrityError: tg_wp.id: expected text primary key, received integer'
+# ---
+# name: test_tg0_write_update_pk_change[integer pk change]
+  'OperationalError: changing the primary key of a tg0 row is not supported'
+# ---
+# name: test_tg0_write_update_pk_change[rowid change]
+  'OperationalError: changing the primary key of a tg0 row is not supported'
+# ---
+# name: test_tg0_write_update_pk_change[text pk change]
+  'OperationalError: changing the primary key of a tg0 row is not supported'
+# ---
 # name: test_tg_geometries_each
   list([
     dict({

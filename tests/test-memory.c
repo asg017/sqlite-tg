@@ -344,14 +344,20 @@ static const char *OOM_SCENARIO[] = {
     "select tg_to_wkt(point) from tg_ring_points_each("
     "'POLYGON((0 0, 10 0, 10 10, 0 0))')",
     "select tg_to_wkt('not a geometry')", // error path under OOM too
-    // tg0 CREATE/table_xinfo/DROP only: this sweeps the constructor parse,
-    // the shadow table DDL (info + content + one rtree per geometry column +
-    // rowids for the text primary key, dropped again on the way out), and
-    // tg0_free. INSERT/SELECT are stubbed out mid-rewrite; write/read
-    // coverage returns in tickets 03/04.
+    // tg0 lifecycle: this sweeps the constructor parse, the shadow table DDL
+    // (info + content + one rtree per geometry column + rowids for the text
+    // primary key, dropped again on the way out), tg0_free, and the write
+    // path's geometry parse/serialize error branches — INSERT, nochange-aware
+    // UPDATE, and DELETE. Predicate SELECTs are still stubbed mid-rewrite;
+    // read coverage returns in ticket 04.
     "create virtual table temp.oom using tg0("
     "id text primary key, label text, shape geometry, boundary polygon)",
     "select * from pragma_table_xinfo('oom')",
+    "insert into temp.oom(id, label, shape, boundary) values "
+    "('a', 'one', 'POINT(1 2)', 'POLYGON((0 0, 4 0, 4 4, 0 0))')",
+    "update temp.oom set label = 'renamed', shape = 'MULTIPOINT(1 1, 2 2)' "
+    "where id = 'a'",
+    "delete from temp.oom where id = 'a'",
     "drop table temp.oom",
 };
 
@@ -534,19 +540,32 @@ int main(int argc, char *argv[]) {
       "tg_points_each('MULTIPOINT(3 3, 4 4, 5 5)') b",
       "select a.value, tg_to_wkt(b.point) from json_each('[1, 2, 3]') a, "
       "tg_line_points_each('LINESTRING(7 7, 8 8)') b",
-      // tg0 CREATE/table_xinfo/DROP only: the typed-column constructor
-      // parse, the shadow table create/drop DDL, and tg0_free are the code
-      // paths worth checking right now. INSERT/SELECT are stubbed out
-      // mid-rewrite; write/read coverage returns in tickets 03/04.
+      // tg0 lifecycle: the typed-column constructor parse, the shadow table
+      // create/drop DDL, tg0_free, and the full write path — INSERT (WKT
+      // parse + WKB serialize + rtree rows), nochange-aware UPDATE, and
+      // DELETE. Predicate SELECTs are still stubbed mid-rewrite; read
+      // coverage returns in ticket 04.
       "create virtual table temp.demo using tg0("
       "id integer primary key, label text, shape geometry, "
       "boundary polygon indexing=ystripes)",
       "select * from pragma_table_xinfo('demo')",
+      "insert into temp.demo(id, label, shape, boundary) values "
+      "(1, 'one', 'POINT(1 2)', 'POLYGON((0 0, 4 0, 4 4, 0 0))')",
+      "insert into temp.demo(label, shape, boundary) values "
+      "('two', 'MULTIPOINT(1 1, 2 2)', 'POLYGON((0 0, 2 0, 2 2, 0 0))')",
+      "update temp.demo set label = 'renamed' where id = 1",
+      "update temp.demo set shape = 'POINT(9 9)', "
+      "boundary = 'POLYGON((5 5, 6 5, 6 6, 5 5))' where id = 2",
+      "delete from temp.demo where id = 1",
+      "delete from temp.demo",
       "drop table temp.demo",
-      // text primary keys additionally create (and drop) the rowids mapping
-      // shadow table
+      // text primary keys additionally route every write through the rowids
+      // mapping shadow table
       "create virtual table temp.demo_tpk using tg0("
       "id text primary key, shape point)",
+      "insert into temp.demo_tpk(id, shape) values ('a', 'POINT(1 2)')",
+      "update temp.demo_tpk set shape = 'POINT(3 4)' where id = 'a'",
+      "delete from temp.demo_tpk where id = 'a'",
       "drop table temp.demo_tpk",
   };
   static const char *ERROR_STATEMENTS[] = {
