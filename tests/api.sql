@@ -869,26 +869,6 @@ select tg_geom('POINT (1 1)', 'unknown'); -- error: unrecognized index option. S
 -- #endregion
 
 
--- #region tg0
-create virtual table tg_demo1 using tg0();
-select name from sqlite_master where name like 'tg%' order by 1; -- @snap tg0-schema
-insert into tg_demo1(rowid, _shape) select key, value from json_each('[
-    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23818620800527,32.881627962039275],[-117.23803891594858,32.881627962039275],[-117.23803891594858,32.88150426716983],[-117.23818620800527,32.88150426716983],[-117.23818620800527,32.881627962039275]]]},"properties":{}},
-    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23794407791227,32.88163023398593],[-117.23779678585558,32.88163023398593],[-117.23779678585558,32.88150653911649],[-117.23794407791227,32.88150653911649],[-117.23794407791227,32.88163023398593]]]},"properties":{},},
-    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23818630582224,32.881454314415976],[-117.23803901376554,32.881454314415976],[-117.23803901376554,32.88133061954653],[-117.23818630582224,32.88133061954653],[-117.23818630582224,32.881454314415976]]]},"properties":{}},
-    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.2379432340281,32.881454247902326],[-117.2377959419714,32.881454247902326],[-117.2377959419714,32.88133055303288],[-117.2379432340281,32.88133055303288],[-117.2379432340281,32.881454247902326]]]},"properties":{}},
-]');
-select count(*) from tg_demo1_rtree; -- 4
-select rowid, typeof(_shape), tg_to_wkt(_shape) from tg_demo1; -- @snap tg0-rows
-select id, minX, maxX, minY, maxY from tg_demo1_rtree; -- @snap tg0-rtree
-explain query plan select * from tg_demo1; -- @snap tg0-eqp-scan
-explain query plan select * from tg_demo1 where tg_intersects(_shape, ''); -- @snap tg0-eqp-intersects
-explain query plan select * from tg_demo1 where tg_contains(_shape, ''); -- @snap tg0-eqp-contains
-explain query plan select * from tg_demo1 where tg_touches(_shape, ''); -- @snap tg0-eqp-touches
-explain query plan select * from tg_demo1 where tg_equals(_shape, ''); -- @snap tg0-eqp-equals
-select rowid, * from tg_demo1; -- @snap tg0-rows-star
--- #endregion
-
 -- #region MISC
 create table t as
   select

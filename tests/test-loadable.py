@@ -1389,230 +1389,164 @@ def test_tg_within():
     pass
 
 
-# fmt: off
-tg_demo1 = [
-    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23818620800527,32.881627962039275],[-117.23803891594858,32.881627962039275],[-117.23803891594858,32.88150426716983],[-117.23818620800527,32.88150426716983],[-117.23818620800527,32.881627962039275]]]},"properties":{}},
-    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23794407791227,32.88163023398593],[-117.23779678585558,32.88163023398593],[-117.23779678585558,32.88150653911649],[-117.23794407791227,32.88150653911649],[-117.23794407791227,32.88163023398593]]]},"properties":{},},
-    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23818630582224,32.881454314415976],[-117.23803901376554,32.881454314415976],[-117.23803901376554,32.88133061954653],[-117.23818630582224,32.88133061954653],[-117.23818630582224,32.881454314415976]]]},"properties":{}},
-    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.2379432340281,32.881454247902326],[-117.2377959419714,32.881454247902326],[-117.2377959419714,32.88133055303288],[-117.2379432340281,32.88133055303288],[-117.2379432340281,32.881454247902326]]]},"properties":{}},
-]
-# fmt: on
+# ---------------------------------------------------------------------------
+# tg0 constructor (typed-column syntax): CREATE-level coverage only. Write and
+# read coverage returns when the new shadow-table layout and read/write paths
+# land in follow-up changes.
+# ---------------------------------------------------------------------------
+
+
+def tg0_error(sql):
+    with pytest.raises(sqlite3.OperationalError) as excinfo:
+        db.execute(sql)
+    return str(excinfo.value)
+
+
+def table_xinfo(table):
+    return execute_all(db, f"select * from pragma_table_xinfo('{table}')")
 
 
 @pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
-def test_tg0(snapshot):
-    db.execute("create virtual table tg_demo1 using tg0();")
-    assert execute_all(
-        db, "select name from sqlite_master where name like 'tg%' order by 1"
-    ) == [
-        {"name": "tg_demo1"},
-        {"name": "tg_demo1_rtree"},
-        {"name": "tg_demo1_rtree_node"},
-        {"name": "tg_demo1_rtree_parent"},
-        {"name": "tg_demo1_rtree_rowid"},
-    ]
-
+def test_tg0_create_geometry_columns(snapshot):
     db.execute(
-        "insert into tg_demo1(rowid, _shape) select key, value from json_each(?)",
-        [json.dumps(tg_demo1)],
-    )
-    assert db.execute("select count(*) from tg_demo1_rtree").fetchone()[0] == 4
-
-    assert execute_all(
-        db, "select rowid, typeof(_shape), tg_to_wkt(_shape) from tg_demo1"
-    ) == snapshot(name="tg_demo1 fullscan")
-
-    assert execute_all(
-        db, "select id, minX, maxX, minY, maxY from tg_demo1_rtree"
-    ) == snapshot(name="tg_demo1 rtree")
-
-    assert re.match(
-        "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 0:fullscan",
-        explain_query_plan("select * from tg_demo1"),
-    )
-
-    assert re.match(
-        "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 150:predicate",
-        explain_query_plan("select * from tg_demo1 where tg_intersects(_shape, '')"),
-    )
-    assert re.match(
-        "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 152:predicate",
-        explain_query_plan("select * from tg_demo1 where tg_contains(_shape, '')"),
-    )
-    assert re.match(
-        "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 156:predicate",
-        explain_query_plan("select * from tg_demo1 where tg_touches(_shape, '')"),
-    )
-    assert re.match(
-        "SCAN (TABLE )?tg_demo1 VIRTUAL TABLE INDEX 157:predicate",
-        explain_query_plan("select * from tg_demo1 where tg_equals(_shape, '')"),
-    )
-    # TODO rest of predicates?
-
-    def intersecting(feature):
-        return [
-            row[0]
-            for row in db.execute(
-                "select rowid from tg_demo1 where tg_intersects(_shape, ?)", [feature]
-            ).fetchall()
-        ]
-
-    NO_INTERSECT = '{"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[-117.2382994,32.8816125],[-117.2381318,32.8817785]]}}'
-    assert intersecting(NO_INTERSECT) == []
-
-    INTERSECTS_1 = '{"type":"Feature","properties":{},"geometry":{"type":"LineString","coordinates":[[-117.238215,32.8815289],[-117.2380638,32.8816982]]}}'
-    assert intersecting(INTERSECTS_1) == [0]
-    INTERSECTS_ALL = '{"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[-117.23807203378166,32.881557772296276],[-117.23789358476843,32.881557772296276],[-117.23789358476843,32.88141682228195],[-117.23807203378166,32.88141682228195],[-117.23807203378166,32.881557772296276]]]}}'
-    assert intersecting(INTERSECTS_ALL) == [0, 1, 2, 3]
-    FULLY_INSIDE_1 = '{"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[-117.2381120521583,32.88156367813649],[-117.23809600069441,32.88156367813649],[-117.23809600069441,32.88154626655529],[-117.2381120521583,32.88154626655529],[-117.2381120521583,32.88156367813649]]]}}'
-    assert intersecting(FULLY_INSIDE_1) == [0]
-    POINT1 = '{"type":"Feature","properties":{},"geometry":{"type":"Point","coordinates":[-117.2378994,32.8815878]}}'
-    assert intersecting(POINT1) == [1]
-    RIGHT_2 = '{"type":"Feature","properties":{},"geometry":{"type":"Polygon","coordinates":[[[-117.23782724895766,32.881553840644926],[-117.23764879994442,32.881553840644926],[-117.23764879994442,32.8814128906306],[-117.23782724895766,32.8814128906306],[-117.23782724895766,32.881553840644926]]]}}'
-    assert intersecting(RIGHT_2) == [1, 3]
-
-    with pytest.raises(
-        sqlite3.OperationalError,
-        match="The given predicate inside the WHERE clause on tg0 table is not supported yet",
-    ):
-        db.execute(
-            "select * from tg_demo1 where tg_disjoint(_shape, ?)", [NO_INTERSECT]
+        """
+        create virtual table tg_geoms using tg0(
+          a geometry,
+          b point,
+          c linestring,
+          d polygon,
+          e multipoint,
+          f multilinestring,
+          g multipolygon,
+          h geometrycollection
         )
-    with pytest.raises(
-        sqlite3.OperationalError,
-        match="The given predicate inside the WHERE clause on tg0 table is not supported yet",
-    ):
-        db.execute(
-            "select * from tg_demo1 where tg_contains(_shape, ?)", [NO_INTERSECT]
-        )
-    with pytest.raises(
-        sqlite3.OperationalError,
-        match="The given predicate inside the WHERE clause on tg0 table is not supported yet",
-    ):
-        db.execute("select * from tg_demo1 where tg_within(_shape, ?)", [NO_INTERSECT])
-    with pytest.raises(
-        sqlite3.OperationalError,
-        match="The given predicate inside the WHERE clause on tg0 table is not supported yet",
-    ):
-        db.execute("select * from tg_demo1 where tg_covers(_shape, ?)", [NO_INTERSECT])
-    with pytest.raises(
-        sqlite3.OperationalError,
-        match="The given predicate inside the WHERE clause on tg0 table is not supported yet",
-    ):
-        db.execute(
-            "select * from tg_demo1 where tg_coveredby(_shape, ?)", [NO_INTERSECT]
-        )
+        """
+    )
+    assert table_xinfo("tg_geoms") == snapshot(name="every geometry type xinfo")
+    db.execute("drop table tg_geoms")
 
-    with pytest.raises(
-        sqlite3.OperationalError,
-        match="only 1 predicate is allowed on tg0 WHERE clauses.",
-    ):
-        db.execute(
-            "select * from tg_demo1 where tg_intersects(_shape, ?) and tg_intersects(_shape, ?)",
-            [NO_INTERSECT, NO_INTERSECT],
-        )
-
-    assert db.execute("select count(*) from tg_demo1").fetchone()[0] == 4
-    db.execute("delete from tg_demo1 where rowid = 0")
-    assert db.execute("select count(*) from tg_demo1").fetchone()[0] == 3
-
-    db.execute("drop table tg_demo1;")
-    assert execute_all(db, "select name from sqlite_master where name like 'tg%'") == []
+    # indexing= options parse on geometry columns, keywords are
+    # case-insensitive
+    db.execute(
+        "create virtual table tg_ix using tg0("
+        "a geometry indexing=none, "
+        "b polygon indexing=natural, "
+        "c polygon indexing=ystripes, "
+        "d POLYGON INDEXING=YSTRIPES)"
+    )
+    assert table_xinfo("tg_ix") == snapshot(name="indexing options xinfo")
+    db.execute("drop table tg_ix")
 
 
 @pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
-def test_tg0_touches_and_equals():
-    db.execute("create virtual table tg_demo3 using tg0();")
-    # rowid 0 and rowid 1 share the edge x=2 (touch, but don't overlap).
-    # rowid 3 is an exact duplicate of rowid 0 (equals). rowid 2 is disjoint
-    # from everything else.
+def test_tg0_create_data_columns(snapshot):
     db.execute(
-        "insert into tg_demo3(rowid, _shape) select key, value from json_each(?)",
-        [
-            json.dumps(
-                [
-                    "POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0))",
-                    "POLYGON ((2 0, 4 0, 4 2, 2 2, 2 0))",
-                    "POLYGON ((10 10, 12 10, 12 12, 10 12, 10 10))",
-                    "POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0))",
-                ]
-            )
-        ],
+        "create virtual table tg_data using tg0("
+        "shape point, a text, b int, c integer, d float, e double, f blob)"
     )
+    assert table_xinfo("tg_data") == snapshot(name="every data type xinfo")
+    db.execute("drop table tg_data")
 
-    # both predicates use the rtree index (not a full-scan) when applied
-    # directly to the _shape column.
-    assert re.match(
-        "SCAN (TABLE )?tg_demo3 VIRTUAL TABLE INDEX 156:predicate",
-        explain_query_plan("select * from tg_demo3 where tg_touches(_shape, '')"),
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_create_primary_keys(snapshot):
+    db.execute(
+        "create virtual table tg_ipk using tg0(id integer primary key, shape point)"
     )
-    assert re.match(
-        "SCAN (TABLE )?tg_demo3 VIRTUAL TABLE INDEX 157:predicate",
-        explain_query_plan("select * from tg_demo3 where tg_equals(_shape, '')"),
+    assert table_xinfo("tg_ipk") == snapshot(name="integer pk xinfo")
+    # integer primary keys keep rowid tables: `rowid` still resolves
+    db.execute("explain query plan select rowid from tg_ipk")
+    db.execute("drop table tg_ipk")
+
+    db.execute(
+        "create virtual table tg_tpk using tg0(id text primary key, shape point)"
     )
+    assert table_xinfo("tg_tpk") == snapshot(name="text pk xinfo")
+    # text primary keys declare WITHOUT ROWID: no rowid column exists
+    with pytest.raises(sqlite3.OperationalError, match="no such column: rowid"):
+        db.execute("explain query plan select rowid from tg_tpk")
+    db.execute("drop table tg_tpk")
 
-    def indexed(predicate, feature):
-        return sorted(
-            row[0]
-            for row in db.execute(
-                f"select rowid from tg_demo3 where {predicate}(_shape, ?)", [feature]
-            ).fetchall()
-        )
 
-    def unindexed(predicate, feature):
-        # wrapping the column in tg_to_wkt() defeats tg0's xFindFunction
-        # interception, so this runs the plain scalar predicate over a
-        # full-table scan instead of the rtree-accelerated plan.
-        return sorted(
-            row[0]
-            for row in db.execute(
-                f"select rowid from tg_demo3 where {predicate}(tg_to_wkt(_shape), ?)",
-                [feature],
-            ).fetchall()
-        )
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_create_free_form_order(snapshot):
+    # declaration order is free-form: data columns may come before geometry
+    # columns, and a primary key declared mid-list is hoisted to column 0
+    db.execute(
+        "create virtual table tg_order using tg0("
+        "label text, "
+        "id integer primary key, "
+        "boundary polygon indexing=ystripes, "
+        "height double, "
+        "center point)"
+    )
+    assert table_xinfo("tg_order") == snapshot(name="free-form order xinfo")
+    db.execute("drop table tg_order")
 
-    assert re.match(
-        "SCAN (TABLE )?tg_demo3 VIRTUAL TABLE INDEX 0:fullscan",
-        explain_query_plan(
-            "select * from tg_demo3 where tg_touches(tg_to_wkt(_shape), '')"
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_create_errors(snapshot):
+    cases = {
+        "no columns": "create virtual table tg_err using tg0()",
+        "no geometry column": "create virtual table tg_err using tg0(label text)",
+        "no geometry column pk only": (
+            "create virtual table tg_err using tg0(id integer primary key)"
         ),
-    )
-
-    RIGHT_SQUARE = "POLYGON ((2 0, 4 0, 4 2, 2 2, 2 0))"
-    LEFT_SQUARE = "POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0))"
-    FAR_AWAY = "POLYGON ((20 20, 22 20, 22 22, 20 22, 20 20))"
-
-    assert indexed("tg_touches", RIGHT_SQUARE) == [0, 3]
-    assert indexed("tg_touches", RIGHT_SQUARE) == unindexed("tg_touches", RIGHT_SQUARE)
-    assert indexed("tg_touches", FAR_AWAY) == []
-    assert indexed("tg_touches", FAR_AWAY) == unindexed("tg_touches", FAR_AWAY)
-
-    assert indexed("tg_equals", LEFT_SQUARE) == [0, 3]
-    assert indexed("tg_equals", LEFT_SQUARE) == unindexed("tg_equals", LEFT_SQUARE)
-    assert indexed("tg_equals", FAR_AWAY) == []
-    assert indexed("tg_equals", FAR_AWAY) == unindexed("tg_equals", FAR_AWAY)
+        "could not parse": "create virtual table tg_err using tg0(a b c)",
+        "unknown column type": "create virtual table tg_err using tg0(a geometri)",
+        "more than one primary key": (
+            "create virtual table tg_err using tg0("
+            "id integer primary key, id2 text primary key, shape point)"
+        ),
+        "too many geometry columns": (
+            "create virtual table tg_err using tg0("
+            + ", ".join(f"g{i} point" for i in range(9))
+            + ")"
+        ),
+        "too many data columns": (
+            "create virtual table tg_err using tg0(shape point, "
+            + ", ".join(f"d{i} text" for i in range(17))
+            + ")"
+        ),
+        "duplicate column name": (
+            "create virtual table tg_err using tg0(a point, A point)"
+        ),
+        "duplicate column name with pk": (
+            "create virtual table tg_err using tg0(a integer primary key, a point)"
+        ),
+        "reserved column name distance": (
+            "create virtual table tg_err using tg0(distance point)"
+        ),
+        "reserved column name rowid": (
+            "create virtual table tg_err using tg0(shape point, rowid text)"
+        ),
+        "unknown indexing option": (
+            "create virtual table tg_err using tg0(a polygon indexing=foo)"
+        ),
+        "unknown geometry option": (
+            "create virtual table tg_err using tg0(a polygon compression=zstd)"
+        ),
+        "indexing on data column": (
+            "create virtual table tg_err using tg0("
+            "shape point, label text indexing=none)"
+        ),
+        "indexing on primary key": (
+            "create virtual table tg_err using tg0("
+            "id integer primary key indexing=none, shape point)"
+        ),
+    }
+    for name, sql in cases.items():
+        assert tg0_error(sql) == snapshot(name=name)
 
 
 @pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
-def test_tg0_with_aux():
-    db.execute("create virtual table tg_demo2 using tg0(a,b,c);")
-    db.execute(
-        """
-        insert into tg_demo2(rowid, _shape, a, b, c)
-        values (1, 'POLYGON ((0 0, 2 2, 4 0, 0 0))', 1, 'text', X'00')
-        """
+def test_tg0_old_syntax_migration_hint(snapshot):
+    # pre-typed-column syntax: bare identifiers became aux columns next to an
+    # implicit _shape column. Bare identifiers now get a targeted migration
+    # hint on top of the could-not-parse error.
+    assert tg0_error("create virtual table tg_old using tg0(tzid)") == snapshot(
+        name="bare identifier hint"
     )
-    assert execute_all(
-        db, "select rowid, tg_to_wkt(_shape), a, b, c from tg_demo2"
-    ) == [
-        {
-            "rowid": 1,
-            "tg_to_wkt(_shape)": "POLYGON((0 0,2 2,4 0,0 0))",
-            "a": 1,
-            "b": "text",
-            "c": b"\0",
-        }
-    ]
 
 
 @pytest.mark.skip(reason="TODO not needeD?")

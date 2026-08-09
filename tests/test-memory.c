@@ -344,11 +344,11 @@ static const char *OOM_SCENARIO[] = {
     "select tg_to_wkt(point) from tg_ring_points_each("
     "'POLYGON((0 0, 10 0, 10 10, 0 0))')",
     "select tg_to_wkt('not a geometry')", // error path under OOM too
-    "create virtual table temp.oom using tg0(label)",
-    "insert into temp.oom(rowid, _shape, label) "
-    "values (1, tg_geom('POINT(1 1)'), 'a')",
-    "select rowid from temp.oom "
-    "where tg_intersects(_shape, 'POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))')",
+    // tg0 CREATE/table_xinfo/DROP only: this sweeps the constructor parse and
+    // tg0_free paths of the typed-column syntax. INSERT/SELECT are stubbed
+    // out mid-rewrite; write/read coverage returns in tickets 03/04.
+    "create virtual table temp.oom using tg0(label text, shape geometry)",
+    "select * from pragma_table_xinfo('oom')",
     "drop table temp.oom",
 };
 
@@ -531,18 +531,14 @@ int main(int argc, char *argv[]) {
       "tg_points_each('MULTIPOINT(3 3, 4 4, 5 5)') b",
       "select a.value, tg_to_wkt(b.point) from json_each('[1, 2, 3]') a, "
       "tg_line_points_each('LINESTRING(7 7, 8 8)') b",
-      "create virtual table temp.demo using tg0(label)",
-      "insert into temp.demo(rowid, _shape, label) "
-      "values (1, tg_geom('POINT(1 1)'), 'a'), (2, tg_geom('POINT(9 9)'), 'b')",
-      "select rowid, label from temp.demo "
-      "where tg_intersects(_shape, 'POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))')",
-      "select rowid, label from temp.demo "
-      "where tg_touches(_shape, 'LINESTRING(1 1, 5 5)')",
-      "select rowid, label from temp.demo "
-      "where tg_equals(_shape, 'POINT(1 1)')",
-      "insert into temp.demo(rowid, _shape, label) "
-      "values (3, 'POINT(5 5)', 'd')",
-      "delete from temp.demo where rowid = 1",
+      // tg0 CREATE/table_xinfo/DROP only: the typed-column constructor parse
+      // and tg0_free are the code paths worth checking right now.
+      // INSERT/SELECT are stubbed out mid-rewrite; write/read coverage
+      // returns in tickets 03/04.
+      "create virtual table temp.demo using tg0("
+      "id integer primary key, label text, shape geometry, "
+      "boundary polygon indexing=ystripes)",
+      "select * from pragma_table_xinfo('demo')",
       "drop table temp.demo",
   };
   static const char *ERROR_STATEMENTS[] = {
