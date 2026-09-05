@@ -75,6 +75,10 @@ co-located places) and sphere-vs-spheroid reporting differences do not
 count as errors, but returning a farther place does. "order" additionally
 requires the rows to come back nearest-first.
 
+Data lives in `data.noindex/` — the suffix keeps Spotlight from indexing
+gigabytes of fresh database files, which pinned a core and the disk while
+the US numbers were first taken.
+
 ```sh
 ./run.sh build --dataset ca      # loads every system (drop --systems to pick)
 ./run.sh run --dataset ca        # times the queries, writes results-ca.json
@@ -111,10 +115,14 @@ Headline, 17.9M rows, warm, median per query:
   on every process start (30–60 s), and are exact only for points. The
   same KD-tree on raw degrees is wrong for 62% of k=10 queries and every
   k=100 query: the planar-on-lon/lat mistake is not a corner case.
-- Build cost is tg0's weak spot: 30 min to load 17.9M rows against 17 min
-  for a plain R*Tree and 3 min for PostGIS. The write path re-prepares
-  its shadow-table statements per row; caching them is the obvious
-  follow-up.
+- Build cost: the first US load took 30 min against 17 min for a plain
+  R*Tree, because tg0's write path re-prepared its shadow-table statements
+  for every row. With the statements cached on the vtab (vec0-style) the
+  California load went from 46 s to 33 s (plain R*Tree: 29 s) and an
+  in-memory load of 600k points is at parity with a hand-written content
+  table + rtree (6.1 s vs 6.2 s); what is left is the rtree's own insert
+  cost. PostGIS (COPY + a bulk GiST build) and DuckDB (no index) load
+  faster than any row-at-a-time SQLite path.
 
 Numbers are single-machine (M4 Pro, macOS, APFS SSD), one process,
 Python driver overhead included; treat differences under ~30% as noise.

@@ -14,5 +14,5 @@ COPY (
   FROM read_parquet('s3://overturemaps-us-west-2/release/2026-08-19.0/theme=places/type=place/*', hive_partitioning = 1)
   WHERE bbox.xmin BETWEEN -124.6 AND -114.0
     AND bbox.ymin BETWEEN 32.4 AND 42.1
-) TO 'data/places-ca.parquet' (FORMAT parquet, COMPRESSION zstd);
-SELECT count(*) AS rows FROM 'data/places-ca.parquet';
+) TO 'data.noindex/places-ca.parquet' (FORMAT parquet, COMPRESSION zstd);
+SELECT count(*) AS rows FROM 'data.noindex/places-ca.parquet';

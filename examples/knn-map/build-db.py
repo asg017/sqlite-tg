@@ -14,7 +14,7 @@ import duckdb
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-PARQUET = ROOT / "bench/knn/data/places-ca.parquet"
+PARQUET = ROOT / "bench/knn/data.noindex/places-ca.parquet"
 OUT = HERE / "data/places-sf.db"
 BBOX = (-122.53, 37.70, -122.35, 37.84)
 

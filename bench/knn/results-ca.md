@@ -2,7 +2,7 @@
 
 | system | build | size | k=1 | k=10 | k=100 | k=1000 | radius 2 km | correct (k=10) |
 |---|---|---|---|---|---|---|---|---|
-| tg0 | 47 s | 219 MB | 0.06 ms | 0.09 ms | 0.30 ms | 2.28 ms | 2.44 ms | 100% sets, 100% order |
+| tg0 | 33 s | 219 MB | 0.06 ms | 0.09 ms | 0.30 ms | 2.28 ms | 2.44 ms | 100% sets, 100% order |
 | spatialite | 39 s | 309 MB | 0.20 ms | 0.55 ms | 2.44 ms | 24.30 ms | — | 85% sets, 77% order |
 | sqlite-rtree | 29 s | 211 MB | 0.09 ms | 0.21 ms | 0.77 ms | 6.21 ms | 2.32 ms | 100% sets, 100% order |
 | postgis | 9 s | 382 MB | 0.35 ms | 0.38 ms | 0.70 ms | 2.92 ms | 3.59 ms | 100% sets, 100% order |

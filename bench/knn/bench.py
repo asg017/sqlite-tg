@@ -24,7 +24,9 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-DATA = HERE / "data"
+# ".noindex" keeps Spotlight from indexing gigabytes of databases (mds_stores
+# was pinning a core and the disk while the US files were fresh)
+DATA = HERE / "data.noindex"
 DIST = HERE.parent.parent / "dist"
 TG0_EXT = str(DIST / "tg0")
 SPATIALITE_EXT = "/opt/homebrew/lib/mod_spatialite"
