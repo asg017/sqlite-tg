@@ -2742,6 +2742,114 @@ def test_tg0_knn_extra_filters(tg0_knn_table):
 
 
 @pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_folded_predicate(tg0_knn_table):
+    # ticket 04: a predicate on the MATCH column is folded into the walk as
+    # a cell prune + exact test. Results must equal the unfolded form, where
+    # tg_to_wkb() around the column defeats interception and SQLite
+    # post-filters the stream instead
+    import random
+
+    rng = random.Random(5)
+    shapes = [
+        "POLYGON((0 0, 60 0, 60 60, 0 60, 0 0))",
+        "POLYGON((-180 -90, -100 -90, -100 -20, -180 -20, -180 -90))",
+        "POLYGON((170 -10, 180 -10, 180 10, 170 10, 170 -10))",
+        "LINESTRING(-170 -80, 170 80)",
+        "POINT(1000 1000)",  # nothing anywhere near: empty results
+    ]
+    predicates = ["tg_intersects", "tg_within", "tg_coveredby", "tg_disjoint", "tg_contains", "tg_covers", "tg_touches", "tg_equals"]
+    for _ in range(6):
+        q = (rng.uniform(-180, 180), rng.uniform(-90, 90))
+        for shape in shapes:
+            for predicate in predicates:
+                folded = db.execute(
+                    f"select name, distance from tg_knn where geo match ? and {predicate}(geo, ?) order by distance",
+                    [f"POINT({q[0]} {q[1]})", shape],
+                ).fetchall()
+                plain = db.execute(
+                    f"select name, distance from tg_knn where geo match ? and {predicate}(tg_to_wkb(geo), ?) order by distance",
+                    [f"POINT({q[0]} {q[1]})", shape],
+                ).fetchall()
+                assert [tuple(r) for r in folded] == [tuple(r) for r in plain], (q, shape, predicate)
+    # the fold shows up in the plan and consumes the predicate
+    plan = explain_query_plan(
+        "select name from tg_knn where geo match 'POINT(0 0)' and tg_intersects(geo, 'POINT(0 0)') order by distance"
+    )
+    assert "4KAG_PAIO" in plan
+    # a second predicate on the same column, and one on another geometry
+    # column, stay unconsumed but still filter
+    got = db.execute(
+        "select name from tg_knn where geo match 'POINT(30 30)' "
+        "and tg_intersects(geo, 'POLYGON((0 0, 60 0, 60 60, 0 60, 0 0))') "
+        "and tg_within(geo, 'POLYGON((20 20, 40 20, 40 40, 20 40, 20 20))') "
+        "and tg_intersects(flat, 'POLYGON((25 25, 40 25, 40 40, 25 40, 25 25))') order by distance"
+    ).fetchall()
+    pts = dict(tg0_knn_table)
+    assert [r["name"] for r in got] == [
+        n for n, _ in knn_reference(tg0_knn_table, (30, 30))
+        if 25 <= pts[n][0] <= 40 and 25 <= pts[n][1] <= 40
+    ]
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_distance_bound(tg0_knn_table):
+    # ticket 04: `distance < ?` / `<= ?` end the walk early; results equal
+    # the unpruned form (unary + defeats constraint consumption)
+    q = (30, 30)
+    # reference distances as the extension reports them (its ranking is
+    # validated against Python elsewhere; here the bound must be exact to
+    # the ulp, which Python's own haversine is not)
+    ref = knn_query("tg_knn", "geo", q)
+    for op in ("<", "<="):
+        for bound in (0, ref[0][1], ref[3][1], 2_000_000, 1e12):
+            pruned = db.execute(
+                f"select name, distance from tg_knn where geo match ? and distance {op} ? order by distance",
+                [f"POINT({q[0]} {q[1]})", bound],
+            ).fetchall()
+            plain = db.execute(
+                f"select name, distance from tg_knn where geo match ? and +distance {op} ? order by distance",
+                [f"POINT({q[0]} {q[1]})", bound],
+            ).fetchall()
+            assert [tuple(r) for r in pruned] == [tuple(r) for r in plain], (op, bound)
+            expected = [e for e in ref if (e[1] < bound if op == "<" else e[1] <= bound)]
+            assert_ranking([tuple(r) for r in pruned], expected)
+    # the exact bound on the nearest row's own distance: < excludes it, <=
+    # keeps it
+    assert len(db.execute("select 1 from tg_knn where geo match ? and distance < ?", [f"POINT({q[0]} {q[1]})", ref[0][1]]).fetchall()) == 0
+    assert len(db.execute("select 1 from tg_knn where geo match ? and distance <= ?", [f"POINT({q[0]} {q[1]})", ref[0][1]]).fetchall()) == 1
+    # non-numeric / NULL bounds are left entirely to SQLite's comparison
+    for bound in (None, "abc"):
+        pruned = db.execute("select name from tg_knn where geo match 'POINT(0 0)' and distance < ? order by distance", [bound]).fetchall()
+        plain = db.execute("select name from tg_knn where geo match 'POINT(0 0)' and +distance < ? order by distance", [bound]).fetchall()
+        assert [r[0] for r in pruned] == [r[0] for r in plain]
+    # other comparison operators are simply post-filtered
+    got = db.execute("select name from tg_knn where geo match ? and distance > ? order by distance limit 2", [f"POINT({q[0]} {q[1]})", ref[2][1]]).fetchall()
+    assert [r[0] for r in got] == [ref[3][0], ref[4][0]]
+    assert "4KAG_Dd__" in explain_query_plan("select name from tg_knn where geo match 'POINT(0 0)' and distance < 5 order by distance")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_pushdown(tg0_knn_table):
+    # ticket 04: data-column constraints prefilter the per-rowid content
+    # fetch (omit stays 0: SQLite re-checks). Equivalent to the unpushed
+    # form, and combinable with the predicate and distance folds
+    q = (30, 30)
+    for extra, defeated in (
+        ("name > 'p0150'", "+name > 'p0150'"),
+        ("name = 'p0007'", "+name = 'p0007'"),
+        ("name < 'p0100' and name <> 'p0050'", "+name < 'p0100' and +name <> 'p0050'"),
+    ):
+        pushed = db.execute(f"select name, distance from tg_knn where geo match ? and {extra} order by distance limit 20", [f"POINT({q[0]} {q[1]})"]).fetchall()
+        plain = db.execute(f"select name, distance from tg_knn where geo match ? and {defeated} order by distance limit 20", [f"POINT({q[0]} {q[1]})"]).fetchall()
+        assert [tuple(r) for r in pushed] == [tuple(r) for r in plain]
+        assert len(pushed) > 0
+    plan = explain_query_plan(
+        "select name from tg_knn where geo match 'POINT(0 0)' and tg_intersects(geo, 'POINT(0 0)') and distance <= 5 and name > 'a' order by distance"
+    )
+    assert plan.endswith("4KAG_PAIODc__&Ab_")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
 def test_tg0_knn_eqp(tg0_knn_table, snapshot):
     # `order by distance` (ASC, alone) is consumed by the plan: no temp
     # B-tree. Anything else is sorted by SQLite over the full stream

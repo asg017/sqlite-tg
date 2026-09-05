@@ -595,6 +595,14 @@ int main(int argc, char *argv[]) {
       "order by distance limit 1",
       "select label from temp.demo where boundary match 'POINT(5.5 5.5)' "
       "and label <> 'nope' order by distance",
+      // ticket 04 folds: a same-column predicate (cell prune + exact test),
+      // a distance bound (early stop), and pushdown on the candidate fetch
+      "select label, distance from temp.demo where shape match 'POINT(1 1)' "
+      "and tg_intersects(shape, 'POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))') "
+      "and distance <= 1000000 and label <> 'nope' order by distance",
+      "select label from temp.demo where boundary match 'POINT(1 1)' "
+      "and tg_within(boundary, 'POLYGON((-1 -1, 7 -1, 7 7, -1 7, -1 -1))') "
+      "and distance < 1e12 order by distance limit 1",
       "select a.label, (select b.label from temp.demo b where b.shape match "
       "a.shape and b.id <> a.id order by b.distance limit 1) from temp.demo a",
       // ticket 05: data-column constraint pushdown — the label comparison
@@ -684,6 +692,8 @@ int main(int argc, char *argv[]) {
       "select * from temp.knn_err where shape match 'POINT(500 0)'",
       "select * from temp.knn_err where label match 'POINT(0 0)'",
       "select * from temp.knn_err where distance < 1",
+      "select * from temp.knn_err where shape match 'POINT(0 0)' "
+      "and tg_intersects(shape, 'nope') order by distance",
       "select tg_intersects('POINT(1 1)', 'nope')",
       "select tg_equals('POINT(1 1)', 'nope')",
       "select tg_to_wkt(tg_group_multipoint(value)) "

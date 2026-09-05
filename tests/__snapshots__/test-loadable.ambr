@@ -511,7 +511,7 @@
       'USE TEMP B-TREE FOR ORDER BY',
     ]),
     'distance filter': list([
-      'SCAN tg_knn VIRTUAL TABLE INDEX 0:4KAG_',
+      'SCAN tg_knn VIRTUAL TABLE INDEX 0:4KAG_Dd__',
     ]),
     'no order by': list([
       'SCAN tg_knn VIRTUAL TABLE INDEX 0:4KAG_',

@@ -3093,6 +3093,7 @@ done:
 //                      argv[0] = the MATCH value (a Point geometry)
 //   block  := 'K' [geom-col] [metric] '_'          -- KNN block
 //           | 'P' [geom-col] [pred-op] [strategy]   -- predicate block
+//           | 'D' [cmp-op] '_' '_'                  -- distance bound block
 //           | '&' [data-col] [cmp-op] '_'           -- pushdown block
 //
 // Blocks appear in argv order: the k'th block describes argv[k]. A predicate
@@ -3103,7 +3104,13 @@ done:
 //
 // A KNN plan carries exactly one 'K' block, always first: [geom-col] as
 // above and [metric] 'G' (geodesic) or 'P' (planar), informational — the
-// column's metric= option is authoritative. See "tg0 KNN plan" below.
+// column's metric= option is authoritative. It may then carry (in this
+// order) one 'P' block — a tg predicate on the *same* geometry column,
+// folded into the walk as a cell prune + exact per-candidate test — and one
+// 'D' block — `distance < ?` ('d') or `distance <= ?` ('c'), the walk stops
+// once every remaining bound exceeds it (omit stays 0, SQLite re-checks the
+// exact value) — before its '&' pushdown blocks, which prefilter the
+// per-rowid content fetch. See "tg0 KNN plan" below.
 //
 // Predicate and fullscan plans may then carry up to TG0_MAX_PUSHDOWN_BLOCKS
 // '&' pushdown blocks — EQ/NE/LT/LE/GT/GE constraints on plain data columns
@@ -3123,6 +3130,7 @@ done:
 
 #define TG0_IDXSTR_KIND_KNN 'K'
 #define TG0_IDXSTR_KIND_PREDICATE 'P'
+#define TG0_IDXSTR_KIND_DISTANCE 'D'
 #define TG0_IDXSTR_KIND_PUSHDOWN '&'
 
 // pushdown block [cmp-op] alphabet, mirroring vec0's vec0_metadata_operator
@@ -4357,6 +4365,12 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
   int knnGeomIdx = -1;
   int hasUnusableMatch = 0;
   sqlite3_int64 limit = -1;
+  // KNN folds: the first `distance <`/`<=` term, and the first predicate on
+  // the MATCH column (preferring one with an rtree prune strategy)
+  int iDistanceTerm = -1;
+  char distanceOp = 0;
+  int iKnnPredicateTerm = -1;
+  int knnPredicatePlan = -1;
   // data-column pushdown candidates (decision 10), in constraint order
   int nPushdown = 0;
   int pushdownTerm[TG0_MAX_PUSHDOWN_BLOCKS];
@@ -4417,7 +4431,12 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
     // (ticket 04 folds `distance <= ?` into the traversal as a prune).
     // Without a MATCH the column is NULL and the query cannot mean anything
     if (iColumn == tg0_column_distance_idx(p)) {
-      pIdxInfo->aConstraintUsage[i].argvIndex = 0;
+      if (iDistanceTerm < 0 && (op == SQLITE_INDEX_CONSTRAINT_LT ||
+                                op == SQLITE_INDEX_CONSTRAINT_LE)) {
+        iDistanceTerm = i;
+        distanceOp = op == SQLITE_INDEX_CONSTRAINT_LT ? TG0_PUSHDOWN_OP_LT
+                                                       : TG0_PUSHDOWN_OP_LE;
+      }
       continue;
     }
 
@@ -4494,6 +4513,34 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
     }
   }
 
+  // KNN: fold one predicate on the MATCH column into the walk (decision
+  // 10), preferring one whose rtree strategy prunes cells. Predicates on
+  // other geometry columns, and any further ones on this column, stay
+  // unconsumed for SQLite to post-filter on the stream
+  if (iKnnTerm >= 0) {
+    for (int i = 0; i < pIdxInfo->nConstraint; i++) {
+      if (!pIdxInfo->aConstraint[i].usable) {
+        continue;
+      }
+      int iPlan = tg0_predicate_plan_by_op(pIdxInfo->aConstraint[i].op);
+      tg0_user_column_kind kind;
+      int idx;
+      if (iPlan < 0 ||
+          tg0_column_lookup(p, pIdxInfo->aConstraint[i].iColumn, &kind,
+                            &idx) != SQLITE_OK ||
+          kind != TG0_USER_COLUMN_KIND_GEOMETRY || idx != knnGeomIdx) {
+        continue;
+      }
+      if (iKnnPredicateTerm < 0 ||
+          (tg0_predicate_plans[knnPredicatePlan].strategy ==
+               TG0_STRATEGY_FULLSCAN &&
+           tg0_predicate_plans[iPlan].strategy != TG0_STRATEGY_FULLSCAN)) {
+        iKnnPredicateTerm = i;
+        knnPredicatePlan = iPlan;
+      }
+    }
+  }
+
   char *idxStr;
   if (iKnnTerm < 0 && hasUnusableMatch) {
     return SQLITE_CONSTRAINT;
@@ -4521,15 +4568,38 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
     // against xColumn — which keeps the nearest-first stream exact. The
     // planner's own ORDER BY is consumed when it is exactly `distance ASC`,
     // the order the scan produces; anything else is sorted by SQLite
-    idxStr = sqlite3_mprintf("%c%c%c%c%c", TG0_PLAN_KNN, TG0_IDXSTR_KIND_KNN,
-                             'A' + knnGeomIdx,
-                             p->geometry_columns[knnGeomIdx].metric ==
-                                     TG_METRIC_PLANAR
-                                 ? 'P'
-                                 : 'G',
-                             '_');
-    pIdxInfo->aConstraintUsage[iKnnTerm].argvIndex = 1;
+    sqlite3_str *str = sqlite3_str_new(NULL);
+    int argvIndex = 1;
+    sqlite3_str_appendf(str, "%c%c%c%c%c", TG0_PLAN_KNN, TG0_IDXSTR_KIND_KNN,
+                        'A' + knnGeomIdx,
+                        p->geometry_columns[knnGeomIdx].metric ==
+                                TG_METRIC_PLANAR
+                            ? 'P'
+                            : 'G',
+                        '_');
+    pIdxInfo->aConstraintUsage[iKnnTerm].argvIndex = argvIndex++;
     pIdxInfo->aConstraintUsage[iKnnTerm].omit = 1;
+    if (iKnnPredicateTerm >= 0) {
+      sqlite3_str_appendf(str, "%c%c%c%c", TG0_IDXSTR_KIND_PREDICATE,
+                          'A' + knnGeomIdx,
+                          tg0_predicate_plans[knnPredicatePlan].opChar,
+                          tg0_predicate_plans[knnPredicatePlan].strategy);
+      pIdxInfo->aConstraintUsage[iKnnPredicateTerm].argvIndex = argvIndex++;
+      pIdxInfo->aConstraintUsage[iKnnPredicateTerm].omit = 1;
+    }
+    if (iDistanceTerm >= 0) {
+      sqlite3_str_appendf(str, "%c%c%c%c", TG0_IDXSTR_KIND_DISTANCE,
+                          distanceOp, '_', '_');
+      pIdxInfo->aConstraintUsage[iDistanceTerm].argvIndex = argvIndex++;
+      // omit stays 0: the bound only ends the walk early, SQLite still
+      // compares the exact distance
+    }
+    for (int k = 0; k < nPushdown; k++) {
+      sqlite3_str_appendf(str, "%c%c%c%c", TG0_IDXSTR_KIND_PUSHDOWN,
+                          'A' + pushdownDataIdx[k], pushdownOp[k], '_');
+      pIdxInfo->aConstraintUsage[pushdownTerm[k]].argvIndex = argvIndex++;
+    }
+    idxStr = sqlite3_str_finish(str);
     if (pIdxInfo->nOrderBy == 1 &&
         pIdxInfo->aOrderBy[0].iColumn == tg0_column_distance_idx(p) &&
         !pIdxInfo->aOrderBy[0].desc) {
@@ -4664,6 +4734,21 @@ typedef struct tg0_knn {
   struct tg_point q;
   // exact distance of the current (emitted) row
   double currentDistance;
+  // folded predicate ('P' block), or predFunc == NULL: the exact test
+  // applied to every candidate, its rtree strategy letter used to prune
+  // cells, and the query bbox grown outward to float32 like plan '3'
+  GeomPredicateFunc predFunc;
+  const struct tg_geom *predGeom;
+  struct tg_geom *predGeomOwned;
+  char predStrategy;
+  struct tg_rect predRect;
+  // distance bound ('D' block): the walk ends once the heap minimum is
+  // >= maxDistance (maxStrict) or > maxDistance; INFINITY when absent
+  double maxDistance;
+  int maxStrict;
+  // 1 when '&' pushdown clauses were applied to the content fetch: a
+  // candidate rowid the fetch does not return was filtered, not lost
+  int hasPushdown;
 } tg0_knn;
 
 static int tg0_knn_entry_less(const tg0_knn_entry *a, const tg0_knn_entry *b) {
@@ -4743,6 +4828,7 @@ static void tg0_knn_free(tg0_knn *knn) {
   }
   sqlite3_free(knn->heap);
   sqlite3_finalize(knn->nodeStmt);
+  tg_geom_free(knn->predGeomOwned);
   sqlite3_free(knn);
 }
 
@@ -4806,6 +4892,38 @@ static int tg0_knn_expand_node(tg0_vtab *p, tg0_knn *knn, sqlite3_int64 nodeno,
     const unsigned char *cell = data + 4 + i * TG0_RTREE_CELL_BYTES;
     struct tg_rect rect = {{tg0_read_be_f32(cell + 8), tg0_read_be_f32(cell + 16)},
                            {tg0_read_be_f32(cell + 12), tg0_read_be_f32(cell + 20)}};
+    if (knn->predFunc) {
+      // cell prune by the folded predicate's rtree strategy. Child bboxes
+      // lie inside their node's bbox, so a node that cannot overlap (or
+      // contain) the query bbox has no matching rows beneath it; the
+      // within-style strategies can only be applied exactly at the leaves
+      struct tg_rect qr = knn->predRect;
+      int overlap = rect.min.x <= qr.max.x && rect.max.x >= qr.min.x &&
+                    rect.min.y <= qr.max.y && rect.max.y >= qr.min.y;
+      int contains = rect.min.x <= qr.min.x && rect.max.x >= qr.max.x &&
+                     rect.min.y <= qr.min.y && rect.max.y >= qr.max.y;
+      int within = rect.min.x >= qr.min.x && rect.max.x <= qr.max.x &&
+                   rect.min.y >= qr.min.y && rect.max.y <= qr.max.y;
+      switch (knn->predStrategy) {
+      case TG0_STRATEGY_OVERLAP:
+        if (!overlap) {
+          continue;
+        }
+        break;
+      case TG0_STRATEGY_CONTAINS:
+        if (!contains) {
+          continue;
+        }
+        break;
+      case TG0_STRATEGY_WITHIN:
+        if (level == 0 ? !within : !overlap) {
+          continue;
+        }
+        break;
+      default:
+        break;
+      }
+    }
     tg0_knn_entry entry;
     entry.id = tg0_read_be64(cell);
     entry.key = tg_metric_point_rect(knn->metric, knn->q, rect);
@@ -4834,9 +4952,12 @@ corrupt:
   return SQLITE_CORRUPT_VTAB;
 }
 
-// Positions pCur->stmt (the by-rowid content fetch) on rowid. A missing row
-// means the rtree and content table disagree.
-static int tg0_knn_fetch_row(tg0_cursor *pCur, sqlite3_int64 rowid) {
+// Positions pCur->stmt (the by-rowid content fetch) on rowid. Returns
+// SQLITE_DONE when the fetch returns no row and allowMissing is set (a
+// pushdown clause rejected the candidate); otherwise a missing row means the
+// rtree and content table disagree.
+static int tg0_knn_fetch_row(tg0_cursor *pCur, sqlite3_int64 rowid,
+                             int allowMissing) {
   tg0_vtab *p = (tg0_vtab *)pCur->base.pVtab;
   int rc;
   sqlite3_reset(pCur->stmt);
@@ -4844,6 +4965,9 @@ static int tg0_knn_fetch_row(tg0_cursor *pCur, sqlite3_int64 rowid) {
   rc = sqlite3_step(pCur->stmt);
   if (rc == SQLITE_ROW) {
     return SQLITE_OK;
+  }
+  if (rc == SQLITE_DONE && allowMissing) {
+    return SQLITE_DONE;
   }
   if (rc == SQLITE_DONE) {
     tg_vtab_set_error(&p->base,
@@ -4864,6 +4988,12 @@ static int tg0_knn_step(tg0_cursor *pCur) {
   tg0_knn_entry entry;
   int rc;
   while (tg0_knn_pop(knn, &entry)) {
+    // the heap minimum bounds everything left: past the distance bound the
+    // scan is over
+    if (knn->maxStrict ? entry.key >= knn->maxDistance
+                       : entry.key > knn->maxDistance) {
+      break;
+    }
     if (entry.kind == TG0_KNN_KIND_NODE) {
       rc = tg0_knn_expand_node(p, knn, entry.id, entry.level);
       if (rc != SQLITE_OK) {
@@ -4871,7 +5001,13 @@ static int tg0_knn_step(tg0_cursor *pCur) {
       }
       continue;
     }
-    rc = tg0_knn_fetch_row(pCur, entry.id);
+    // a ROW was fetched once already, so it must still be there; a LEAF
+    // may be rejected by the pushdown prefilter
+    rc = tg0_knn_fetch_row(pCur, entry.id,
+                           entry.kind == TG0_KNN_KIND_LEAF && knn->hasPushdown);
+    if (rc == SQLITE_DONE) {
+      continue;
+    }
     if (rc != SQLITE_OK) {
       return rc;
     }
@@ -4891,6 +5027,10 @@ static int tg0_knn_step(tg0_cursor *pCur) {
                         tg_geom_error(candidate));
       tg_geom_free(candidate);
       return SQLITE_ERROR;
+    }
+    if (knn->predFunc && !knn->predFunc(candidate, knn->predGeom)) {
+      tg_geom_free(candidate);
+      continue;
     }
     double exact;
     bool ok = tg_metric_point_geom(knn->metric, knn->q, candidate, &exact);
@@ -5015,6 +5155,7 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
   char pushdownOp[TG0_MAX_PUSHDOWN_BLOCKS];
   int pushdownInclude[TG0_MAX_PUSHDOWN_BLOCKS];
   int argvOffset = 0;
+  const char *knnPushdownBlocks = "";
   // pushdown parameter numbers start after the prefilter's own ?1..?4
   // (point key / rtree bbox); unreferenced lower numbers are harmless
   int bindBase = 5;
@@ -5077,6 +5218,7 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
     pCur->knn->geomIdx = geomIdx;
     pCur->knn->metric = column->metric;
     pCur->knn->q = q;
+    pCur->knn->maxDistance = INFINITY;
     char *zNodeSql = sqlite3_mprintf("SELECT data FROM "
                                      TG0_SHADOW_RTREE_NODE_NAME
                                      " WHERE nodeno = ?1",
@@ -5116,10 +5258,73 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
     queryRect = tg_geom_rect(pCur->queryGeom);
   }
 
-  // trailing '&' pushdown blocks (fullscan and predicate plans only)
-  if (pCur->plan == TG0_PLAN_FULLSCAN || pCur->plan == TG0_PLAN_PREDICATE) {
-    argvOffset = pCur->plan == TG0_PLAN_PREDICATE ? 1 : 0;
-    const char *block = idxStr + (pCur->plan == TG0_PLAN_PREDICATE ? 5 : 1);
+  // KNN fold blocks: an optional 'P' predicate on the MATCH column and an
+  // optional 'D' distance bound, each consuming the next argv slot
+  if (pCur->plan == TG0_PLAN_KNN) {
+    argvOffset = 1;
+    const char *block = idxStr + 5;
+    if (strlen(block) >= 4 && block[0] == TG0_IDXSTR_KIND_PREDICATE) {
+      int iPlan = tg0_predicate_plan_by_char(block[2]);
+      if (iPlan < 0 || block[1] - 'A' != pCur->knn->geomIdx ||
+          argvOffset >= argc) {
+        tg_vtab_set_error(&p->base,
+                          "Internal tg0 error: bad KNN predicate block in '%s'",
+                          idxStr);
+        return SQLITE_ERROR;
+      }
+      char *errmsg = NULL;
+      struct tg_geom *predGeom = NULL;
+      if (geomValue(argv[argvOffset], &predGeom, &errmsg) != SQLITE_OK) {
+        tg_vtab_set_error(&p->base, "%s", errmsg);
+        sqlite3_free(errmsg);
+        return SQLITE_ERROR;
+      }
+      // the folded predicate's query geometry rides along in
+      // pCur->queryGeom's sibling slot: keep it on the knn state, freed
+      // with it
+      pCur->knn->predGeomOwned = predGeom;
+      pCur->knn->predGeom = predGeom;
+      pCur->knn->predFunc = tg0_predicate_plans[iPlan].func;
+      pCur->knn->predStrategy = block[3];
+      struct tg_rect r = tg_geom_rect(predGeom);
+      pCur->knn->predRect = (struct tg_rect){
+          {tg0_f32_down(r.min.x), tg0_f32_down(r.min.y)},
+          {tg0_f32_up(r.max.x), tg0_f32_up(r.max.y)}};
+      argvOffset++;
+      block += 4;
+    }
+    if (strlen(block) >= 4 && block[0] == TG0_IDXSTR_KIND_DISTANCE) {
+      if ((block[1] != TG0_PUSHDOWN_OP_LT && block[1] != TG0_PUSHDOWN_OP_LE) ||
+          argvOffset >= argc) {
+        tg_vtab_set_error(&p->base,
+                          "Internal tg0 error: bad KNN distance block in '%s'",
+                          idxStr);
+        return SQLITE_ERROR;
+      }
+      // only a numeric bound can end the walk early; anything else is left
+      // entirely to SQLite's own comparison (omit is 0)
+      sqlite3_value *bound = argv[argvOffset];
+      if (sqlite3_value_numeric_type(bound) == SQLITE_INTEGER ||
+          sqlite3_value_numeric_type(bound) == SQLITE_FLOAT) {
+        pCur->knn->maxDistance = sqlite3_value_double(bound);
+        pCur->knn->maxStrict = block[1] == TG0_PUSHDOWN_OP_LT;
+      }
+      argvOffset++;
+      block += 4;
+    }
+    knnPushdownBlocks = block;
+  }
+
+  // trailing '&' pushdown blocks (fullscan, predicate, and KNN plans)
+  if (pCur->plan == TG0_PLAN_FULLSCAN || pCur->plan == TG0_PLAN_PREDICATE ||
+      pCur->plan == TG0_PLAN_KNN) {
+    const char *block;
+    if (pCur->plan == TG0_PLAN_KNN) {
+      block = knnPushdownBlocks;
+    } else {
+      argvOffset = pCur->plan == TG0_PLAN_PREDICATE ? 1 : 0;
+      block = idxStr + (pCur->plan == TG0_PLAN_PREDICATE ? 5 : 1);
+    }
     for (; *block; block += 4) {
       if (strlen(block) < 4 || block[0] != TG0_IDXSTR_KIND_PUSHDOWN ||
           block[1] - 'A' < 0 || block[1] - 'A' >= p->numDataColumns ||
@@ -5236,6 +5441,9 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
   for (int k = 0; k < nPushdown; k++) {
     if (!pushdownInclude[k]) {
       continue;
+    }
+    if (pCur->knn) {
+      pCur->knn->hasPushdown = 1;
     }
     sqlite3_str_appendf(str, "%s c.data%02d %s ?%d",
                         hasWhere ? " AND" : " WHERE", pushdownDataIdx[k],
