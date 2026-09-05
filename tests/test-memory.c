@@ -510,6 +510,10 @@ int main(int argc, char *argv[]) {
       "select tg_m(tg_point(1, 2, 3))",
       "select tg_m(tg_point(1, 2, 3, 4))",
       "select tg_min_x('POLYGON ((1 1, 2 2, 3 3, 1 1))')",
+      "select tg_distance_sphere('POINT(5 -1)', "
+      "'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (4 4, 6 4, 6 6, 4 6, 4 4))')",
+      "select tg_distance_sphere(tg_point(0, 0), "
+      "'GEOMETRYCOLLECTION(POINT(0 2), LINESTRING(1 1, 1 -1))')",
       "select tg_min_y('POLYGON ((1 1, 2 2, 3 3, 1 1))')",
       "select tg_max_x('POLYGON ((1 1, 2 2, 3 3, 1 1))')",
       "select tg_max_y('POLYGON ((1 1, 2 2, 3 3, 1 1))')",
@@ -648,6 +652,10 @@ int main(int argc, char *argv[]) {
       "select tg_m('LINESTRING(0 0, 1 1)')",
       "select tg_m(NULL)",
       "select tg_min_x(NULL)",
+      "select tg_distance_sphere('LINESTRING(0 0, 1 1)', "
+      "'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))')",
+      "select tg_distance_sphere('POINT(0 0)', 'POINT(0 91)')",
+      "select tg_distance_sphere('POINT(0 0)', NULL)",
       "select tg_intersects('POINT(1 1)', 'nope')",
       "select tg_equals('POINT(1 1)', 'nope')",
       "select tg_to_wkt(tg_group_multipoint(value)) "

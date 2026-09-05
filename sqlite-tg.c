@@ -2604,6 +2604,462 @@ static sqlite3_module tg_bboxModule = {
     /* xShadowName */ 0};
 #pragma endregion
 
+#pragma region distance
+
+// ---------------------------------------------------------------------------
+// Distance kernel (plans/knn/plan.md decisions 6, 7, 9).
+//
+// tg is strictly planar and has no geometry-to-geometry distance, so every
+// distance number sqlite-tg produces is computed here. Two metrics:
+//
+//   TG_METRIC_GEODESIC: inputs are lon/lat degrees, outputs meters — the
+//     great-circle (haversine) distance on a sphere of radius
+//     TG_EARTH_RADIUS_METERS. Exact for point-to-point. For a segment, the
+//     closest point is found on tg's planar lon/lat edge in a local frame
+//     scaled by cos(lat_query), then the haversine to it — an approximation
+//     whose error is second-order in edge length. Edges stay planar because
+//     that is what every tg predicate and both bbox indexes assume;
+//     great-circle edges would bulge outside their vertices' bbox and
+//     disagree with tg's point-in-polygon.
+//   TG_METRIC_PLANAR: Euclidean in coordinate units.
+//
+// Rect distances are *lower bounds* that drive best-first traversals (the
+// tg0 rtree walk and tg's own tg_ring/line_nearest_segment): for every point
+// X inside rect, point_rect(q, rect) <= point_point(q, X). The geodesic bound
+// is the S2LatLngRect::GetDistance construction and is wrap-aware in
+// longitude, so a query at lon 179.9 is near a rect at lon -179.9 even though
+// rtree bboxes themselves never wrap.
+// ---------------------------------------------------------------------------
+
+typedef enum {
+  TG_METRIC_GEODESIC = 0,
+  TG_METRIC_PLANAR = 1,
+} tg_metric;
+
+// IUGG mean Earth radius, the constant turf.js and PostGIS's spherical
+// functions use
+#define TG_EARTH_RADIUS_METERS 6371008.8
+#define TG_DEG_TO_RAD (M_PI / 180.0)
+
+// 1 when (x, y) is a finite lon/lat coordinate pair.
+static int tg_lonlat_valid(double x, double y) {
+  return isfinite(x) && isfinite(y) && fabs(x) <= 180.0 && fabs(y) <= 90.0;
+}
+
+// The parameter t in [0, 1] of p's closest point on segment s in the plane:
+// clamped projection, 0 for a degenerate (or NaN) segment.
+static double tg_segment_project(struct tg_point p, struct tg_segment s) {
+  double c = s.b.x - s.a.x;
+  double d = s.b.y - s.a.y;
+  double e = c * c + d * d;
+  if (!(e > 0)) {
+    return 0.0;
+  }
+  double t = ((p.x - s.a.x) * c + (p.y - s.a.y) * d) / e;
+  return t < 0 ? 0 : (t > 1 ? 1 : t);
+}
+
+// The point at parameter t along segment s.
+static struct tg_point tg_segment_lerp(struct tg_segment s, double t) {
+  return (struct tg_point){s.a.x + t * (s.b.x - s.a.x),
+                           s.a.y + t * (s.b.y - s.a.y)};
+}
+
+static double tg_planar_point_point(struct tg_point a, struct tg_point b) {
+  double dx = a.x - b.x;
+  double dy = a.y - b.y;
+  return sqrt(dx * dx + dy * dy);
+}
+
+static double tg_planar_point_segment(struct tg_point p, struct tg_segment s) {
+  double t = tg_segment_project(p, s);
+  struct tg_point c = {s.a.x + t * (s.b.x - s.a.x), s.a.y + t * (s.b.y - s.a.y)};
+  return tg_planar_point_point(p, c);
+}
+
+static double tg_planar_point_rect(struct tg_point p, struct tg_rect r) {
+  double dx = fmax(fmax(r.min.x - p.x, p.x - r.max.x), 0.0);
+  double dy = fmax(fmax(r.min.y - p.y, p.y - r.max.y), 0.0);
+  return sqrt(dx * dx + dy * dy);
+}
+
+// Great-circle distance in meters between two lon/lat points. The
+// sin^2(dlon/2) term is 2*pi-periodic, so the antimeridian needs no special
+// handling.
+static double tg_haversine(struct tg_point a, struct tg_point b) {
+  double lat1 = a.y * TG_DEG_TO_RAD;
+  double lat2 = b.y * TG_DEG_TO_RAD;
+  double sinLat = sin((lat2 - lat1) / 2);
+  double sinLon = sin((b.x - a.x) * TG_DEG_TO_RAD / 2);
+  double h = sinLat * sinLat + cos(lat1) * cos(lat2) * sinLon * sinLon;
+  h = h < 0 ? 0 : (h > 1 ? 1 : h);
+  return 2 * TG_EARTH_RADIUS_METERS * asin(sqrt(h));
+}
+
+// Great-circle distance from q to the nearest point of planar lon/lat
+// segment s. The nearest point is found by golden-section search of the
+// haversine along the edge (unimodal for any edge that does not wrap around
+// the sphere), with both endpoints checked explicitly so a constrained
+// minimum is exact. The result is always the distance to a point *on* the
+// edge, so a rect bound over the edge's bbox remains a valid lower bound.
+static double tg_geodesic_point_segment(struct tg_point q,
+                                        struct tg_segment s) {
+  double best = fmin(tg_haversine(q, s.a), tg_haversine(q, s.b));
+  if (s.a.x == s.b.x && s.a.y == s.b.y) {
+    return best;
+  }
+  const double invphi = 0.6180339887498949;
+  double lo = 0.0;
+  double hi = 1.0;
+  double c = hi - invphi * (hi - lo);
+  double d = lo + invphi * (hi - lo);
+  double fc = tg_haversine(q, tg_segment_lerp(s, c));
+  double fd = tg_haversine(q, tg_segment_lerp(s, d));
+  // 40 halvings shrink the bracket below 5e-9 of the edge length
+  for (int i = 0; i < 40; i++) {
+    if (fc < fd) {
+      hi = d;
+      d = c;
+      fd = fc;
+      c = hi - invphi * (hi - lo);
+      fc = tg_haversine(q, tg_segment_lerp(s, c));
+    } else {
+      lo = c;
+      c = d;
+      fc = fd;
+      d = lo + invphi * (hi - lo);
+      fd = tg_haversine(q, tg_segment_lerp(s, d));
+    }
+  }
+  return fmin(best, fmin(fc, fd));
+}
+
+static void tg_lonlat_to_xyz(double lon, double lat, double v[3]) {
+  double la = lat * TG_DEG_TO_RAD;
+  double lo = lon * TG_DEG_TO_RAD;
+  v[0] = cos(la) * cos(lo);
+  v[1] = cos(la) * sin(lo);
+  v[2] = sin(la);
+}
+
+static void tg_xyz_cross(const double a[3], const double b[3], double out[3]) {
+  out[0] = a[1] * b[2] - a[2] * b[1];
+  out[1] = a[2] * b[0] - a[0] * b[2];
+  out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+static double tg_xyz_dot(const double a[3], const double b[3]) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static double tg_xyz_norm(const double a[3]) { return sqrt(tg_xyz_dot(a, a)); }
+
+// Angle in radians between two unit vectors; atan2 form stays accurate for
+// tiny angles where acos(dot) would not.
+static double tg_xyz_angle(const double a[3], const double b[3]) {
+  double c[3];
+  tg_xyz_cross(a, b, c);
+  return atan2(tg_xyz_norm(c), tg_xyz_dot(a, b));
+}
+
+// Angular distance from unit vector q to the great-circle arc a..b (shorter
+// than a half circle). When q's perpendicular foot lies inside the arc the
+// distance is to the great circle itself, otherwise to the nearer endpoint.
+static double tg_xyz_point_arc(const double q[3], const double a[3],
+                               const double b[3]) {
+  double n[3];
+  tg_xyz_cross(a, b, n);
+  double nn = tg_xyz_norm(n);
+  if (nn < 1e-15) {
+    // a == b: a degenerate arc
+    return tg_xyz_angle(q, a);
+  }
+  // tangents at a (toward b) and at b (toward a): q projects inside the arc
+  // when it is on the far side of both endpoint planes
+  double ta[3], tb[3];
+  tg_xyz_cross(n, a, ta);
+  tg_xyz_cross(b, n, tb);
+  if (tg_xyz_dot(q, ta) >= 0 && tg_xyz_dot(q, tb) >= 0) {
+    double d = tg_xyz_dot(q, n) / nn;
+    d = d < -1 ? -1 : (d > 1 ? 1 : d);
+    return asin(fabs(d));
+  }
+  return fmin(tg_xyz_angle(q, a), tg_xyz_angle(q, b));
+}
+
+// Lower bound, in meters, of the great-circle distance from lon/lat point q
+// to any point of the lon/lat rectangle r (S2LatLngRect::GetDistance):
+//
+// - q inside r: 0.
+// - q's longitude within r's longitude span: the nearest point is straight
+//   north or south along q's meridian, on the nearer parallel edge — exact,
+//   because for a line of constant latitude the closest point is at the
+//   query's own longitude (cos d is monotone in |dlon|).
+// - otherwise: the nearest point lies on the meridian edge nearer to q in
+//   (wrapped) longitude, but generally not at q's latitude — meridians are
+//   great circles and the perpendicular foot slides along them — so it is a
+//   3-D point-to-arc computation. Clamp-then-haversine would be an *upper*
+//   bound here and would silently break best-first ordering.
+static double tg_geodesic_point_rect(struct tg_point q, struct tg_rect r) {
+  int lonWithin =
+      (q.x >= r.min.x && q.x <= r.max.x) ||
+      (q.x + 360 >= r.min.x && q.x + 360 <= r.max.x) ||
+      (q.x - 360 >= r.min.x && q.x - 360 <= r.max.x);
+  if (lonWithin) {
+    if (q.y >= r.min.y && q.y <= r.max.y) {
+      return 0.0;
+    }
+    double dlat = q.y < r.min.y ? r.min.y - q.y : q.y - r.max.y;
+    return dlat * TG_DEG_TO_RAD * TG_EARTH_RADIUS_METERS;
+  }
+  double dlo = fabs(remainder(q.x - r.min.x, 360.0));
+  double dhi = fabs(remainder(q.x - r.max.x, 360.0));
+  double edge = dlo <= dhi ? r.min.x : r.max.x;
+  double qv[3], av[3], bv[3];
+  tg_lonlat_to_xyz(q.x, q.y, qv);
+  tg_lonlat_to_xyz(edge, r.min.y, av);
+  tg_lonlat_to_xyz(edge, r.max.y, bv);
+  return tg_xyz_point_arc(qv, av, bv) * TG_EARTH_RADIUS_METERS;
+}
+
+static double tg_metric_point_point(tg_metric metric, struct tg_point a,
+                                    struct tg_point b) {
+  return metric == TG_METRIC_PLANAR ? tg_planar_point_point(a, b)
+                                    : tg_haversine(a, b);
+}
+
+static double tg_metric_point_segment(tg_metric metric, struct tg_point q,
+                                      struct tg_segment s) {
+  return metric == TG_METRIC_PLANAR ? tg_planar_point_segment(q, s)
+                                    : tg_geodesic_point_segment(q, s);
+}
+
+// Lower bound of the distance from q to any point inside r.
+static double tg_metric_point_rect(tg_metric metric, struct tg_point q,
+                                   struct tg_rect r) {
+  return metric == TG_METRIC_PLANAR ? tg_planar_point_rect(q, r)
+                                    : tg_geodesic_point_rect(q, r);
+}
+
+// udata for tg_ring_nearest_segment / tg_line_nearest_segment: the metric,
+// the query point, and the distance of the first (nearest) segment iterated.
+struct tg_metric_nearest {
+  tg_metric metric;
+  struct tg_point q;
+  double dist;
+};
+
+static double tg_metric_nearest_rect_dist(struct tg_rect rect, int *more,
+                                          void *udata) {
+  struct tg_metric_nearest *ctx = udata;
+  (void)more;
+  return tg_metric_point_rect(ctx->metric, ctx->q, rect);
+}
+
+static double tg_metric_nearest_seg_dist(struct tg_segment seg, int *more,
+                                         void *udata) {
+  struct tg_metric_nearest *ctx = udata;
+  (void)more;
+  return tg_metric_point_segment(ctx->metric, ctx->q, seg);
+}
+
+// tg iterates segments nearest-first, so the first callback is the answer
+static bool tg_metric_nearest_iter(struct tg_segment seg, double dist,
+                                   int index, void *udata) {
+  struct tg_metric_nearest *ctx = udata;
+  (void)seg;
+  (void)index;
+  ctx->dist = dist;
+  return false;
+}
+
+// Distance from q to the nearest segment of ring (INFINITY when the ring
+// has none). Returns false on tg OOM.
+static bool tg_metric_point_ring(tg_metric metric, struct tg_point q,
+                                 const struct tg_ring *ring, double *out) {
+  struct tg_metric_nearest ctx = {metric, q, INFINITY};
+  if (!tg_ring_nearest_segment(ring, tg_metric_nearest_rect_dist,
+                               tg_metric_nearest_seg_dist,
+                               tg_metric_nearest_iter, &ctx)) {
+    return false;
+  }
+  *out = ctx.dist;
+  return true;
+}
+
+static bool tg_metric_point_line(tg_metric metric, struct tg_point q,
+                                 const struct tg_line *line, double *out) {
+  struct tg_metric_nearest ctx = {metric, q, INFINITY};
+  if (!tg_line_nearest_segment(line, tg_metric_nearest_rect_dist,
+                               tg_metric_nearest_seg_dist,
+                               tg_metric_nearest_iter, &ctx)) {
+    return false;
+  }
+  *out = ctx.dist;
+  return true;
+}
+
+// 0 when the polygon contains q (boundary included), else the distance to
+// the nearest edge of the exterior or any hole.
+static bool tg_metric_point_poly(tg_metric metric, struct tg_point q,
+                                 const struct tg_poly *poly, double *out) {
+  if (tg_geom_intersects_xy((const struct tg_geom *)poly, q.x, q.y)) {
+    *out = 0.0;
+    return true;
+  }
+  double best = INFINITY;
+  double d;
+  if (!tg_metric_point_ring(metric, q, tg_poly_exterior(poly), &d)) {
+    return false;
+  }
+  best = fmin(best, d);
+  for (int i = 0; i < tg_poly_num_holes(poly); i++) {
+    if (!tg_metric_point_ring(metric, q, tg_poly_hole_at(poly, i), &d)) {
+      return false;
+    }
+    best = fmin(best, d);
+  }
+  *out = best;
+  return true;
+}
+
+// Distance from q to the nearest point of geom under metric, for all 7
+// geometry types; INFINITY for empty geometries. Returns false on tg OOM
+// (the segment traversals may allocate).
+static bool tg_metric_point_geom(tg_metric metric, struct tg_point q,
+                                 const struct tg_geom *geom, double *out) {
+  double best = INFINITY;
+  double d;
+  switch (tg_geom_typeof(geom)) {
+  case TG_POINT:
+    if (!tg_geom_is_empty(geom)) {
+      best = tg_metric_point_point(metric, q, tg_geom_point(geom));
+    }
+    break;
+  case TG_LINESTRING: {
+    const struct tg_line *line = tg_geom_line(geom);
+    if (line) {
+      if (!tg_metric_point_line(metric, q, line, &best)) {
+        return false;
+      }
+    }
+    break;
+  }
+  case TG_POLYGON: {
+    const struct tg_poly *poly = tg_geom_poly(geom);
+    if (poly) {
+      if (!tg_metric_point_poly(metric, q, poly, &best)) {
+        return false;
+      }
+    }
+    break;
+  }
+  case TG_MULTIPOINT:
+    for (int i = 0; i < tg_geom_num_points(geom); i++) {
+      best = fmin(best,
+                  tg_metric_point_point(metric, q, tg_geom_point_at(geom, i)));
+    }
+    break;
+  case TG_MULTILINESTRING:
+    for (int i = 0; i < tg_geom_num_lines(geom); i++) {
+      if (!tg_metric_point_line(metric, q, tg_geom_line_at(geom, i), &d)) {
+        return false;
+      }
+      best = fmin(best, d);
+    }
+    break;
+  case TG_MULTIPOLYGON:
+    for (int i = 0; i < tg_geom_num_polys(geom); i++) {
+      if (!tg_metric_point_poly(metric, q, tg_geom_poly_at(geom, i), &d)) {
+        return false;
+      }
+      best = fmin(best, d);
+    }
+    break;
+  case TG_GEOMETRYCOLLECTION:
+    for (int i = 0; i < tg_geom_num_geometries(geom); i++) {
+      if (!tg_metric_point_geom(metric, q, tg_geom_geometry_at(geom, i), &d)) {
+        return false;
+      }
+      best = fmin(best, d);
+    }
+    break;
+  }
+  *out = best;
+  return true;
+}
+
+// tg_distance_sphere(a, b): great-circle distance in meters between a Point
+// and any geometry (the nearest point of it; 0 when a polygon contains the
+// point). At least one argument must be a Point — tg has no
+// geometry-to-geometry distance. NULL for empty geometries. Coordinates
+// must be lon/lat.
+static void tg_distance_sphere(sqlite3_context *context, int argc,
+                               sqlite3_value **argv) {
+  struct tg_geom *a = NULL;
+  struct tg_geom *b = NULL;
+  char *errmsg = NULL;
+  (void)argc;
+  if (geomValue(argv[0], &a, &errmsg) != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+  if (geomValue(argv[1], &b, &errmsg) != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    tg_geom_free(a);
+    return;
+  }
+  const struct tg_geom *point = NULL;
+  const struct tg_geom *other = NULL;
+  if (tg_geom_typeof(a) == TG_POINT) {
+    point = a;
+    other = b;
+  } else if (tg_geom_typeof(b) == TG_POINT) {
+    point = b;
+    other = a;
+  } else {
+    char *msg = sqlite3_mprintf(
+        "tg_distance_sphere() expects at least one Point argument, found %s "
+        "and %s",
+        tg_geom_type_string(tg_geom_typeof(a)),
+        tg_geom_type_string(tg_geom_typeof(b)));
+    sqlite3_result_error(context, msg, -1);
+    sqlite3_free(msg);
+    goto done;
+  }
+  if (tg_geom_is_empty(point) || tg_geom_is_empty(other)) {
+    sqlite3_result_null(context);
+    goto done;
+  }
+  struct tg_point q = tg_geom_point(point);
+  struct tg_rect r = tg_geom_rect(other);
+  if (!tg_lonlat_valid(q.x, q.y) || !tg_lonlat_valid(r.min.x, r.min.y) ||
+      !tg_lonlat_valid(r.max.x, r.max.y)) {
+    sqlite3_result_error(context,
+                         "tg_distance_sphere() expects lon/lat coordinates "
+                         "(-180 <= x <= 180, -90 <= y <= 90)",
+                         -1);
+    goto done;
+  }
+  double d;
+  if (!tg_metric_point_geom(TG_METRIC_GEODESIC, q, other, &d)) {
+    sqlite3_result_error_nomem(context);
+    goto done;
+  }
+  if (isinf(d)) {
+    sqlite3_result_null(context);
+  } else {
+    sqlite3_result_double(context, d);
+  }
+done:
+  tg_geom_free(a);
+  tg_geom_free(b);
+}
+
+#pragma endregion
+
 #pragma region tg0 virtual table
 
 #define TG0_MAX_GEOMETRY_COLUMNS 8
@@ -5358,6 +5814,9 @@ int sqlite3_tg_init(sqlite3 *db, char **pzErrMsg,
       {(char *)"tg_disjoint",       2, tg_predicate_impl,   tg_geom_disjoint,   NULL,         DEFAULT_FLAGS},
       {(char *)"tg_equals",         2, tg_predicate_impl,   tg_geom_equals,     NULL,         DEFAULT_FLAGS},
       {(char *)"tg_intersects",     2, tg_predicate_impl,   tg_geom_intersects, NULL,         DEFAULT_FLAGS},
+
+      // measurements
+      {(char *)"tg_distance_sphere", 2, tg_distance_sphere, NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_touches",        2, tg_predicate_impl,   tg_geom_touches,    NULL,         DEFAULT_FLAGS},
       {(char *)"tg_within",         2, tg_predicate_impl,   tg_geom_within,     NULL,         DEFAULT_FLAGS},
 

@@ -693,6 +693,23 @@ select tg_max_y('POLYGON((1 1, 2 2, 3 3, 1 1))');
 -- 3.0
 ```
 
+### Measurements
+
+#### `tg_distance_sphere(a, b)` {#tg_distance_sphere}
+
+Returns the great-circle distance in meters between a Point and the nearest point of another geometry, treating coordinates as longitude/latitude on a sphere of radius 6,371,008.8 m (the IUGG mean Earth radius, the same constant turf.js and PostGIS's spherical functions use). Accurate to within roughly 0.5% of the WGS84 ellipsoidal distance. At least one argument must be a Point; the other can be any geometry, and a polygon that contains the point is at distance `0`. Returns `NULL` when either geometry is empty, and errors when coordinates fall outside the longitude/latitude range.
+
+Edges of lines and polygons are the same straight lines in longitude/latitude that every other `tg_*` function assumes; the nearest point along an edge is found by minimizing the great-circle distance along it. Geometries that cross the antimeridian should be cut at it first.
+
+```sql
+select tg_distance_sphere('POINT(-118.2437 34.0522)', 'POINT(-74.0060 40.7128)');
+-- 3935751.6908939867
+-- 3935751.69089399
+
+select tg_distance_sphere(tg_point(5, -1), 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))');
+-- 111195.0802335329
+```
+
 ### Operations
 
 Every predicate accepts two geometries `a` and `b`, in any [supported format](#supported-formats), and returns `1` or `0`. All raise an error if either input is not a valid geometry.

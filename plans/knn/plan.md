@@ -203,9 +203,12 @@ settled 2026-09-05 per "Open questions" below.
 6. **Geodesic metric = haversine great-circle distance on a sphere of
    radius 6 371 008.8 m** (IUGG mean radius; same constant as turf.js and
    PostGIS's spherical functions). Exact for point candidates. For
-   line/polygon candidates the closest point on each planar lon/lat edge is
-   found in a frame scaled by cos(lat_query), then haversine to it
-   (finding 6). A polygon that contains the query point is at distance 0
+   line/polygon candidates the nearest point of each planar lon/lat edge is
+   found by golden-section search of the haversine along the edge, with
+   both endpoints checked (finding 6; implementation note: the cos(lat)
+   scaled-frame heuristic first proposed overshot by up to 70 % for far
+   queries in a 200k-case harness, the search matches dense sampling to
+   1e-15). A polygon that contains the query point is at distance 0
    (via `tg_geom_intersects_xy`). Multi*/collections: minimum over members.
    Empty geometries: +∞ (never emitted? — emit last; open question 4).
 7. **Planar metric** = Euclidean in coordinate units; point↔segment via the

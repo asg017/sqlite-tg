@@ -68,6 +68,7 @@ FUNCTIONS = [
     "tg_debug",
     "tg_dims",
     "tg_disjoint",
+    "tg_distance_sphere",
     "tg_equals",
     "tg_extra_json",
     "tg_geom",
@@ -371,6 +372,122 @@ def test_tg_y():
         match="invalid geometry input",
     ):
         tg_y(None)
+
+
+def haversine_m(a, b):
+    """Reference great-circle distance in meters (IUGG mean radius)."""
+    import math
+
+    R = 6371008.8
+    lon1, lat1 = map(math.radians, a)
+    lon2, lat2 = map(math.radians, b)
+    h = (
+        math.sin((lat2 - lat1) / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+    )
+    return 2 * R * math.asin(math.sqrt(h))
+
+
+def test_tg_distance_sphere():
+    import random
+
+    def dist(a, b):
+        return db.execute("select tg_distance_sphere(?, ?)", [a, b]).fetchone()[0]
+
+    # known pairs: LA <-> NYC, one degree of latitude, the antimeridian
+    la, nyc = (-118.2437, 34.0522), (-74.0060, 40.7128)
+    d = dist(f"POINT({la[0]} {la[1]})", f"POINT({nyc[0]} {nyc[1]})")
+    assert d == pytest.approx(haversine_m(la, nyc), rel=1e-12)
+    assert d == pytest.approx(3_935_752, abs=1)
+    assert dist("POINT(0 0)", "POINT(0 1)") == pytest.approx(111_195.08, abs=0.01)
+    assert dist("POINT(179.9 0)", "POINT(-179.9 0)") == pytest.approx(
+        22_239.02, abs=0.01
+    )
+    # symmetric, every input format, pointer values
+    assert dist("POINT(10 20)", "POINT(30 40)") == dist("POINT(30 40)", "POINT(10 20)")
+    assert db.execute(
+        "select tg_distance_sphere(tg_point(10, 20), tg_to_wkb(tg_point(30, 40)))"
+    ).fetchone()[0] == pytest.approx(haversine_m((10, 20), (30, 40)), rel=1e-12)
+
+    # random point pairs against the Python reference
+    rng = random.Random(1)
+    for _ in range(200):
+        a = (rng.uniform(-180, 180), rng.uniform(-90, 90))
+        b = (rng.uniform(-180, 180), rng.uniform(-90, 90))
+        assert dist(f"POINT({a[0]} {a[1]})", f"POINT({b[0]} {b[1]})") == pytest.approx(
+            haversine_m(a, b), rel=1e-9, abs=1e-6
+        )
+
+    # non-point geometries: distance to the nearest point of the geometry
+    square = "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"
+    assert dist("POINT(5 5)", square) == 0  # inside
+    assert dist("POINT(10 5)", square) == 0  # on the boundary
+    assert dist("POINT(5 -1)", square) == pytest.approx(111_195.08, abs=0.01)
+    # either argument may be the point
+    assert dist(square, "POINT(5 -1)") == dist("POINT(5 -1)", square)
+    # nearest point of an edge is interior to it, not an endpoint
+    assert dist("POINT(5 -1)", "LINESTRING(0 0, 10 0)") == pytest.approx(
+        111_195.08, abs=0.01
+    )
+    # ... or is an endpoint when the query lies beyond it
+    assert dist("POINT(20 0)", "LINESTRING(0 0, 10 0)") == pytest.approx(
+        haversine_m((20, 0), (10, 0)), rel=1e-9
+    )
+    # holes count: a point inside a hole is outside the polygon. The nearest
+    # hole edge is a meridian one — a degree of longitude at 5N is shorter
+    # than a degree of latitude — and the nearest point of that meridian is
+    # a hair poleward of (4, 5), since meridians are great circles
+    donut = "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (4 4, 6 4, 6 6, 4 6, 4 4))"
+    d = dist("POINT(5 5)", donut)
+    assert d < haversine_m((5, 5), (4, 5))
+    assert d == pytest.approx(haversine_m((5, 5), (4, 5)), rel=1e-6)
+    # multi geometries and collections: the nearest member
+    assert dist("POINT(0 0)", "MULTIPOINT(50 50, 0 3, -20 0)") == pytest.approx(
+        haversine_m((0, 0), (0, 3)), rel=1e-9
+    )
+    assert dist(
+        "POINT(0 0)", "GEOMETRYCOLLECTION(POINT(0 2), LINESTRING(1 1, 1 -1))"
+    ) == pytest.approx(haversine_m((0, 0), (1, 0)), rel=1e-9)
+    # a query far from a segment picks the true nearest point, not a frame
+    # approximation: compare against dense sampling along the edge
+    seg = ((-43.5, -89.06), (-44.19, -88.17))
+    q = (-45.26, -80.0)
+    best = min(
+        haversine_m(
+            q,
+            (
+                seg[0][0] + (seg[1][0] - seg[0][0]) * t / 5000,
+                seg[0][1] + (seg[1][1] - seg[0][1]) * t / 5000,
+            ),
+        )
+        for t in range(5001)
+    )
+    assert dist(
+        f"POINT({q[0]} {q[1]})",
+        f"LINESTRING({seg[0][0]} {seg[0][1]}, {seg[1][0]} {seg[1][1]})",
+    ) == pytest.approx(best, rel=1e-9)
+
+    # empty geometries have no nearest point
+    assert dist("POINT EMPTY", "POINT(1 1)") is None
+    assert dist("POINT(1 1)", "LINESTRING EMPTY") is None
+
+    # errors
+    with pytest.raises(sqlite3.OperationalError) as e:
+        dist("LINESTRING(0 0, 1 1)", square)
+    assert (
+        str(e.value)
+        == "tg_distance_sphere() expects at least one Point argument, found LineString and Polygon"
+    )
+    with pytest.raises(sqlite3.OperationalError) as e:
+        dist("POINT(500000 4000000)", "POINT(0 0)")
+    assert str(e.value).startswith("tg_distance_sphere() expects lon/lat coordinates")
+    with pytest.raises(sqlite3.OperationalError) as e:
+        dist("POINT(0 0)", "LINESTRING(0 0, 181 0)")
+    assert str(e.value).startswith("tg_distance_sphere() expects lon/lat coordinates")
+    with pytest.raises(sqlite3.OperationalError):
+        dist(None, "POINT(0 0)")
+    with pytest.raises(sqlite3.OperationalError):
+        dist("POINT(0 0)", "not a geometry")
 
 
 def test_tg_min_x_min_y_max_x_max_y():

@@ -461,6 +461,18 @@ from str_lines(tg_debug()); -- @snap debug
   select tg_m(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
 -- #endregion
 
+-- #region tg_distance_sphere
+  -- great-circle meters between a point and the nearest point of any geometry
+  select tg_distance_sphere('POINT(0 0)', 'POINT(0 1)'); -- 111195.080233533
+  select tg_distance_sphere('POINT(179.9 0)', 'POINT(-179.9 0)'); -- 22239.0160467068
+  select tg_distance_sphere('POINT(5 5)', 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'); -- 0.0
+  select tg_distance_sphere('POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))', 'POINT(5 -1)'); -- 111195.080233533
+  select tg_distance_sphere('POINT EMPTY', 'POINT(0 0)'); -- NULL
+  select tg_distance_sphere('LINESTRING(0 0, 1 1)', 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'); -- error: tg_distance_sphere() expects at least one Point argument, found LineString and Polygon
+  select tg_distance_sphere('POINT(500000 4000000)', 'POINT(0 0)'); -- error: tg_distance_sphere() expects lon/lat coordinates (-180 <= x <= 180, -90 <= y <= 90)
+  select tg_distance_sphere(NULL, 'POINT(0 0)'); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
+-- #endregion
+
 -- #region tg_min_x
   select tg_min_x('POLYGON ((1 1, 2 2, 3 3, 1 1))'); -- 1.0
   select tg_min_x(NULL); -- error: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).
