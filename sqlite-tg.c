@@ -3669,7 +3669,39 @@ struct tg0_vtab {
   struct tg0_geometry_column geometry_columns[TG0_MAX_GEOMETRY_COLUMNS];
   // Only the first numDataColumns entries are meaningful.
   struct tg0_data_column data_columns[TG0_MAX_DATA_COLUMNS];
+
+  // Cached shadow-table write statements (vec0-style): prepared lazily on
+  // first use, reset + cleared after every use, finalized by
+  // tg0_free_statements() on destruction and before a rename (their SQL
+  // embeds the table name). Preparing per row made bulk loads ~3x slower
+  // than the rtree inserts themselves.
+  sqlite3_stmt *stmtRowidsInsert;
+  sqlite3_stmt *stmtRowidsLookup;
+  sqlite3_stmt *stmtRowidsDelete;
+  sqlite3_stmt *stmtContentInsert;
+  sqlite3_stmt *stmtContentDelete;
+  sqlite3_stmt *stmtRtreeInsert[TG0_MAX_GEOMETRY_COLUMNS];
+  sqlite3_stmt *stmtRtreeDelete[TG0_MAX_GEOMETRY_COLUMNS];
+  sqlite3_stmt *stmtRtreeUpdate[TG0_MAX_GEOMETRY_COLUMNS];
 };
+
+// Finalizes every cached statement; safe to call repeatedly.
+static void tg0_free_statements(tg0_vtab *p) {
+  sqlite3_finalize(p->stmtRowidsInsert);
+  sqlite3_finalize(p->stmtRowidsLookup);
+  sqlite3_finalize(p->stmtRowidsDelete);
+  sqlite3_finalize(p->stmtContentInsert);
+  sqlite3_finalize(p->stmtContentDelete);
+  p->stmtRowidsInsert = p->stmtRowidsLookup = p->stmtRowidsDelete = NULL;
+  p->stmtContentInsert = p->stmtContentDelete = NULL;
+  for (int i = 0; i < TG0_MAX_GEOMETRY_COLUMNS; i++) {
+    sqlite3_finalize(p->stmtRtreeInsert[i]);
+    sqlite3_finalize(p->stmtRtreeDelete[i]);
+    sqlite3_finalize(p->stmtRtreeUpdate[i]);
+    p->stmtRtreeInsert[i] = p->stmtRtreeDelete[i] = p->stmtRtreeUpdate[i] =
+        NULL;
+  }
+}
 
 // Number of non-pk, non-hidden user columns.
 static int tg0_num_user_columns(tg0_vtab *p) {
@@ -3718,6 +3750,7 @@ static void tg0_free(tg0_vtab *p) {
   if (!p) {
     return;
   }
+  tg0_free_statements(p);
   sqlite3_free(p->schemaName);
   sqlite3_free(p->tableName);
   sqlite3_free(p->pkColumnName);
@@ -5830,6 +5863,40 @@ static int tg0_write_step(tg0_vtab *p, sqlite3_stmt *stmt, const char *zWhat) {
   return rc == SQLITE_ROW ? SQLITE_ERROR : rc;
 }
 
+// Returns the cached statement in *slot, preparing zSql (sqlite3_mprintf'd,
+// freed here) on first use. Same error contract as tg0_write_prepare.
+static int tg0_cached_prepare(tg0_vtab *p, sqlite3_stmt **slot, char *zSql,
+                              const char *zWhat) {
+  if (*slot) {
+    sqlite3_free(zSql);
+    return SQLITE_OK;
+  }
+  return tg0_write_prepare(p, zSql, slot, zWhat);
+}
+
+// Resets a cached statement and clears its bindings so the next use (or a
+// bind failure's error path) never sees stale parameter values.
+static void tg0_cached_reset(sqlite3_stmt *stmt) {
+  if (stmt) {
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+  }
+}
+
+// Steps a fully-bound cached DML statement to completion and resets it.
+// Same error contract as tg0_write_step, minus the finalize.
+static int tg0_cached_step(tg0_vtab *p, sqlite3_stmt *stmt, const char *zWhat) {
+  int rc = sqlite3_step(stmt);
+  if (rc != SQLITE_DONE) {
+    tg_vtab_set_error(&p->base, "%s: %s", zWhat, sqlite3_errmsg(p->db));
+    rc = rc == SQLITE_ROW ? SQLITE_ERROR : rc;
+  } else {
+    rc = SQLITE_OK;
+  }
+  tg0_cached_reset(stmt);
+  return rc;
+}
+
 // Resolves the argv[0] rowid/primary-key value of a DELETE or UPDATE to the
 // int64 rowid the shadow tables are keyed by. Text primary keys go through
 // the t_rowids mapping table; everything else is the value itself.
@@ -5839,39 +5906,39 @@ static int tg0_resolve_rowid(tg0_vtab *p, sqlite3_value *idValue,
     *out_rowid = sqlite3_value_int64(idValue);
     return SQLITE_OK;
   }
-  sqlite3_stmt *stmt;
-  int rc = tg0_write_prepare(
-      p,
+  int rc = tg0_cached_prepare(
+      p, &p->stmtRowidsLookup,
       sqlite3_mprintf("SELECT rowid FROM " TG0_SHADOW_ROWIDS_NAME
                       " WHERE id = ?1",
                       p->schemaName, p->tableName),
-      &stmt, "Error preparing tg0 rowids lookup");
+      "Error preparing tg0 rowids lookup");
   if (rc != SQLITE_OK) {
     return rc;
   }
+  sqlite3_stmt *stmt = p->stmtRowidsLookup;
   rc = sqlite3_bind_value(stmt, 1, idValue);
   if (rc != SQLITE_OK) {
     tg_vtab_set_error(&p->base, "Error binding tg0 rowids lookup: %s",
                       sqlite3_errmsg(p->db));
-    sqlite3_finalize(stmt);
+    tg0_cached_reset(stmt);
     return rc;
   }
   rc = sqlite3_step(stmt);
   if (rc == SQLITE_ROW) {
     *out_rowid = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
+    tg0_cached_reset(stmt);
     return SQLITE_OK;
   }
   if (rc == SQLITE_DONE) {
     // clean scan, no mapping row: the primary key does not exist
     tg_vtab_set_error(&p->base, "Could not find a tg0 row with primary key %Q",
                       (const char *)sqlite3_value_text(idValue));
-    sqlite3_finalize(stmt);
+    tg0_cached_reset(stmt);
     return SQLITE_ERROR;
   }
   tg_vtab_set_error(&p->base, "Error looking up tg0 primary key: %s",
                     sqlite3_errmsg(p->db));
-  sqlite3_finalize(stmt);
+  tg0_cached_reset(stmt);
   return rc;
 }
 
@@ -5970,14 +6037,15 @@ static int tg0_write_insert(tg0_vtab *p, int argc, sqlite3_value **argv,
       rc = SQLITE_CONSTRAINT;
       goto done;
     }
-    rc = tg0_write_prepare(p,
-                           sqlite3_mprintf("INSERT INTO " TG0_SHADOW_ROWIDS_NAME
-                                           "(id) VALUES (?1)",
-                                           p->schemaName, p->tableName),
-                           &stmt, "Error preparing tg0 rowids insert");
+    rc = tg0_cached_prepare(p, &p->stmtRowidsInsert,
+                            sqlite3_mprintf("INSERT INTO " TG0_SHADOW_ROWIDS_NAME
+                                            "(id) VALUES (?1)",
+                                            p->schemaName, p->tableName),
+                            "Error preparing tg0 rowids insert");
     if (rc != SQLITE_OK) {
       goto done;
     }
+    stmt = p->stmtRowidsInsert;
     rc = sqlite3_bind_value(stmt, 1, idValue);
     if (rc != SQLITE_OK) {
       tg_vtab_set_error(&p->base, "Error binding tg0 rowids insert: %s",
@@ -5985,7 +6053,7 @@ static int tg0_write_insert(tg0_vtab *p, int argc, sqlite3_value **argv,
       goto done;
     }
     // a duplicate id surfaces here as the id column's UNIQUE violation
-    rc = tg0_write_step(p, stmt, "Error inserting tg0 primary key");
+    rc = tg0_cached_step(p, stmt, "Error inserting tg0 primary key");
     stmt = NULL;
     if (rc != SQLITE_OK) {
       goto done;
@@ -6010,25 +6078,28 @@ static int tg0_write_insert(tg0_vtab *p, int argc, sqlite3_value **argv,
   }
 
   // content row: rowid (NULL autoassigns) + geometry WKB + data values
-  sqlite3_str *str = sqlite3_str_new(NULL);
-  sqlite3_str_appendf(str, "INSERT INTO " TG0_SHADOW_CONTENT_NAME "(rowid",
-                      p->schemaName, p->tableName);
-  for (int i = 0; i < p->numGeometryColumns; i++) {
-    sqlite3_str_appendf(str, ", geom%02d", i);
+  if (!p->stmtContentInsert) {
+    sqlite3_str *str = sqlite3_str_new(NULL);
+    sqlite3_str_appendf(str, "INSERT INTO " TG0_SHADOW_CONTENT_NAME "(rowid",
+                        p->schemaName, p->tableName);
+    for (int i = 0; i < p->numGeometryColumns; i++) {
+      sqlite3_str_appendf(str, ", geom%02d", i);
+    }
+    for (int i = 0; i < p->numDataColumns; i++) {
+      sqlite3_str_appendf(str, ", data%02d", i);
+    }
+    sqlite3_str_appendall(str, ") VALUES (?");
+    for (int i = 0; i < tg0_num_user_columns(p); i++) {
+      sqlite3_str_appendall(str, ", ?");
+    }
+    sqlite3_str_appendall(str, ")");
+    rc = tg0_cached_prepare(p, &p->stmtContentInsert, sqlite3_str_finish(str),
+                            "Error preparing tg0 content insert");
+    if (rc != SQLITE_OK) {
+      goto done;
+    }
   }
-  for (int i = 0; i < p->numDataColumns; i++) {
-    sqlite3_str_appendf(str, ", data%02d", i);
-  }
-  sqlite3_str_appendall(str, ") VALUES (?");
-  for (int i = 0; i < tg0_num_user_columns(p); i++) {
-    sqlite3_str_appendall(str, ", ?");
-  }
-  sqlite3_str_appendall(str, ")");
-  rc = tg0_write_prepare(p, sqlite3_str_finish(str), &stmt,
-                         "Error preparing tg0 content insert");
-  if (rc != SQLITE_OK) {
-    goto done;
-  }
+  stmt = p->stmtContentInsert;
   rc = hasRowid ? sqlite3_bind_int64(stmt, 1, rowid)
                 : sqlite3_bind_null(stmt, 1);
   for (int i = 0; i < tg0_num_user_columns(p) && rc == SQLITE_OK; i++) {
@@ -6046,7 +6117,7 @@ static int tg0_write_insert(tg0_vtab *p, int argc, sqlite3_value **argv,
                       sqlite3_errmsg(p->db));
     goto done;
   }
-  rc = tg0_write_step(p, stmt, "Error inserting tg0 content row");
+  rc = tg0_cached_step(p, stmt, "Error inserting tg0 content row");
   stmt = NULL;
   if (rc != SQLITE_OK) {
     goto done;
@@ -6058,22 +6129,23 @@ static int tg0_write_insert(tg0_vtab *p, int argc, sqlite3_value **argv,
   // one bbox row per geometry column's rtree
   for (int i = 0; i < p->numGeometryColumns; i++) {
     struct tg_rect rect = tg_geom_rect(geoms[i]);
-    rc = tg0_write_prepare(
-        p,
+    rc = tg0_cached_prepare(
+        p, &p->stmtRtreeInsert[i],
         sqlite3_mprintf("INSERT INTO " TG0_SHADOW_RTREE_NAME
                         "(id, minX, maxX, minY, maxY)"
                         " VALUES (?1, ?2, ?3, ?4, ?5)",
                         p->schemaName, p->tableName, i),
-        &stmt, "Error preparing tg0 rtree insert");
+        "Error preparing tg0 rtree insert");
     if (rc != SQLITE_OK) {
       goto done;
     }
+    stmt = p->stmtRtreeInsert[i];
     sqlite3_bind_int64(stmt, 1, rowid);
     sqlite3_bind_double(stmt, 2, rect.min.x);
     sqlite3_bind_double(stmt, 3, rect.max.x);
     sqlite3_bind_double(stmt, 4, rect.min.y);
     sqlite3_bind_double(stmt, 5, rect.max.y);
-    rc = tg0_write_step(p, stmt, "Error inserting tg0 rtree row");
+    rc = tg0_cached_step(p, stmt, "Error inserting tg0 rtree row");
     stmt = NULL;
     if (rc != SQLITE_OK) {
       goto done;
@@ -6082,7 +6154,9 @@ static int tg0_write_insert(tg0_vtab *p, int argc, sqlite3_value **argv,
   *pRowid = rowid;
 
 done:
-  sqlite3_finalize(stmt);
+  // stmt is non-NULL only when a cached statement was left bound by an
+  // error path before it was stepped
+  tg0_cached_reset(stmt);
   for (int i = 0; i < p->numGeometryColumns; i++) {
     tg_geom_free(geoms[i]);
   }
@@ -6098,45 +6172,48 @@ static int tg0_write_delete(tg0_vtab *p, sqlite3_value *idValue) {
   if (rc != SQLITE_OK) {
     return rc;
   }
-  rc = tg0_write_prepare(p,
-                         sqlite3_mprintf("DELETE FROM " TG0_SHADOW_CONTENT_NAME
-                                         " WHERE rowid = ?1",
-                                         p->schemaName, p->tableName),
-                         &stmt, "Error preparing tg0 content delete");
+  rc = tg0_cached_prepare(p, &p->stmtContentDelete,
+                          sqlite3_mprintf("DELETE FROM " TG0_SHADOW_CONTENT_NAME
+                                          " WHERE rowid = ?1",
+                                          p->schemaName, p->tableName),
+                          "Error preparing tg0 content delete");
   if (rc != SQLITE_OK) {
     return rc;
   }
+  stmt = p->stmtContentDelete;
   sqlite3_bind_int64(stmt, 1, rowid);
-  rc = tg0_write_step(p, stmt, "Error deleting tg0 content row");
+  rc = tg0_cached_step(p, stmt, "Error deleting tg0 content row");
   if (rc != SQLITE_OK) {
     return rc;
   }
   for (int i = 0; i < p->numGeometryColumns; i++) {
-    rc = tg0_write_prepare(p,
-                           sqlite3_mprintf("DELETE FROM " TG0_SHADOW_RTREE_NAME
-                                           " WHERE id = ?1",
-                                           p->schemaName, p->tableName, i),
-                           &stmt, "Error preparing tg0 rtree delete");
+    rc = tg0_cached_prepare(p, &p->stmtRtreeDelete[i],
+                            sqlite3_mprintf("DELETE FROM " TG0_SHADOW_RTREE_NAME
+                                            " WHERE id = ?1",
+                                            p->schemaName, p->tableName, i),
+                            "Error preparing tg0 rtree delete");
     if (rc != SQLITE_OK) {
       return rc;
     }
+    stmt = p->stmtRtreeDelete[i];
     sqlite3_bind_int64(stmt, 1, rowid);
-    rc = tg0_write_step(p, stmt, "Error deleting tg0 rtree row");
+    rc = tg0_cached_step(p, stmt, "Error deleting tg0 rtree row");
     if (rc != SQLITE_OK) {
       return rc;
     }
   }
   if (p->pkColumnType == SQLITE_TEXT) {
-    rc = tg0_write_prepare(p,
-                           sqlite3_mprintf("DELETE FROM " TG0_SHADOW_ROWIDS_NAME
-                                           " WHERE rowid = ?1",
-                                           p->schemaName, p->tableName),
-                           &stmt, "Error preparing tg0 rowids delete");
+    rc = tg0_cached_prepare(p, &p->stmtRowidsDelete,
+                            sqlite3_mprintf("DELETE FROM " TG0_SHADOW_ROWIDS_NAME
+                                            " WHERE rowid = ?1",
+                                            p->schemaName, p->tableName),
+                            "Error preparing tg0 rowids delete");
     if (rc != SQLITE_OK) {
       return rc;
     }
+    stmt = p->stmtRowidsDelete;
     sqlite3_bind_int64(stmt, 1, rowid);
-    rc = tg0_write_step(p, stmt, "Error deleting tg0 rowids row");
+    rc = tg0_cached_step(p, stmt, "Error deleting tg0 rowids row");
   }
   return rc;
 }
@@ -6265,29 +6342,31 @@ static int tg0_write_update(tg0_vtab *p, int argc, sqlite3_value **argv) {
       continue;
     }
     struct tg_rect rect = tg_geom_rect(geoms[i]);
-    rc = tg0_write_prepare(
-        p,
+    rc = tg0_cached_prepare(
+        p, &p->stmtRtreeUpdate[i],
         sqlite3_mprintf("UPDATE " TG0_SHADOW_RTREE_NAME
                         " SET minX = ?2, maxX = ?3, minY = ?4, maxY = ?5"
                         " WHERE id = ?1",
                         p->schemaName, p->tableName, i),
-        &stmt, "Error preparing tg0 rtree update");
+        "Error preparing tg0 rtree update");
     if (rc != SQLITE_OK) {
       goto done;
     }
-    sqlite3_bind_int64(stmt, 1, rowid);
-    sqlite3_bind_double(stmt, 2, rect.min.x);
-    sqlite3_bind_double(stmt, 3, rect.max.x);
-    sqlite3_bind_double(stmt, 4, rect.min.y);
-    sqlite3_bind_double(stmt, 5, rect.max.y);
-    rc = tg0_write_step(p, stmt, "Error updating tg0 rtree row");
-    stmt = NULL;
+    sqlite3_stmt *cached = p->stmtRtreeUpdate[i];
+    sqlite3_bind_int64(cached, 1, rowid);
+    sqlite3_bind_double(cached, 2, rect.min.x);
+    sqlite3_bind_double(cached, 3, rect.max.x);
+    sqlite3_bind_double(cached, 4, rect.min.y);
+    sqlite3_bind_double(cached, 5, rect.max.y);
+    rc = tg0_cached_step(p, cached, "Error updating tg0 rtree row");
     if (rc != SQLITE_OK) {
       goto done;
     }
   }
 
 done:
+  // the content UPDATE is built per call (its SET list depends on which
+  // columns changed) and is the only finalized statement left here
   sqlite3_finalize(stmt);
   for (int i = 0; i < p->numGeometryColumns; i++) {
     tg_geom_free(geoms[i]);
@@ -6365,6 +6444,9 @@ static int tg0Rename(sqlite3_vtab *pVtab, const char *zNew) {
   tg0_vtab *p = (tg0_vtab *)pVtab;
   char *zErrMsg = NULL;
   int rc;
+
+  // cached write statements embed the old shadow table names
+  tg0_free_statements(p);
 
   char *zNewName = sqlite3_mprintf("%s", zNew);
   if (!zNewName) {
