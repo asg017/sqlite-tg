@@ -544,6 +544,62 @@ def cmd_run(args):
     assert (ids == np.arange(1, len(ids) + 1)).all()
     queries = query_points(x, y)
     results = load_results(dataset)
+
+    # Phase 1: time every system, keeping what it returned. The brute-force
+    # reference is computed afterwards: its heavy numpy passes over every row
+    # disturbed the timings when they ran first (tg0's k=1000 read 20x slower
+    # right after them, and normally again in isolation).
+    got = {}  # name -> {"knn": {k: [rows per query]}, "radius": [ids per query] | None}
+    for name in args.systems:
+        s = SYSTEMS[name]
+        print(f"[{name}] opening ...", flush=True)
+        t0 = time.perf_counter()
+        s.open(dataset)
+        entry = results["systems"].setdefault(name, {})
+        entry["open_s"] = time.perf_counter() - t0
+        entry["knn"] = {}
+        got[name] = {"knn": {}, "radius": None}
+        # warm-up pass over every query point at the largest k so first-touch
+        # page faults are not charged to whichever k runs first
+        for qx, qy in queries:
+            s.knn(qx, qy, max(KS))
+        for k in KS:
+            times = []
+            rows = []
+            for qx, qy in queries:
+                t0 = time.perf_counter()
+                r = s.knn(qx, qy, k)
+                times.append(time.perf_counter() - t0)
+                rows.append([(int(g[0]), None if g[1] is None else float(g[1])) for g in r])
+            times = np.array(times) * 1000
+            entry["knn"][str(k)] = {
+                "median_ms": float(np.median(times)),
+                "p95_ms": float(np.percentile(times, 95)),
+                "mean_ms": float(times.mean()),
+                "max_ms": float(times.max()),
+            }
+            got[name]["knn"][k] = rows
+            print(f"[{name}] k={k:<5} median {np.median(times):8.3f} ms  p95 {np.percentile(times, 95):8.3f} ms", flush=True)
+        if s.radius(*queries[0], RADIUS_M) is not None:
+            times = []
+            rows = []
+            for qx, qy in queries:
+                t0 = time.perf_counter()
+                r = s.radius(qx, qy, RADIUS_M)
+                times.append(time.perf_counter() - t0)
+                rows.append([int(i) for i in r])
+            times = np.array(times) * 1000
+            entry["radius"] = {
+                "meters": RADIUS_M,
+                "median_ms": float(np.median(times)),
+                "p95_ms": float(np.percentile(times, 95)),
+            }
+            got[name]["radius"] = rows
+            print(f"[{name}] radius {RADIUS_M:.0f} m: median {np.median(times):8.3f} ms", flush=True)
+        save_results(dataset, results)
+
+    # Phase 2: correctness against the brute-force reference
+    print("[reference] brute-force haversine ...", flush=True)
     ref = BruteNumpy()
     ref.open(dataset, (ids, x, y))
     reference = {k: [ref.knn(qx, qy, k) for qx, qy in queries] for k in KS}
@@ -555,29 +611,14 @@ def cmd_run(args):
         # sphere-vs-spheroid reporting differences do not count as errors
         j = np.array(got_ids, dtype=np.int64) - 1
         return haversine_m(qx, qy, x[j], y[j])
+
     for name in args.systems:
-        s = SYSTEMS[name]
-        print(f"[{name}] opening ...", flush=True)
-        t0 = time.perf_counter()
-        s.open(dataset)
-        open_s = time.perf_counter() - t0
-        entry = results["systems"].setdefault(name, {})
-        entry["open_s"] = open_s
-        entry["knn"] = {}
-        # warm-up pass over every query point at the largest k so first-touch
-        # page faults are not charged to whichever k runs first
-        for qx, qy in queries:
-            s.knn(qx, qy, max(KS))
+        entry = results["systems"][name]
         for k in KS:
-            times = []
-            exact_set = 0
-            exact_order = 0
+            exact_set = exact_order = 0
             dist_err = 0.0
-            for (qx, qy), want in zip(queries, reference[k]):
-                t0 = time.perf_counter()
-                got = s.knn(qx, qy, k)
-                times.append(time.perf_counter() - t0)
-                got_ids = [g[0] for g in got]
+            for (qx, qy), want, rows in zip(queries, reference[k], got[name]["knn"][k]):
+                got_ids = [g[0] for g in rows]
                 want_d = np.array([w[1] for w in want])
                 if len(got_ids) == len(want) and len(got_ids) > 0:
                     got_d = true_dist(qx, qy, got_ids)
@@ -588,43 +629,27 @@ def cmd_run(args):
                             exact_order += 1
                     # how far the system's own reported k-th distance is from
                     # the haversine (sphere vs spheroid, planar degrees, ...)
-                    if want_d[-1] > 0 and got[-1][1] is not None:
-                        dist_err = max(dist_err, abs(float(got[-1][1]) - float(got_d[-1])) / float(got_d[-1]))
-            times = np.array(times) * 1000
-            entry["knn"][str(k)] = {
-                "median_ms": float(np.median(times)),
-                "p95_ms": float(np.percentile(times, 95)),
-                "mean_ms": float(times.mean()),
-                "max_ms": float(times.max()),
+                    if want_d[-1] > 0 and rows[-1][1] is not None:
+                        dist_err = max(dist_err, abs(rows[-1][1] - float(got_d[-1])) / float(got_d[-1]))
+            entry["knn"][str(k)].update({
                 "set_match": exact_set / len(queries),
                 "order_match": exact_order / len(queries),
                 "kth_dist_rel_err": dist_err,
-            }
-            print(f"[{name}] k={k:<5} median {np.median(times):8.3f} ms  p95 {np.percentile(times, 95):8.3f} ms  set-match {exact_set / len(queries):.0%}", flush=True)
-        if s.radius(*queries[0], RADIUS_M) is not None:
-            times = []
+            })
+            print(f"[{name}] k={k:<5} set-match {exact_set / len(queries):.0%}  order-match {exact_order / len(queries):.0%}", flush=True)
+        if got[name]["radius"] is not None:
             match = 0
-            for (qx, qy), want in zip(queries, reference_radius):
-                t0 = time.perf_counter()
-                got = s.radius(qx, qy, RADIUS_M)
-                times.append(time.perf_counter() - t0)
+            for (qx, qy), want, rows in zip(queries, reference_radius, got[name]["radius"]):
                 # rows within a hair of the radius may legitimately differ
-                # between sphere and spheroid; compare after dropping those
                 # (spheroidal distances differ from the sphere by up to ~0.5%)
-                got_d = true_dist(qx, qy, got) if got else np.array([])
-                inner_got = {i for i, d in zip(got, got_d) if d <= RADIUS_M * (1 - 1e-2)}
+                got_d = true_dist(qx, qy, rows) if rows else np.array([])
+                inner_got = {i for i, d in zip(rows, got_d) if d <= RADIUS_M * (1 - 1e-2)}
                 inner_want = {i for i in want if haversine_m(qx, qy, x[i - 1], y[i - 1]) <= RADIUS_M * (1 - 1e-2)}
                 outer_ok = all(d <= RADIUS_M * (1 + 1e-2) for d in got_d)
                 match += inner_got == inner_want and outer_ok
-            times = np.array(times) * 1000
-            entry["radius"] = {
-                "meters": RADIUS_M,
-                "median_ms": float(np.median(times)),
-                "p95_ms": float(np.percentile(times, 95)),
-                "set_match": match / len(queries),
-                "avg_rows": float(np.mean([len(w) for w in reference_radius])),
-            }
-            print(f"[{name}] radius {RADIUS_M:.0f} m: median {np.median(times):8.3f} ms  set-match {match / len(queries):.0%}", flush=True)
+            entry["radius"]["set_match"] = match / len(queries)
+            entry["radius"]["avg_rows"] = float(np.mean([len(w) for w in reference_radius]))
+            print(f"[{name}] radius set-match {match / len(queries):.0%}", flush=True)
         save_results(dataset, results)
 
 
