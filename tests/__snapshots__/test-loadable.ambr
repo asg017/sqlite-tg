@@ -118,7 +118,7 @@
   "tg0 constructor error: could not parse 'a geometri'"
 # ---
 # name: test_tg0_create_errors[unknown geometry option]
-  "tg0 constructor error: unknown option 'compression' in 'a polygon compression=zstd', only 'indexing=' is supported on geometry columns"
+  "tg0 constructor error: unknown option 'compression' in 'a polygon compression=zstd', only 'indexing=' and 'metric=' are supported on geometry columns"
 # ---
 # name: test_tg0_create_errors[unknown indexing option]
   "tg0 constructor error: unknown indexing option 'foo' in 'a polygon indexing=foo', expected one of none, natural, or ystripes"
@@ -314,6 +314,70 @@
       'type': '',
     }),
   ])
+# ---
+# name: test_tg0_create_metric_option[metric on data column]
+  "tg0 constructor error: 'metric=' is only supported on geometry columns, in 'label text metric=planar'"
+# ---
+# name: test_tg0_create_metric_option[metric options xinfo]
+  list([
+    dict({
+      'cid': 0,
+      'dflt_value': None,
+      'hidden': 0,
+      'name': 'a',
+      'notnull': 0,
+      'pk': 0,
+      'type': 'point',
+    }),
+    dict({
+      'cid': 1,
+      'dflt_value': None,
+      'hidden': 0,
+      'name': 'b',
+      'notnull': 0,
+      'pk': 0,
+      'type': 'point',
+    }),
+    dict({
+      'cid': 2,
+      'dflt_value': None,
+      'hidden': 0,
+      'name': 'c',
+      'notnull': 0,
+      'pk': 0,
+      'type': 'point',
+    }),
+    dict({
+      'cid': 3,
+      'dflt_value': None,
+      'hidden': 0,
+      'name': 'd',
+      'notnull': 0,
+      'pk': 0,
+      'type': 'polygon',
+    }),
+    dict({
+      'cid': 4,
+      'dflt_value': None,
+      'hidden': 0,
+      'name': 'e',
+      'notnull': 0,
+      'pk': 0,
+      'type': 'polygon',
+    }),
+    dict({
+      'cid': 5,
+      'dflt_value': None,
+      'hidden': 1,
+      'name': 'distance',
+      'notnull': 0,
+      'pk': 0,
+      'type': '',
+    }),
+  ])
+# ---
+# name: test_tg0_create_metric_option[unknown metric value]
+  "tg0 constructor error: unknown metric option 'spherical' in 'a point metric=spherical', expected geodesic or planar"
 # ---
 # name: test_tg0_create_primary_keys[integer pk xinfo]
   list([
@@ -801,6 +865,21 @@
       'type': 'table',
     }),
   ])
+# ---
+# name: test_tg0_write_coordinate_validation[infinity into planar]
+  'IntegrityError: tg_coords.flat: coordinates must be finite'
+# ---
+# name: test_tg0_write_coordinate_validation[insert latitude past the pole]
+  'IntegrityError: tg_coords.geo: coordinates outside lon/lat range (x=0, y=-90.5); declare the column with metric=planar for projected coordinates'
+# ---
+# name: test_tg0_write_coordinate_validation[insert projected into geodesic]
+  'IntegrityError: tg_coords.geo: coordinates outside lon/lat range (x=500000, y=4e+06); declare the column with metric=planar for projected coordinates'
+# ---
+# name: test_tg0_write_coordinate_validation[nan into geodesic]
+  'IntegrityError: tg_coords.geo: coordinates outside lon/lat range (x=NaN, y=0); declare the column with metric=planar for projected coordinates'
+# ---
+# name: test_tg0_write_coordinate_validation[update out of range]
+  'IntegrityError: tg_coords.geo: coordinates outside lon/lat range (x=181, y=0); declare the column with metric=planar for projected coordinates'
 # ---
 # name: test_tg0_write_data_columns[float into integer]
   'IntegrityError: tg_wd.n: expected integer value, received float'

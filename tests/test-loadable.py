@@ -1536,6 +1536,29 @@ def test_tg0_create_geometry_columns(snapshot):
 
 
 @pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_create_metric_option(snapshot):
+    # metric= selects the KNN distance metric and the write-time coordinate
+    # check; geodesic (lon/lat) is the default. Combines with indexing=
+    db.execute(
+        "create virtual table tg_metric using tg0("
+        "a point, "
+        "b point metric=geodesic, "
+        "c point metric=planar, "
+        "d polygon METRIC=PLANAR indexing=ystripes, "
+        "e polygon indexing=natural metric=geodesic)"
+    )
+    assert table_xinfo("tg_metric") == snapshot(name="metric options xinfo")
+    db.execute("drop table tg_metric")
+
+    assert tg0_error(
+        "create virtual table tg_bad using tg0(a point metric=spherical)"
+    ) == snapshot(name="unknown metric value")
+    assert tg0_error(
+        "create virtual table tg_bad using tg0(a point, label text metric=planar)"
+    ) == snapshot(name="metric on data column")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
 def test_tg0_create_data_columns(snapshot):
     db.execute(
         "create virtual table tg_data using tg0("
@@ -1888,6 +1911,48 @@ def test_tg0_write_geometry_type_enforcement(snapshot):
         db.execute("insert into tg_wg(shape) values (?)", [geometry])
     assert execute_all(db, "select count(*) as n from tg_wg_content") == [{"n": 7}]
     db.execute("drop table tg_wg")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_write_coordinate_validation(snapshot):
+    import struct
+
+    # geodesic (default) columns reject coordinates outside lon/lat range on
+    # INSERT and UPDATE; planar columns accept them. Neither accepts NaN or
+    # infinities (built as WKB, since WKT has no spelling for them)
+    def wkb_point(x, y):
+        return struct.pack("<BIdd", 1, 1, x, y)
+
+    db.execute(
+        "create virtual table tg_coords using tg0(geo point, flat point metric=planar)"
+    )
+    db.execute(
+        "insert into tg_coords(geo, flat) values ('POINT(-118.24 34.05)', 'POINT(500000 4000000)')"
+    )
+    assert tg0_write_error(
+        "insert into tg_coords(geo, flat) values ('POINT(500000 4000000)', 'POINT(0 0)')"
+    ) == snapshot(name="insert projected into geodesic")
+    assert tg0_write_error(
+        "insert into tg_coords(geo, flat) values ('POINT(0 -90.5)', 'POINT(0 0)')"
+    ) == snapshot(name="insert latitude past the pole")
+    assert tg0_write_error(
+        "update tg_coords set geo = 'POINT(181 0)'"
+    ) == snapshot(name="update out of range")
+    assert tg0_write_error(
+        "insert into tg_coords(geo, flat) values (?, 'POINT(0 0)')",
+        [wkb_point(float("nan"), 0)],
+    ) == snapshot(name="nan into geodesic")
+    assert tg0_write_error(
+        "insert into tg_coords(geo, flat) values ('POINT(0 0)', ?)",
+        [wkb_point(1, float("inf"))],
+    ) == snapshot(name="infinity into planar")
+    # the antimeridian and the poles themselves are in range
+    db.execute(
+        "insert into tg_coords(geo, flat) values ('POINT(180 90)', 'POINT(-1e300 1e300)')"
+    )
+    db.execute("insert into tg_coords(geo, flat) values ('POINT(-180 -90)', 'POINT(0 0)')")
+    assert db.execute("select count(*) from tg_coords").fetchone()[0] == 3
+    db.execute("drop table tg_coords")
 
 
 @pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")

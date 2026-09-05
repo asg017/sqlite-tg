@@ -3145,8 +3145,11 @@ done:
 //   column-def :=
 //       name INTEGER PRIMARY KEY
 //     | name TEXT PRIMARY KEY
-//     | name geom-type [INDEXING "=" (NONE | NATURAL | YSTRIPES)]*
+//     | name geom-type [geom-option]*
 //     | name (TEXT | INT | INTEGER | FLOAT | DOUBLE | BLOB)
+//
+//   geom-option := INDEXING "=" (NONE | NATURAL | YSTRIPES)
+//                | METRIC "=" (GEODESIC | PLANAR)
 //
 //   geom-type := GEOMETRY | POINT | LINESTRING | POLYGON | MULTIPOINT
 //              | MULTILINESTRING | MULTIPOLYGON | GEOMETRYCOLLECTION
@@ -3379,12 +3382,14 @@ static int tg0_parse_primary_key_definition(const char *source,
 
 /**
  * Parse an argv[i] entry of a tg0 virtual table definition, and see if it's a
- * geometry column definition: `name <geom-type> [indexing=...]*`.
+ * geometry column definition: `name <geom-type> [indexing=...] [metric=...]`.
  *
  * out_column_name points into source (same lifetime). out_geom_type is 0 for
  * generic `geometry` columns or an enum tg_geom_type value for narrowed ones.
  * out_indexing is the tg_index to use when parsing stored geometries at query
- * time, TG_DEFAULT unless an `indexing=` option overrides it.
+ * time, TG_DEFAULT unless an `indexing=` option overrides it. out_metric is
+ * the distance metric for KNN queries and coordinate validation,
+ * TG_METRIC_GEODESIC (lon/lat, meters) unless `metric=planar`.
  * Returns SQLITE_EMPTY if not a geometry column definition, SQLITE_OK if it
  * is, or SQLITE_ERROR when it is one but has a bad option — in which case
  * *out_errmsg is set to an sqlite3_mprintf'd error message.
@@ -3392,7 +3397,7 @@ static int tg0_parse_primary_key_definition(const char *source,
 static int tg0_parse_geometry_column_definition(
     const char *source, int source_length, char **out_column_name,
     int *out_column_name_length, int *out_geom_type,
-    enum tg_index *out_indexing, char **out_errmsg) {
+    enum tg_index *out_indexing, tg_metric *out_metric, char **out_errmsg) {
   struct Tg0Scanner scanner;
   struct Tg0Token token;
   struct Tg0Token key;
@@ -3400,6 +3405,7 @@ static int tg0_parse_geometry_column_definition(
   int column_name_length;
   int geom_type;
   enum tg_index indexing = TG_DEFAULT;
+  tg_metric metric = TG_METRIC_GEODESIC;
   int rc;
   tg0_scanner_init(&scanner, source, source_length);
 
@@ -3421,10 +3427,10 @@ static int tg0_parse_geometry_column_definition(
     return SQLITE_EMPTY;
   }
 
-  // optional `key=value` options. Only `indexing=none|natural|ystripes` is
-  // recognized; a recognizable option shape with an unknown key or value is
-  // a hard error, anything structurally off falls back to the caller's
-  // generic could-not-parse error.
+  // optional `key=value` options: `indexing=none|natural|ystripes` and
+  // `metric=geodesic|planar`. A recognizable option shape with an unknown
+  // key or value is a hard error, anything structurally off falls back to
+  // the caller's generic could-not-parse error.
   while (1) {
     rc = tg0_scanner_next(&scanner, &key);
     if (rc == TG0_TOKEN_RESULT_EOF) {
@@ -3459,11 +3465,24 @@ static int tg0_parse_geometry_column_definition(
             (int)(token.end - token.start), token.start, source_length, source);
         return SQLITE_ERROR;
       }
+    } else if (tg0_token_is(&key, "metric")) {
+      if (tg0_token_is(&token, "geodesic")) {
+        metric = TG_METRIC_GEODESIC;
+      } else if (tg0_token_is(&token, "planar")) {
+        metric = TG_METRIC_PLANAR;
+      } else {
+        *out_errmsg = sqlite3_mprintf(
+            TG0_CONSTRUCTOR_ERROR
+            "unknown metric option '%.*s' in '%.*s', expected geodesic or "
+            "planar",
+            (int)(token.end - token.start), token.start, source_length, source);
+        return SQLITE_ERROR;
+      }
     } else {
       *out_errmsg = sqlite3_mprintf(
           TG0_CONSTRUCTOR_ERROR
-          "unknown option '%.*s' in '%.*s', only 'indexing=' is supported on "
-          "geometry columns",
+          "unknown option '%.*s' in '%.*s', only 'indexing=' and 'metric=' "
+          "are supported on geometry columns",
           (int)(key.end - key.start), key.start, source_length, source);
       return SQLITE_ERROR;
     }
@@ -3473,6 +3492,7 @@ static int tg0_parse_geometry_column_definition(
   *out_column_name_length = column_name_length;
   *out_geom_type = geom_type;
   *out_indexing = indexing;
+  *out_metric = metric;
   return SQLITE_OK;
 }
 
@@ -3528,11 +3548,11 @@ static int tg0_parse_data_column_definition(const char *source,
   rc = tg0_scanner_next(&scanner, &token);
   if (rc == TG0_TOKEN_RESULT_SOME &&
       token.token_type == TG0_TOKEN_TYPE_IDENTIFIER &&
-      tg0_token_is(&token, "indexing")) {
+      (tg0_token_is(&token, "indexing") || tg0_token_is(&token, "metric"))) {
     *out_errmsg = sqlite3_mprintf(
         TG0_CONSTRUCTOR_ERROR
-        "'indexing=' is only supported on geometry columns, in '%.*s'",
-        source_length, source);
+        "'%.*s=' is only supported on geometry columns, in '%.*s'",
+        (int)(token.end - token.start), token.start, source_length, source);
     return SQLITE_ERROR;
   }
   if (rc != TG0_TOKEN_RESULT_EOF) {
@@ -3581,6 +3601,10 @@ struct tg0_geometry_column {
   // the tg_index used when parsing stored geometries at query time
   // (`indexing=` option, defaults to TG_DEFAULT)
   enum tg_index indexing;
+  // distance metric for KNN queries (`metric=` option, defaults to
+  // TG_METRIC_GEODESIC). Geodesic columns also validate that every written
+  // coordinate is a finite lon/lat pair, planar columns that it is finite
+  tg_metric metric;
 };
 
 struct tg0_data_column {
@@ -4052,6 +4076,7 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     int columnType = 0;
     int geomType = 0;
     enum tg_index indexing = TG_DEFAULT;
+    tg_metric metric = TG_METRIC_GEODESIC;
     char *errmsg = NULL;
 
     // 1) primary key column, ie `id integer primary key`
@@ -4082,8 +4107,8 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     }
 
     // 2) geometry column, ie `boundary polygon indexing=natural`
-    rc = tg0_parse_geometry_column_definition(arg, nArg, &cName, &nName,
-                                              &geomType, &indexing, &errmsg);
+    rc = tg0_parse_geometry_column_definition(
+        arg, nArg, &cName, &nName, &geomType, &indexing, &metric, &errmsg);
     if (rc == SQLITE_ERROR) {
       *pzErr = errmsg;
       goto error;
@@ -4112,6 +4137,7 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
       }
       column->geomType = geomType;
       column->indexing = indexing;
+      column->metric = metric;
       int iUser = tg0_num_user_columns(pNew);
       pNew->user_column_kinds[iUser] = TG0_USER_COLUMN_KIND_GEOMETRY;
       pNew->user_column_idxs[iUser] = pNew->numGeometryColumns;
@@ -4868,10 +4894,14 @@ static int tg0_value_is_wkb(sqlite3_value *value) {
 
 // Parses and validates a value being written to geometry column iGeom: NULL
 // is rejected (geometry columns are NOT NULL), the value must parse through
-// geomValue(), and narrowed columns must match their declared type exactly.
+// geomValue(), narrowed columns must match their declared type exactly, and
+// the bbox must be finite — and within lon/lat range on geodesic columns,
+// so a table holding projected coordinates fails at its first INSERT with a
+// message naming `metric=planar` instead of producing garbage distances.
 // On success *out_geom is an owned tg_geom the caller must tg_geom_free().
 // On failure the vtab error is set and SQLITE_CONSTRAINT (NULL value / type
-// mismatch) or SQLITE_ERROR (unparseable input) is returned.
+// mismatch / bad coordinates) or SQLITE_ERROR (unparseable input) is
+// returned.
 static int tg0_validate_geometry_value(tg0_vtab *p, int iGeom,
                                        sqlite3_value *value,
                                        struct tg_geom **out_geom) {
@@ -4896,6 +4926,31 @@ static int tg0_validate_geometry_value(tg0_vtab *p, int iGeom,
                       p->tableName, column->name,
                       tg_geom_type_string(column->geomType),
                       tg_geom_type_string(tg_geom_typeof(geom)));
+    tg_geom_free(geom);
+    return SQLITE_CONSTRAINT;
+  }
+  struct tg_rect rect = tg_geom_rect(geom);
+  if (column->metric == TG_METRIC_GEODESIC
+          ? !(tg_lonlat_valid(rect.min.x, rect.min.y) &&
+              tg_lonlat_valid(rect.max.x, rect.max.y))
+          : !(isfinite(rect.min.x) && isfinite(rect.min.y) &&
+              isfinite(rect.max.x) && isfinite(rect.max.y))) {
+    if (column->metric == TG_METRIC_GEODESIC) {
+      tg_vtab_set_error(&p->base,
+                        "%s.%s: coordinates outside lon/lat range (x=%g, "
+                        "y=%g); declare the column with metric=planar for "
+                        "projected coordinates",
+                        p->tableName, column->name,
+                        fabs(rect.min.x) > fabs(rect.max.x) || isnan(rect.min.x)
+                            ? rect.min.x
+                            : rect.max.x,
+                        fabs(rect.min.y) > fabs(rect.max.y) || isnan(rect.min.y)
+                            ? rect.min.y
+                            : rect.max.y);
+    } else {
+      tg_vtab_set_error(&p->base, "%s.%s: coordinates must be finite",
+                        p->tableName, column->name);
+    }
     tg_geom_free(geom);
     return SQLITE_CONSTRAINT;
   }
