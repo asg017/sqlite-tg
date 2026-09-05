@@ -42,9 +42,13 @@ tg0 v2 covers the indexed-parse idea: geometry columns take
 index at query time (`tg_parse_wkb_ix`).
 
 - [x] `tg_group_bbox()`
-- [ ] distance stuff?
-- [.] KNN support -- tg0 reserves the surface (hidden `distance` column +
-      idxStr plan '4'); best-first rtree traversal is a follow-up
+- [x] distance stuff -- `tg_distance_sphere(point, geom)` (great-circle
+      meters; the knn workstream's distance kernel). Planar measurements
+      still deliberately unwrapped
+- [x] KNN support -- `geomcol match <point> order by distance limit n` on
+      tg0 tables (knn workstream): best-first walk of the column's rtree
+      node blobs, `metric=geodesic|planar` per geometry column, same-column
+      predicate + `distance <= r` folded into the walk
 - [ ] extensions
 
 ## constructors
@@ -162,9 +166,8 @@ the two above work as written:
 
 deferred from that workstream:
 
-- KNN: surface reserved (hidden `distance` column in declare_vtab + idxStr
-  plan '4'); follow-up is best-first rtree traversal behind
-  `where geomcol match tg_knn(:x, :y) order by distance limit n`
+- KNN: DONE in the knn workstream (`plans/knn/`) — `where geomcol match
+  <point> order by distance limit n`, no tg_knn() function needed
 - partition keys (per-value rtree sharding for stacked-layer workloads):
   deliberately deferred, addable later as new syntax with no migration
 - parsed-geometry cache across queries (today every candidate row re-parses

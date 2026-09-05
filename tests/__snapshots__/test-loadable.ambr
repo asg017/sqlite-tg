@@ -501,6 +501,18 @@
 # name: test_tg0_integrity_check[orphaned rtree entry]
   'tg0 table tg_ic: 1 orphaned tg_ic_rtree00 entry with no content row (geometry column "shape")'
 # ---
+# name: test_tg0_knn_corrupt_nodes[corrupt node errors]
+  dict({
+    'cell count past the end': 'DatabaseError: tg0 table tg_kc: malformed rtree node 1 in tg_kc_rtree00_node',
+    'child is the root': 'DatabaseError: tg0 table tg_kc: malformed rtree node 1 in tg_kc_rtree00_node',
+    'depth 65535': 'DatabaseError: tg0 table tg_kc: malformed rtree node 1 in tg_kc_rtree00_node',
+    'empty blob': 'DatabaseError: tg0 table tg_kc: malformed rtree node 1 in tg_kc_rtree00_node',
+    'missing child': 'DatabaseError: tg0 table tg_kc: rtree node 123456789 is missing from tg_kc_rtree00_node',
+    'null blob': 'DatabaseError: tg0 table tg_kc: malformed rtree node 1 in tg_kc_rtree00_node',
+    'rtree entry without content row': 'DatabaseError: tg0 table tg_kc: rtree entry 1 has no content row',
+    'truncated blob': 'DatabaseError: tg0 table tg_kc: malformed rtree node 1 in tg_kc_rtree00_node',
+  })
+# ---
 # name: test_tg0_knn_eqp[knn plans]
   dict({
     'asc': list([

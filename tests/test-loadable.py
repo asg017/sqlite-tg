@@ -2850,6 +2850,89 @@ def test_tg0_knn_pushdown(tg0_knn_table):
 
 
 @pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_join_order():
+    # a MATCH whose right-hand side comes from another table is only usable
+    # once that table is the outer loop; xBestIndex reports the other order
+    # as unusable (SQLITE_CONSTRAINT) instead of failing the statement
+    rows = knn_points(9, 30)
+    db.execute("create virtual table tg_ja using tg0(name text, geo point)")
+    db.execute("create table tg_jq(name text, pt text)")
+    db.executemany("insert into tg_ja(name, geo) values (?, ?)", [(n, f"POINT({x} {y})") for n, (x, y) in rows])
+    queries = [("q1", (10, 10)), ("q2", (-100, 45)), ("q3", (170, -60))]
+    db.executemany("insert into tg_jq(name, pt) values (?, ?)", [(n, f"POINT({x} {y})") for n, (x, y) in queries])
+    got = db.execute(
+        "select q.name as q, a.name as nearest from tg_jq q join tg_ja a on a.geo match q.pt "
+        "where a.distance = (select min(b.distance) from tg_ja b where b.geo match q.pt) order by q.name"
+    ).fetchall()
+    assert [(r["q"], r["nearest"]) for r in got] == [
+        (n, knn_reference(rows, qp)[0][0]) for n, qp in queries
+    ]
+    # the same through a lateral-style correlated subquery
+    got = db.execute(
+        "select q.name, (select a.name from tg_ja a where a.geo match q.pt order by a.distance limit 1) as nearest "
+        "from tg_jq q order by q.name"
+    ).fetchall()
+    assert [(r[0], r[1]) for r in got] == [(n, knn_reference(rows, qp)[0][0]) for n, qp in queries]
+    db.execute("drop table tg_ja")
+    db.execute("drop table tg_jq")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_corrupt_nodes(snapshot):
+    # ticket 05: the node reader never crashes or loops on malformed
+    # %_node blobs — every case is a clean SQLITE_CORRUPT_VTAB error
+    import struct
+
+    rows = knn_points(13, 200)  # deep enough for interior nodes
+    db.execute("create virtual table tg_kc using tg0(name text, geo point)")
+    db.executemany("insert into tg_kc(name, geo) values (?, ?)", [(n, f"POINT({x} {y})") for n, (x, y) in rows])
+    db.commit()
+    root = db.execute("select data from tg_kc_rtree00_node where nodeno = 1").fetchone()[0]
+    depth = struct.unpack(">H", root[:2])[0]
+    assert depth >= 1
+    child = struct.unpack(">q", root[4:12])[0]
+    assert child > 1
+
+    def knn_error(label):
+        with pytest.raises(sqlite3.DatabaseError) as excinfo:
+            db.execute("select name from tg_kc where geo match 'POINT(0 0)' order by distance").fetchall()
+        return f"{type(excinfo.value).__name__}: {excinfo.value}"
+
+    errors = {}
+    cases = {
+        # header claims more cells than the blob holds
+        "cell count past the end": struct.pack(">HH", depth, 60000) + root[4:],
+        # a blob too short for even a header
+        "truncated blob": root[:3],
+        # empty blob / NULL data
+        "empty blob": b"",
+        # an absurd depth
+        "depth 65535": struct.pack(">H", 65535) + root[2:],
+        # an interior node pointing back at the root
+        "child is the root": root[:4] + struct.pack(">q", 1) + root[12:],
+        # an interior node pointing at a nonexistent node
+        "missing child": root[:4] + struct.pack(">q", 123456789) + root[12:],
+    }
+    for label, blob in cases.items():
+        db.execute("update tg_kc_rtree00_node set data = ? where nodeno = 1", [blob])
+        errors[label] = knn_error(label)
+    db.execute("update tg_kc_rtree00_node set data = null where nodeno = 1")
+    errors["null blob"] = knn_error("null blob")
+    # restore and confirm the walk is healthy again
+    db.execute("update tg_kc_rtree00_node set data = ? where nodeno = 1", [root])
+    assert len(db.execute("select name from tg_kc where geo match 'POINT(0 0)' order by distance").fetchall()) == 200
+    # a leaf entry whose rowid has no content row
+    db.execute("delete from tg_kc_content where rowid = 1")
+    errors["rtree entry without content row"] = knn_error("no content")
+    # NaN coordinates in a stored cell only push that entry to the end
+    db.execute("update tg_kc_rtree00_node set data = ? where nodeno = 1", [root[:12] + struct.pack(">ffff", float("nan"), float("nan"), float("nan"), float("nan")) + root[28:]])
+    db.execute("insert into tg_kc_content(rowid, geom00, data00) select 1, geom00, data00 from tg_kc_content where rowid = 2")
+    assert len(db.execute("select name from tg_kc where geo match 'POINT(0 0)' order by distance").fetchall()) == 200
+    assert errors == snapshot(name="corrupt node errors")
+    db.execute("drop table tg_kc")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
 def test_tg0_knn_eqp(tg0_knn_table, snapshot):
     # `order by distance` (ASC, alone) is consumed by the plan: no temp
     # B-tree. Anything else is sorted by SQLite over the full stream

@@ -4926,6 +4926,11 @@ static int tg0_knn_expand_node(tg0_vtab *p, tg0_knn *knn, sqlite3_int64 nodeno,
     }
     tg0_knn_entry entry;
     entry.id = tg0_read_be64(cell);
+    if (level > 0 && entry.id <= 1) {
+      // a child pointer back to the root (or to nothing) can only come from
+      // a corrupt node; the level count already bounds the walk's depth
+      goto corrupt;
+    }
     entry.key = tg_metric_point_rect(knn->metric, knn->q, rect);
     if (isnan(entry.key)) {
       // a NaN bound would break heap ordering; treat as unreachable
