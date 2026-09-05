@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>sqlite-tg KNN map</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root { --bg: #fff; --fg: #1a1a1a; --muted: #666; --line: #ddd; --accent: #0b6bcb; --warn: #b54708; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; color: var(--fg); background: var(--bg); height: 100vh; display: grid; grid-template-columns: 380px 1fr; }
+  #sidebar { border-right: 1px solid var(--line); overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+  #map { height: 100vh; }
+  h1 { font-size: 15px; margin: 0; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 8px 0 2px; }
+  label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  input[type=number], select, input[type=text] { width: 150px; padding: 3px 5px; font: inherit; border: 1px solid var(--line); border-radius: 4px; }
+  input[type=text].wide { width: 100%; }
+  button { font: inherit; padding: 4px 9px; border: 1px solid var(--line); border-radius: 4px; background: #f6f6f6; cursor: pointer; }
+  button:hover { background: #eee; }
+  pre { margin: 0; padding: 7px 8px; background: #f5f5f5; border-radius: 4px; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  td, th { padding: 2px 4px; border-bottom: 1px solid #eee; text-align: left; vertical-align: top; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.diff td { background: #fff4e5; }
+  .status { color: var(--muted); }
+  .warn { color: var(--warn); }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 10px; font-variant-numeric: tabular-nums; }
+  .stats b { font-weight: 600; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .marker-label { background: var(--accent); color: #fff; border-radius: 10px; font-size: 10px; font-weight: 700; text-align: center; line-height: 16px; width: 16px; height: 16px; border: 1px solid #fff; box-shadow: 0 0 2px rgba(0,0,0,.5); }
+  .marker-label.diff { background: var(--warn); }
+  details summary { cursor: pointer; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h1>sqlite-tg KNN in the browser</h1>
+  <div class="status" id="status">loading sqlite-tg wasm…</div>
+  <div class="row">
+    <label>database <input type="file" id="dbfile" accept=".db,.sqlite,.sqlite3"></label>
+  </div>
+  <div class="status" id="dbinfo"></div>
+
+  <h2>Query</h2>
+  <label>table <select id="table"></select></label>
+  <label>geometry column <select id="column"></select></label>
+  <label>k (LIMIT) <input type="number" id="k" value="10" min="1" max="10000"></label>
+  <label><span>radius (<code>distance &lt;= m</code>)</span> <span><input type="checkbox" id="useRadius"> <input type="number" id="radius" value="500" min="0" style="width:100px"></span></label>
+  <label><span>restrict to map view (<code>tg_intersects</code>)</span> <input type="checkbox" id="useBbox"></label>
+  <label><span>extra WHERE</span></label>
+  <input type="text" class="wide" id="extraWhere" placeholder="e.g. category = 'restaurant' or name like '%coffee%'">
+  <label><span>ORDER BY distance</span> <input type="checkbox" id="orderBy" checked></label>
+  <div class="row">
+    <button id="rerun">re-run at last click</button>
+    <button id="clear">clear</button>
+    <span class="status">click the map to query</span>
+  </div>
+
+  <h2>Cross-checks</h2>
+  <div class="row">
+    <label><input type="checkbox" id="checkBrute"> brute force (<code>ORDER BY tg_distance_sphere</code>)</label>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="checkPlanar"> planar degrees ranking (the wrong way)</label>
+  </div>
+  <div class="status" id="checkinfo"></div>
+
+  <h2>Result</h2>
+  <div class="stats" id="stats"></div>
+  <details open><summary>SQL</summary><pre id="sql"></pre></details>
+  <details><summary>EXPLAIN QUERY PLAN</summary><pre id="plan"></pre></details>
+  <table id="results"><thead><tr><th>#</th><th>name</th><th class="num">distance</th></tr></thead><tbody></tbody></table>
+</div>
+<div id="map"></div>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const status = (t, warn) => { $("status").textContent = t; $("status").className = warn ? "status warn" : "status"; };
+
+// ---------------------------------------------------------------- sqlite ---
+const { default: sqlite3InitModule } = await import("../../dist/.wasm/sqlite3.mjs");
+const sqlite3 = await sqlite3InitModule();
+status(`sqlite ${sqlite3.version.libVersion}, sqlite-tg wasm loaded`);
+
+let db = null;
+let schema = { tables: [] }; // [{name, columns:[{name, metric}]}]
+
+function openBytes(bytes, label) {
+  if (db) db.close();
+  db = new sqlite3.oo1.DB();
+  const p = sqlite3.wasm.allocFromTypedArray(bytes);
+  const rc = sqlite3.capi.sqlite3_deserialize(
+    db.pointer, "main", p, bytes.length, bytes.length,
+    sqlite3.capi.SQLITE_DESERIALIZE_FREEONCLOSE | sqlite3.capi.SQLITE_DESERIALIZE_RESIZEABLE,
+  );
+  db.checkRc(rc);
+  const version = db.selectValue("select tg_version()");
+  // tg0 tables and their geometry columns (with the metric= option parsed
+  // out of the CREATE statement; geodesic is the default)
+  schema.tables = [];
+  for (const row of db.exec({ sql: "select name, sql from sqlite_master where type = 'table' and sql like '%using tg0%'", rowMode: "object" , returnValue: "resultRows"})) {
+    const columns = [];
+    for (const c of db.exec({ sql: `select name, type from pragma_table_xinfo(?)`, bind: [row.name], rowMode: "object", returnValue: "resultRows" })) {
+      if (/^(geometry|point|linestring|polygon|multipoint|multilinestring|multipolygon|geometrycollection)$/i.test(c.type)) {
+        const m = new RegExp(`\\b${c.name}\\s+${c.type}[^,)]*metric\\s*=\\s*(\\w+)`, "i").exec(row.sql);
+        columns.push({ name: c.name, type: c.type, metric: m ? m[1].toLowerCase() : "geodesic" });
+      }
+    }
+    const rows = db.selectValue(`select count(*) from "${row.name}"`);
+    schema.tables.push({ name: row.name, columns, rows });
+  }
+  $("table").innerHTML = schema.tables.map((t) => `<option value="${t.name}">${t.name} (${t.rows.toLocaleString()} rows)</option>`).join("");
+  onTableChange();
+  $("dbinfo").textContent = `${label}: ${(bytes.length / 1e6).toFixed(1)} MB, sqlite-tg ${version}, ${schema.tables.length} tg0 table(s)`;
+  status("ready — click the map");
+}
+
+function onTableChange() {
+  const t = schema.tables.find((t) => t.name === $("table").value);
+  $("column").innerHTML = (t ? t.columns : []).map((c) => `<option value="${c.name}">${c.name} (${c.type}, ${c.metric})</option>`).join("");
+}
+$("table").addEventListener("change", onTableChange);
+
+$("dbfile").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  status(`reading ${f.name}…`);
+  try { openBytes(new Uint8Array(await f.arrayBuffer()), f.name); }
+  catch (err) { status(`could not open ${f.name}: ${err.message}`, true); }
+});
+
+// ------------------------------------------------------------------- map ---
+const map = L.map("map").setView([37.7749, -122.4194], 13);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(map);
+const layer = L.layerGroup().addTo(map);
+let last = null; // last clicked latlng
+
+function fmt(m) { return m >= 10000 ? `${(m / 1000).toFixed(1)} km` : `${m.toFixed(1)} m`; }
+
+function bboxWkt() {
+  const b = map.getBounds();
+  const w = b.getWest(), e = b.getEast(), s = b.getSouth(), n = b.getNorth();
+  return `POLYGON((${w} ${s}, ${e} ${s}, ${e} ${n}, ${w} ${n}, ${w} ${s}))`;
+}
+
+function buildSql(table, column, { cross = null } = {}) {
+  const k = Math.max(1, parseInt($("k").value) || 10);
+  const where = [];
+  const bind = [];
+  const select = `select rowid, name, distance, tg_x(${column}) as x, tg_y(${column}) as y from "${table}"`;
+  if (cross === "brute") {
+    // full scan ranked by the scalar kernel: must agree with the walk
+    const s = `select rowid, name, tg_distance_sphere(tg_point(?, ?), ${column}) as distance, tg_x(${column}) as x, tg_y(${column}) as y from "${table}"`;
+    return { sql: `${s} order by distance limit ${k}`, bind: [last.lng, last.lat] };
+  }
+  if (cross === "planar") {
+    // Euclidean distance in degrees, then the true distance of what it picked
+    const s = `select rowid, name, tg_distance_sphere(tg_point(?, ?), ${column}) as distance, tg_x(${column}) as x, tg_y(${column}) as y from "${table}"`;
+    return { sql: `${s} order by (tg_x(${column}) - ?) * (tg_x(${column}) - ?) + (tg_y(${column}) - ?) * (tg_y(${column}) - ?) limit ${k}`, bind: [last.lng, last.lat, last.lng, last.lng, last.lat, last.lat] };
+  }
+  where.push(`${column} match tg_point(?, ?)`);
+  bind.push(last.lng, last.lat);
+  if ($("useRadius").checked) { where.push("distance <= ?"); bind.push(parseFloat($("radius").value) || 0); }
+  if ($("useBbox").checked) { where.push(`tg_intersects(${column}, ?)`); bind.push(bboxWkt()); }
+  if ($("extraWhere").value.trim()) where.push(`(${$("extraWhere").value.trim()})`);
+  const order = $("orderBy").checked ? " order by distance" : "";
+  return { sql: `${select} where ${where.join(" and ")}${order} limit ${k}`, bind };
+}
+
+function run() {
+  if (!db || !last) return;
+  const table = $("table").value, column = $("column").value;
+  const metric = (schema.tables.find((t) => t.name === table)?.columns.find((c) => c.name === column) || {}).metric;
+  layer.clearLayers();
+  const { sql, bind } = buildSql(table, column);
+  let rows, elapsed, plan;
+  try {
+    plan = db.exec({ sql: "explain query plan " + sql, bind, rowMode: "object", returnValue: "resultRows" }).map((r) => r.detail).join("\n");
+    const t0 = performance.now();
+    rows = db.exec({ sql, bind, rowMode: "object", returnValue: "resultRows" });
+    elapsed = performance.now() - t0;
+  } catch (err) {
+    $("sql").textContent = sql;
+    $("plan").textContent = "";
+    $("stats").innerHTML = `<span class="warn">${err.message}</span>`;
+    return;
+  }
+  $("sql").textContent = sql + "\n-- bind: " + JSON.stringify(bind.map((b) => typeof b === "string" && b.length > 60 ? b.slice(0, 57) + "…" : b));
+  $("plan").textContent = plan;
+
+  // cross-checks
+  let diffIds = new Set();
+  const checks = [];
+  if ($("checkBrute").checked) {
+    const { sql: bsql, bind: bbind } = buildSql(table, column, { cross: "brute" });
+    const t0 = performance.now();
+    const brute = db.exec({ sql: bsql, bind: bbind, rowMode: "object", returnValue: "resultRows" });
+    const bt = performance.now() - t0;
+    const same = brute.length === rows.length && brute.every((b, i) => Math.abs(b.distance - rows[i].distance) < 1e-6);
+    checks.push(`brute force: ${bt.toFixed(1)} ms (${(bt / Math.max(elapsed, 0.01)).toFixed(0)}× slower), distances ${same ? "identical" : "DIFFER"}`);
+    if (!same) brute.forEach((b) => { if (!rows.some((r) => r.rowid === b.rowid)) diffIds.add(b.rowid); });
+  }
+  if ($("checkPlanar").checked) {
+    const { sql: psql, bind: pbind } = buildSql(table, column, { cross: "planar" });
+    const planar = db.exec({ sql: psql, bind: pbind, rowMode: "object", returnValue: "resultRows" });
+    const missing = rows.filter((r) => !planar.some((p) => p.rowid === r.rowid));
+    const extra = planar.filter((p) => !rows.some((r) => r.rowid === p.rowid));
+    checks.push(`planar-degrees ranking picks ${extra.length} different row(s) of ${rows.length}` + (extra.length ? `; its farthest is ${fmt(Math.max(...planar.map((p) => p.distance)))} vs ${fmt(Math.max(...rows.map((r) => r.distance)))}` : ""));
+    missing.forEach((r) => diffIds.add(r.rowid));
+    extra.forEach((p) => {
+      L.circleMarker([p.y, p.x], { radius: 6, color: "#b54708", fillOpacity: 0, weight: 2, dashArray: "2 2" }).bindTooltip(`planar pick: ${p.name} (${fmt(p.distance)})`).addTo(layer);
+    });
+  }
+  $("checkinfo").textContent = checks.join(" · ");
+
+  // stats + table + markers
+  const kth = rows.length ? rows[rows.length - 1].distance : null;
+  $("stats").innerHTML = [
+    ["rows", rows.length], ["time", `${elapsed.toFixed(2)} ms`],
+    ["metric", metric], ["k-th distance", kth == null ? "—" : fmt(kth)],
+    ["query", `${last.lng.toFixed(5)}, ${last.lat.toFixed(5)}`], ["plan", plan.includes("INDEX 0:4") ? "KNN walk (plan 4)" : plan.includes("INDEX 0:3") ? "predicate (plan 3)" : "scan"],
+  ].map(([k, v]) => `<span>${k}</span><b>${v}</b>`).join("");
+  $("results").querySelector("tbody").innerHTML = rows.map((r, i) =>
+    `<tr class="${diffIds.has(r.rowid) ? "diff" : ""}"><td>${i + 1}</td><td>${r.name || "<i>unnamed</i>"}</td><td class="num">${r.distance == null ? "—" : fmt(r.distance)}</td></tr>`).join("");
+
+  L.circleMarker([last.lat, last.lng], { radius: 7, color: "#000", fillColor: "#ff0", fillOpacity: 1 }).addTo(layer);
+  if (kth != null && $("orderBy").checked) L.circle([last.lat, last.lng], { radius: kth, color: "#0b6bcb", weight: 1, fillOpacity: 0.04 }).addTo(layer);
+  if ($("useRadius").checked) L.circle([last.lat, last.lng], { radius: parseFloat($("radius").value) || 0, color: "#888", weight: 1, dashArray: "4 4", fillOpacity: 0 }).addTo(layer);
+  rows.forEach((r, i) => {
+    L.marker([r.y, r.x], { icon: L.divIcon({ className: "", html: `<div class="marker-label ${diffIds.has(r.rowid) ? "diff" : ""}">${i + 1}</div>`, iconSize: [16, 16], iconAnchor: [8, 8] }) })
+      .bindTooltip(`${i + 1}. ${r.name || "unnamed"} — ${r.distance == null ? "" : fmt(r.distance)}`).addTo(layer);
+  });
+}
+
+map.on("click", (e) => { last = e.latlng; run(); });
+// ?lng=&lat=[&k=] runs a query on load (shareable links, headless checks)
+const params = new URLSearchParams(location.search);
+const autoQuery = params.has("lng") && params.has("lat") ? L.latLng(parseFloat(params.get("lat")), parseFloat(params.get("lng"))) : null;
+if (params.has("k")) $("k").value = params.get("k");
+$("rerun").addEventListener("click", run);
+$("clear").addEventListener("click", () => { layer.clearLayers(); $("results").querySelector("tbody").innerHTML = ""; $("stats").innerHTML = ""; $("sql").textContent = ""; $("plan").textContent = ""; $("checkinfo").textContent = ""; });
+for (const id of ["k", "radius", "useRadius", "useBbox", "orderBy", "checkBrute", "checkPlanar", "column", "table"]) $(id).addEventListener("change", run);
+$("extraWhere").addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+
+// bundled dataset
+try {
+  status("fetching data/places-sf.db…");
+  const res = await fetch("data/places-sf.db");
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  openBytes(new Uint8Array(await res.arrayBuffer()), "places-sf.db (Overture places, San Francisco)");
+  if (autoQuery) { last = autoQuery; map.setView(autoQuery, 15); $("checkBrute").checked = true; $("checkPlanar").checked = true; run(); }
+} catch (err) {
+  status(`bundled database not found (${err.message}); build it with examples/knn-map/build-db.py or pick a file above`, true);
+}
+</script>
+</body>
+</html>
