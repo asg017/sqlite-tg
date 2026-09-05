@@ -35,9 +35,15 @@ one branch per ticket, per user-visible change update `reference.yaml` →
 `make test-loadable`, `make test-api`, `make test-memory`,
 `tests/test-valgrind.sh`.
 
-Status: **planned 2026-09-05; all five open questions answered by Alex the
-same day with the recommendations below.** Implementation on branch
-`asg017/knn` (worktree `../sqlite-tg-wts/knn`).
+Status: **IMPLEMENTED 2026-09-05** on branch `asg017/knn` (worktree
+`../sqlite-tg-wts/knn`), one commit per ticket, all seven tickets done;
+awaiting Alex's review. All five open questions were answered by Alex the
+same day with the recommendations below. Deviations from the tickets:
+ticket 07's scalar landed inside ticket 01 (it is the kernel's test
+vehicle); the node-visit counter tests in tickets 03/04 were dropped in
+favor of equivalence tests plus a 100k-point timing check (LIMIT 10 in
+~80 µs, radius query ~70 µs, full stream ~50 ms); the site2 port of the
+reference entry (ticket 06 item 3) waits for `asg017/site2` to merge.
 
 ## Research findings
 

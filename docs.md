@@ -1060,7 +1060,7 @@ select * from tg_bbox('LINESTRING (30 10, 10 30, 40 40)');
 
 #### `tg0(...)` {#tg0}
 
-An experimental virtual table for querying large geospatial datasets. A `tg0` table stores rows in an ordinary shadow table and automatically maintains one [R-Tree index](https://www.sqlite.org/rtree.html) of bounding boxes per geometry column, so spatial predicate queries only parse and test the geometries whose bounding boxes qualify. Requires the R-Tree extension to be compiled into the host SQLite. Still experimental — expect breaking changes (KNN queries and partition keys are planned).
+An experimental virtual table for querying large geospatial datasets. A `tg0` table stores rows in an ordinary shadow table and automatically maintains one [R-Tree index](https://www.sqlite.org/rtree.html) of bounding boxes per geometry column, so spatial predicate queries only parse and test the geometries whose bounding boxes qualify. Requires the R-Tree extension to be compiled into the host SQLite. Still experimental — expect breaking changes (partition keys are planned).
 
 The constructor takes a list of typed column definitions, in any order:
 
@@ -1074,8 +1074,9 @@ create virtual table name using tg0(
                                --   point, linestring, polygon, multipoint,
                                --   multilinestring, multipolygon,
                                --   geometrycollection
-                               -- with an optional per-column option:
+                               -- with optional per-column options:
                                --   indexing=none|natural|ystripes
+                               --   metric=geodesic|planar
 
   -- 0 to 16 data columns:
   label text                   -- text | int | integer | float | double | blob
@@ -1083,7 +1084,7 @@ create virtual table name using tg0(
 ```
 
 - **Primary key** (optional): `id integer primary key` aliases the rowid, like an ordinary SQLite table. `id text primary key` declares a `WITHOUT ROWID` table keyed by text ids. With no primary key declared, the table has plain rowids.
-- **Geometry columns** (1 to 8): `geometry` accepts any geometry type, while the 7 concrete type keywords narrow the column to exactly that type. Geometry columns are `NOT NULL` and strictly typed — inserting `NULL` or inserting a `Polygon` into a `multipolygon` column raises a constraint error, with no implicit promotion. The optional `indexing=none|natural|ystripes` option picks the [tg polygon index](https://github.com/tidwall/tg/blob/main/docs/POLYGON_INDEXING.md) used when stored geometries are parsed at query time.
+- **Geometry columns** (1 to 8): `geometry` accepts any geometry type, while the 7 concrete type keywords narrow the column to exactly that type. Geometry columns are `NOT NULL` and strictly typed — inserting `NULL` or inserting a `Polygon` into a `multipolygon` column raises a constraint error, with no implicit promotion. The optional `indexing=none|natural|ystripes` option picks the [tg polygon index](https://github.com/tidwall/tg/blob/main/docs/POLYGON_INDEXING.md) used when stored geometries are parsed at query time. The optional `metric=geodesic|planar` option (default `geodesic`) sets the distance metric for [nearest-neighbor queries](#tg0-knn): `geodesic` treats coordinates as longitude/latitude, reports meters, and rejects coordinates outside that range on write; `planar` reports Euclidean distance in coordinate units, for projected or abstract coordinates.
 - **Data columns** (0 to 16): plain values stored alongside the geometries. Nullable, and type-enforced on write: a type mismatch raises a constraint error, except integers are accepted into `float` columns.
 
 Inserted geometries can be in [any supported format](#supported-formats); reading a geometry column always returns WKB.
@@ -1169,7 +1170,112 @@ where tg_intersects(boundary, 'POINT(-118.2437 34.0522)');
 -- 'America/Los_Angeles'
 ```
 
-A hidden `distance` column reserves the surface for KNN ("k nearest neighbors") queries, which are **not implemented yet**: `MATCH` or `distance` constraints currently error with `KNN queries are not supported on tg0 tables yet`.
+##### Nearest-neighbor queries {#tg0-knn}
+
+`geomcol MATCH <point>` puts a scan into nearest-neighbor ("KNN") mode: rows stream out nearest-first from the column's R-Tree, and the hidden `distance` column carries each row's distance from the query point — meters under the default `metric=geodesic` (great-circle distance on a sphere, within ~0.5% of the WGS84 ellipsoid), coordinate units under `metric=planar`. Always pair it with `ORDER BY distance`: that order is served straight from the index, so a `LIMIT` stops the walk early, while any other ordering makes SQLite sort the whole stream.
+
+```sql
+create virtual table places using tg0(name text, geom point);
+insert into places(name, geom) values
+  ('Los Angeles', 'POINT(-118.2437 34.0522)'),
+  ('San Francisco', 'POINT(-122.4194 37.7749)'),
+  ('Chicago', 'POINT(-87.6298 41.8781)'),
+  ('New York', 'POINT(-74.0060 40.7128)'),
+  ('Honolulu', 'POINT(-157.8583 21.3069)'),
+  ('Tokyo', 'POINT(139.6917 35.6895)');
+select name, round(distance / 1000) as km
+from places
+where geom match tg_point(-118, 34)
+order by distance
+limit 3;
+/*
+┌─────────────────┬────────┐
+│ name            │ km     │
+├─────────────────┼────────┤
+│ 'Los Angeles'   │ 23.0   │
+│ 'San Francisco' │ 578.0  │
+│ 'Chicago'       │ 2787.0 │
+└─────────────────┴────────┘
+*/
+```
+
+The query point can be any Point value in [any supported format](#supported-formats). Candidates can be any geometry type: the distance is to the candidate's nearest point, and a polygon containing the query point is at distance `0`. Radius queries (`distance < ?` / `distance <= ?`) and a predicate on the same column are pushed into the index walk, so they touch only the relevant part of the tree; every other `WHERE` term is filtered on the stream and stays correct:
+
+```sql
+-- everything within 5,000 km, nearest first
+select name, round(distance / 1000) as km
+from places
+where geom match tg_point(-118, 34) and distance <= 5000000
+order by distance;
+/*
+┌─────────────────┬────────┐
+│ name            │ km     │
+├─────────────────┼────────┤
+│ 'Los Angeles'   │ 23.0   │
+│ 'San Francisco' │ 578.0  │
+│ 'Chicago'       │ 2787.0 │
+│ 'New York'      │ 3918.0 │
+│ 'Honolulu'      │ 4141.0 │
+└─────────────────┴────────┘
+*/
+-- the nearest places inside a bounding box
+select name
+from places
+where geom match tg_point(-118, 34)
+  and tg_intersects(geom, 'POLYGON((-130 30, -60 30, -60 50, -130 50, -130 30))')
+order by distance
+limit 2;
+/*
+┌─────────────────┐
+│ name            │
+├─────────────────┤
+│ 'Los Angeles'   │
+│ 'San Francisco' │
+└─────────────────┘
+*/
+```
+
+"The nearest X for every Y" is a correlated subquery:
+
+```sql
+create table trips(name text, location text);
+insert into trips values
+  ('office', 'POINT(-122.4 37.78)'),
+  ('airport', 'POINT(139.78 35.55)');
+select t.name, (
+  select p.name from places p
+  where p.geom match t.location
+  order by p.distance
+  limit 1
+) as nearest
+from trips t;
+/*
+┌───────────┬─────────────────┐
+│ name      │ nearest         │
+├───────────┼─────────────────┤
+│ 'office'  │ 'San Francisco' │
+│ 'airport' │ 'Tokyo'         │
+└───────────┴─────────────────┘
+*/
+```
+
+`EXPLAIN QUERY PLAN` shows a KNN scan as plan `4`:
+
+```sql
+explain query plan
+select name from places
+where geom match tg_point(-118, 34) and distance <= 5000000
+order by distance;
+/*
+┌────┬────────┬─────────┬───────────────────────────────────────────────┐
+│ id │ parent │ notused │ detail                                        │
+├────┼────────┼─────────┼───────────────────────────────────────────────┤
+│ 3  │ 0      │ 50      │ 'SCAN places VIRTUAL TABLE INDEX 0:4KAG_Dc__' │
+└────┴────────┴─────────┴───────────────────────────────────────────────┘
+*/
+```
+
+Limitations: the `MATCH` argument must be a Point (there is no geometry-to-geometry distance). Edges of lines and polygons are straight lines in longitude/latitude, as in every other `tg_*` function, so geometries that cross the antimeridian should be cut at it first. Geodesic distances are spherical, not ellipsoidal.
 
 **Breaking change in v0.0.1-alpha.22:** earlier versions used `tg0(aux1, aux2, ...)`, where every argument became an untyped auxiliary column next to an implicit `_shape` geometry column. That syntax and its storage layout were removed — newer builds cannot open old tg0 tables, and instead fail with a "tg0 constructor error" pointing at this section. There is no in-place migration: dump the old table with the extension version that created it, for example
 

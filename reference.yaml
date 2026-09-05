@@ -318,6 +318,27 @@ functions:
           'LINESTRING(0 0, 2 2)',
           'POINT(3 3)'
         ) as not_touches;
+  tg_distance_sphere:
+    params: [a, b]
+    desc: |
+      Returns the great-circle distance in meters between a Point and the
+      nearest point of another geometry, treating coordinates as
+      longitude/latitude on a sphere of radius 6,371,008.8 m (the IUGG mean
+      Earth radius; within ~0.5% of the WGS84 ellipsoidal distance). At
+      least one argument must be a Point; the other can be any geometry,
+      and a polygon that contains the point is at distance `0`. Returns
+      `NULL` for empty geometries and errors on coordinates outside the
+      longitude/latitude range.
+
+      Edges of lines and polygons are the same straight lines in
+      longitude/latitude every other `tg_*` function assumes; geometries
+      crossing the antimeridian should be cut at it first.
+
+      The `a` and `b` geometries can be in any [supported format](#supported-formats), including WKT, WKB, and GeoJSON.
+    example: |
+      select
+        tg_distance_sphere('POINT(-118.2437 34.0522)', 'POINT(-74.0060 40.7128)') as la_to_nyc_m,
+        tg_distance_sphere(tg_point(5, -1), 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))') as to_polygon_m;
   tg_valid_geojson:
     params: ["geometry"]
     desc: Returns `1` if the given geometry is a valid GeoJSON object, `0` otherwise.
@@ -465,8 +486,9 @@ virtual_tables:
                                      --   point, linestring, polygon,
                                      --   multipoint, multilinestring,
                                      --   multipolygon, geometrycollection
-                                     -- with an optional per-column option:
+                                     -- with optional per-column options:
                                      --   indexing=none|natural|ystripes
+                                     --   metric=geodesic|planar
 
         -- 0 to 16 data columns:
         label text                   -- text | int | integer | float
@@ -487,7 +509,12 @@ virtual_tables:
         constraint error, with no implicit promotion. The optional
         `indexing=none|natural|ystripes` option picks the
         [tg polygon index](https://github.com/tidwall/tg/blob/main/docs/POLYGON_INDEXING.md)
-        used when stored geometries are parsed at query time.
+        used when stored geometries are parsed at query time. The optional
+        `metric=geodesic|planar` option (default `geodesic`) sets the
+        distance metric for nearest-neighbor queries: `geodesic` treats
+        coordinates as longitude/latitude and reports meters, and rejects
+        coordinates outside that range on write; `planar` reports
+        Euclidean distance in coordinate units.
       - **Data columns** (0 to 16): plain values stored alongside the
         geometries. Nullable, and type-enforced on write: a type mismatch
         raises a constraint error, except integers are accepted into
@@ -514,10 +541,46 @@ virtual_tables:
 
       Also supported: `UPDATE` of geometry and data columns (changing a
       row's rowid or primary key is not), `ALTER TABLE ... RENAME TO`, and
-      `PRAGMA integrity_check`. A hidden `distance` column reserves the
-      surface for KNN queries, which are **not implemented yet**: `MATCH` or
-      `distance` constraints currently error with "KNN queries are not
-      supported on tg0 tables yet".
+      `PRAGMA integrity_check`.
+
+      **Nearest-neighbor queries.** `geomcol MATCH <point>` streams rows
+      nearest-first from the column's R-Tree, and the hidden `distance`
+      column carries each row's distance under the column's `metric=`
+      (meters by default). Always pair it with `ORDER BY distance` — that
+      order is served straight from the index, anything else makes SQLite
+      sort the whole stream — and a `LIMIT`:
+
+      ```sql
+      select id, name, distance
+      from places
+      where geom match tg_point(:lng, :lat)
+      order by distance
+      limit 10;
+      ```
+
+      The query point can be any Point value ([any format](#supported-formats)).
+      Candidates can be any geometry type: the distance is to the
+      candidate's nearest point, and a polygon containing the query point
+      is at distance `0`. `distance < ?` / `distance <= ?` (radius queries)
+      and a predicate on the same column (`and tg_intersects(geom, :bbox)`)
+      are pushed into the index walk; any other `WHERE` term is filtered on
+      the stream and stays correct. Use a correlated subquery for "the
+      nearest X for every Y":
+
+      ```sql
+      select q.name, (
+        select p.name from places p
+        where p.geom match q.location
+        order by p.distance limit 1
+      ) as nearest
+      from queries q;
+      ```
+
+      Limitations: the `MATCH` argument must be a Point (no
+      geometry-to-geometry distance); edges are straight lines in
+      longitude/latitude, as in every other `tg_*` function, so geometries
+      crossing the antimeridian should be cut at it; geodesic distances are
+      spherical (within ~0.5% of the WGS84 ellipsoid).
 
       **Breaking change in v0.0.1-alpha.22:** earlier versions used
       `tg0(aux1, aux2, ...)`, where every argument became an untyped
