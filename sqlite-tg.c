@@ -4695,8 +4695,11 @@ static int tg0_scan_header_columns(tg0_vtab *p) {
 //   ROW   rowid            key = the row's exact distance (already refined)
 //
 // Pop loop: NODE -> read the blob, push one entry per cell; LEAF -> fetch
-// the content row, parse the WKB, compute the exact distance, push ROW (or
-// emit at once when nothing left can beat it); ROW -> fetch and emit.
+// the content row, parse the WKB, compute the exact distance, keep a copy
+// of the row's values and push ROW (or emit at once when nothing left can
+// beat it); ROW -> emit the kept values. Each content row is fetched exactly
+// once: on a table larger than the page cache a second fetch per row costs
+// a page read, which dominated k=1000 scans of a 2 GB table.
 // Stored bboxes are float32 rounded outward, so a cell bound never exceeds
 // the true distance of any row beneath it; and a ROW key is exact, so a
 // popped ROW is nearer than everything remaining. Ties break ROW < LEAF <
@@ -4713,6 +4716,14 @@ static int tg0_scan_header_columns(tg0_vtab *p) {
 // bytes per cell in a 2-D float rtree node: int64 id + 4 float32 coords
 #define TG0_RTREE_CELL_BYTES 24
 
+// A refined candidate's content-row values (the full scan column layout:
+// c.rowid, [r.id], geomNN..., dataNN...), copied out of the fetch statement
+// so the row need not be fetched again when it is emitted.
+typedef struct tg0_knn_row {
+  int n;
+  sqlite3_value *values[1];
+} tg0_knn_row;
+
 typedef struct tg0_knn_entry {
   double key;
   int kind;
@@ -4720,6 +4731,8 @@ typedef struct tg0_knn_entry {
   int level;
   // NODE: nodeno; LEAF / ROW: rowid
   sqlite3_int64 id;
+  // ROW only: the kept row values (owned by the entry until emitted)
+  tg0_knn_row *row;
 } tg0_knn_entry;
 
 typedef struct tg0_knn {
@@ -4732,8 +4745,10 @@ typedef struct tg0_knn {
   int geomIdx;
   tg_metric metric;
   struct tg_point q;
-  // exact distance of the current (emitted) row
+  // exact distance of the current (emitted) row, and its kept values —
+  // xColumn/xRowid read from these on KNN plans
   double currentDistance;
+  tg0_knn_row *current;
   // folded predicate ('P' block), or predFunc == NULL: the exact test
   // applied to every candidate, its rtree strategy letter used to prune
   // cells, and the query bbox grown outward to float32 like plan '3'
@@ -4822,10 +4837,43 @@ static int tg0_knn_pop(tg0_knn *knn, tg0_knn_entry *out) {
   return 1;
 }
 
+static void tg0_knn_row_free(tg0_knn_row *row) {
+  if (!row) {
+    return;
+  }
+  for (int i = 0; i < row->n; i++) {
+    sqlite3_value_free(row->values[i]);
+  }
+  sqlite3_free(row);
+}
+
+// Copies every column of the positioned fetch statement into a new row.
+static tg0_knn_row *tg0_knn_row_dup(sqlite3_stmt *stmt) {
+  int n = sqlite3_column_count(stmt);
+  tg0_knn_row *row = sqlite3_malloc64(sizeof(*row) + (sqlite3_uint64)n * sizeof(sqlite3_value *));
+  if (!row) {
+    return NULL;
+  }
+  row->n = n;
+  for (int i = 0; i < n; i++) {
+    row->values[i] = sqlite3_value_dup(sqlite3_column_value(stmt, i));
+    if (!row->values[i]) {
+      row->n = i;
+      tg0_knn_row_free(row);
+      return NULL;
+    }
+  }
+  return row;
+}
+
 static void tg0_knn_free(tg0_knn *knn) {
   if (!knn) {
     return;
   }
+  for (int i = 0; i < knn->n; i++) {
+    tg0_knn_row_free(knn->heap[i].row);
+  }
+  tg0_knn_row_free(knn->current);
   sqlite3_free(knn->heap);
   sqlite3_finalize(knn->nodeStmt);
   tg_geom_free(knn->predGeomOwned);
@@ -4925,6 +4973,7 @@ static int tg0_knn_expand_node(tg0_vtab *p, tg0_knn *knn, sqlite3_int64 nodeno,
       }
     }
     tg0_knn_entry entry;
+    entry.row = NULL;
     entry.id = tg0_read_be64(cell);
     if (level > 0 && entry.id <= 1) {
       // a child pointer back to the root (or to nothing) can only come from
@@ -4992,11 +5041,14 @@ static int tg0_knn_step(tg0_cursor *pCur) {
   tg0_knn *knn = pCur->knn;
   tg0_knn_entry entry;
   int rc;
+  tg0_knn_row_free(knn->current);
+  knn->current = NULL;
   while (tg0_knn_pop(knn, &entry)) {
     // the heap minimum bounds everything left: past the distance bound the
     // scan is over
     if (knn->maxStrict ? entry.key >= knn->maxDistance
                        : entry.key > knn->maxDistance) {
+      tg0_knn_row_free(entry.row);
       break;
     }
     if (entry.kind == TG0_KNN_KIND_NODE) {
@@ -5006,21 +5058,20 @@ static int tg0_knn_step(tg0_cursor *pCur) {
       }
       continue;
     }
-    // a ROW was fetched once already, so it must still be there; a LEAF
-    // may be rejected by the pushdown prefilter
-    rc = tg0_knn_fetch_row(pCur, entry.id,
-                           entry.kind == TG0_KNN_KIND_LEAF && knn->hasPushdown);
+    if (entry.kind == TG0_KNN_KIND_ROW) {
+      knn->current = entry.row;
+      knn->currentDistance = entry.key;
+      return SQLITE_OK;
+    }
+    // LEAF: fetch once (a candidate may be rejected by the pushdown
+    // prefilter) and refine the bound into the exact distance
+    rc = tg0_knn_fetch_row(pCur, entry.id, knn->hasPushdown);
     if (rc == SQLITE_DONE) {
       continue;
     }
     if (rc != SQLITE_OK) {
       return rc;
     }
-    if (entry.kind == TG0_KNN_KIND_ROW) {
-      knn->currentDistance = entry.key;
-      return SQLITE_OK;
-    }
-    // LEAF: refine the bound into the exact distance
     int iScan = tg0_scan_header_columns(p) + knn->geomIdx;
     const void *wkb = sqlite3_column_blob(pCur->stmt, iScan);
     int nWkb = sqlite3_column_bytes(pCur->stmt, iScan);
@@ -5047,15 +5098,22 @@ static int tg0_knn_step(tg0_cursor *pCur) {
       // empty geometry: no nearest point, never emitted (decision 6)
       continue;
     }
+    tg0_knn_row *row = tg0_knn_row_dup(pCur->stmt);
+    if (!row) {
+      return SQLITE_NOMEM;
+    }
     if (knn->n == 0 || exact < knn->heap[0].key) {
-      // nothing left can be nearer: emit without a second fetch
+      // nothing left can be nearer: emit right away
+      knn->current = row;
       knn->currentDistance = exact;
       return SQLITE_OK;
     }
     entry.kind = TG0_KNN_KIND_ROW;
     entry.key = exact;
+    entry.row = row;
     rc = tg0_knn_push(knn, entry);
     if (rc != SQLITE_OK) {
+      tg0_knn_row_free(row);
       return rc;
     }
   }
@@ -5522,6 +5580,10 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
 
 static int tg0Rowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid) {
   tg0_cursor *pCur = (tg0_cursor *)cur;
+  if (pCur->plan == TG0_PLAN_KNN && pCur->knn && pCur->knn->current) {
+    *pRowid = sqlite3_value_int64(pCur->knn->current->values[0]);
+    return SQLITE_OK;
+  }
   *pRowid = sqlite3_column_int64(pCur->stmt, 0);
   return SQLITE_OK;
 }
@@ -5549,12 +5611,17 @@ static int tg0Column(sqlite3_vtab_cursor *cur, sqlite3_context *context,
   if (sqlite3_vtab_nochange(context)) {
     return SQLITE_OK;
   }
+  // KNN plans serve the emitted row from the values kept at refinement
+  // time; every other plan reads the positioned scan statement
+  tg0_knn_row *kept =
+      pCur->plan == TG0_PLAN_KNN && pCur->knn ? pCur->knn->current : NULL;
+#define TG0_SCAN_VALUE(iScan)                                                  \
+  (kept ? kept->values[iScan] : sqlite3_column_value(pCur->stmt, iScan))
   if (p->pkColumnName && i == 0) {
     // integer primary keys alias the content rowid (scan column 0); text
     // primary keys resolve through t_rowids (scan column 1)
-    sqlite3_result_value(
-        context, sqlite3_column_value(pCur->stmt,
-                                      p->pkColumnType == SQLITE_TEXT ? 1 : 0));
+    sqlite3_result_value(context,
+                         TG0_SCAN_VALUE(p->pkColumnType == SQLITE_TEXT ? 1 : 0));
     return SQLITE_OK;
   }
   if (tg0_column_lookup(p, i, &kind, &idx) != SQLITE_OK) {
@@ -5571,7 +5638,8 @@ static int tg0Column(sqlite3_vtab_cursor *cur, sqlite3_context *context,
               (kind == TG0_USER_COLUMN_KIND_GEOMETRY
                    ? idx
                    : p->numGeometryColumns + idx);
-  sqlite3_result_value(context, sqlite3_column_value(pCur->stmt, iScan));
+  sqlite3_result_value(context, TG0_SCAN_VALUE(iScan));
+#undef TG0_SCAN_VALUE
   return SQLITE_OK;
 }
 
