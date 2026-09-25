@@ -868,25 +868,48 @@ select tg_geom('POINT (1 1)', 'ystripes'); -- @snap geom-ystripes
 select tg_geom('POINT (1 1)', 'unknown'); -- error: unrecognized index option. Should be one of none/natural/ystripes
 -- #endregion
 
-
 -- #region tg0
-create virtual table tg_demo1 using tg0();
-select name from sqlite_master where name like 'tg%' order by 1; -- @snap tg0-schema
-insert into tg_demo1(rowid, _shape) select key, value from json_each('[
-    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23818620800527,32.881627962039275],[-117.23803891594858,32.881627962039275],[-117.23803891594858,32.88150426716983],[-117.23818620800527,32.88150426716983],[-117.23818620800527,32.881627962039275]]]},"properties":{}},
-    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23794407791227,32.88163023398593],[-117.23779678585558,32.88163023398593],[-117.23779678585558,32.88150653911649],[-117.23794407791227,32.88150653911649],[-117.23794407791227,32.88163023398593]]]},"properties":{},},
-    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.23818630582224,32.881454314415976],[-117.23803901376554,32.881454314415976],[-117.23803901376554,32.88133061954653],[-117.23818630582224,32.88133061954653],[-117.23818630582224,32.881454314415976]]]},"properties":{}},
-    {"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[-117.2379432340281,32.881454247902326],[-117.2377959419714,32.881454247902326],[-117.2377959419714,32.88133055303288],[-117.2379432340281,32.88133055303288],[-117.2379432340281,32.881454247902326]]]},"properties":{}},
-]');
-select count(*) from tg_demo1_rtree; -- 4
-select rowid, typeof(_shape), tg_to_wkt(_shape) from tg_demo1; -- @snap tg0-rows
-select id, minX, maxX, minY, maxY from tg_demo1_rtree; -- @snap tg0-rtree
-explain query plan select * from tg_demo1; -- @snap tg0-eqp-scan
-explain query plan select * from tg_demo1 where tg_intersects(_shape, ''); -- @snap tg0-eqp-intersects
-explain query plan select * from tg_demo1 where tg_contains(_shape, ''); -- @snap tg0-eqp-contains
-explain query plan select * from tg_demo1 where tg_touches(_shape, ''); -- @snap tg0-eqp-touches
-explain query plan select * from tg_demo1 where tg_equals(_shape, ''); -- @snap tg0-eqp-equals
-select rowid, * from tg_demo1; -- @snap tg0-rows-star
+create virtual table tg_demo1 using tg0(id integer primary key, label text, shape geometry);
+select name from sqlite_master where name like 'tg_demo1%' order by 1; -- @snap tg0-schema
+
+insert into tg_demo1(id, label, shape) values
+  (1, 'in_poly',     'POLYGON((2 2, 4 2, 4 4, 2 4, 2 2))'),
+  (2, 'corner_poly', 'POLYGON((10 10, 12 10, 12 12, 10 12, 10 10))'),
+  (3, 'cross_line',  'LINESTRING(-2 5, 12 5)'),
+  (4, 'far_poly',    'POLYGON((20 20, 30 20, 30 30, 20 30, 20 20))'),
+  (5, 'cover_poly',  'POLYGON((-2 -2, 12 -2, 12 12, -2 12, -2 -2))'),
+  (6, 'equal_poly',  'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'),
+  (7, 'in_point',    'POINT(5 5)'),
+  (8, 'out_point',   'POINT(15 15)');
+select count(*) from tg_demo1_rtree00; -- 8
+select id, label, typeof(shape), tg_to_wkt(shape) from tg_demo1; -- @snap tg0-rows
+
+-- point plans
+select id, label from tg_demo1 where id = 3; -- @snap tg0-point
+
+-- all 8 predicates against the 10x10 query square at the origin
+select label from tg_demo1 where tg_intersects(shape, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'); -- @snap tg0-intersects
+select label from tg_demo1 where tg_disjoint(shape, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'); -- @snap tg0-disjoint
+select label from tg_demo1 where tg_contains(shape, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'); -- @snap tg0-contains
+select label from tg_demo1 where tg_within(shape, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'); -- @snap tg0-within
+select label from tg_demo1 where tg_covers(shape, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'); -- @snap tg0-covers
+select label from tg_demo1 where tg_coveredby(shape, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'); -- @snap tg0-coveredby
+select label from tg_demo1 where tg_touches(shape, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'); -- @snap tg0-touches
+select label from tg_demo1 where tg_equals(shape, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'); -- @snap tg0-equals
+
+-- two predicates intersect; the unconsumed one post-evaluates as a scalar
+select label from tg_demo1 where tg_intersects(shape, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))') and tg_coveredby(shape, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))'); -- @snap tg0-two-predicates
+
+-- one query plan per idxStr shape: '1' fullscan, '2' point,
+-- '3' + [kind][geom-col][op][strategy] predicate
+explain query plan select * from tg_demo1; -- @snap tg0-eqp-fullscan
+explain query plan select * from tg_demo1 where id = 1; -- @snap tg0-eqp-point
+explain query plan select * from tg_demo1 where tg_intersects(shape, 'POINT(1 1)'); -- @snap tg0-eqp-intersects
+explain query plan select * from tg_demo1 where tg_contains(shape, 'POINT(1 1)'); -- @snap tg0-eqp-contains
+explain query plan select * from tg_demo1 where tg_within(shape, 'POINT(1 1)'); -- @snap tg0-eqp-within
+explain query plan select * from tg_demo1 where tg_disjoint(shape, 'POINT(1 1)'); -- @snap tg0-eqp-disjoint
+
+drop table tg_demo1;
 -- #endregion
 
 -- #region MISC

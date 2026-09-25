@@ -37,9 +37,14 @@ select
 from businesses;
 ```
 
-- [ ] `tg_group_bbox()`
+tg0 v2 covers the indexed-parse idea: geometry columns take
+`indexing=none|natural|ystripes`, and stored candidates are parsed with that
+index at query time (`tg_parse_wkb_ix`).
+
+- [x] `tg_group_bbox()`
 - [ ] distance stuff?
-- [ ] KNN support
+- [.] KNN support -- tg0 reserves the surface (hidden `distance` column +
+      idxStr plan '4'); best-first rtree traversal is a follow-up
 - [ ] extensions
 
 ## constructors
@@ -102,9 +107,11 @@ from businesses
 join ???;
 ```
 
-3. RTree-backed "which shapes intersect this shape"
+3. RTree-backed "which shapes intersect this shape" -- ✅ works now:
+   `where tg_intersects(geomcol, :shape)` on a tg0 table prefilters through
+   the column's bbox rtree (tg0-upgrade workstream)
 
-4. KNN
+4. KNN -- deferred; tg0 reserves the surface (see managed rtree below)
 
 ## Sample ideas
 
@@ -142,8 +149,23 @@ select rowid from ca_block_groups_index where tg_intersects(boundary, :my_polygo
 select rowid from ca_block_groups_index where tg_covers(:my_polygon, boundary);
 ```
 
-equals (done: tg_equals())
-intersects/disjoint (for pip)
-contains/within (swap)
-covers/coveredby (swap)
-touches (done: tg0 index acceleration for tg_touches and tg_equals via TG0_FUNC_TOUCHES/TG0_FUNC_EQUALS)
+all 8 predicates now hit the rtree through tg0 v2 (typed geometry columns +
+content table + slim bbox rtrees, the tg0-upgrade workstream) — queries like
+the two above work as written:
+
+- [x] equals
+- [x] intersects/disjoint (for pip) -- disjoint is exact-test fullscan by
+      design, its matches live outside the query bbox
+- [x] contains/within (swap)
+- [x] covers/coveredby (swap)
+- [x] touches
+
+deferred from that workstream:
+
+- KNN: surface reserved (hidden `distance` column in declare_vtab + idxStr
+  plan '4'); follow-up is best-first rtree traversal behind
+  `where geomcol match tg_knn(:x, :y) order by distance limit n`
+- partition keys (per-value rtree sharding for stacked-layer workloads):
+  deliberately deferred, addable later as new syntax with no migration
+- parsed-geometry cache across queries (today every candidate row re-parses
+  its stored WKB per scan)

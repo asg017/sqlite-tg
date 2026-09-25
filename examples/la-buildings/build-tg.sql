@@ -4,9 +4,14 @@
 
 attach database "base.db" as base;
 
-create virtual table tg_buildings using tg0(extra);
+-- The LA Building Footprints GeoJSON mixes single- and multi-part
+-- building shapes, so the geometry column stays generic `geometry`.
+create virtual table tg_buildings using tg0(
+  boundary geometry,
+  extra text
+);
 
-insert into tg_buildings(rowid, _shape, extra)
+insert into tg_buildings(rowid, boundary, extra)
   select
     rowid,
     boundary,

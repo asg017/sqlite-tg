@@ -446,12 +446,110 @@ table_functions:
       join tg_bbox(examples.example);
 virtual_tables:
   tg0:
+    signature: "tg0(...)"
     desc: |
-      A virtual table that simplifies querying a large geospatial dataset.
-      A `tg0` table will automatically create a [SQLite R-Tree index](https://www.sqlite.org/rtree.html)
-      for geometries
+      An experimental virtual table for querying large geospatial datasets.
+      A `tg0` table stores rows in an ordinary shadow table and automatically
+      maintains one [SQLite R-Tree index](https://www.sqlite.org/rtree.html)
+      of bounding boxes per geometry column, accelerating spatial predicates.
+      Requires the R-Tree extension to be compiled into the host SQLite.
+      Still experimental — expect breaking changes.
 
       ```sql
-      create virtual table tg_places();
+      create virtual table name using tg0(
+        -- optional primary key, at most one:
+        id integer primary key,      -- or: id text primary key
+
+        -- 1 to 8 geometry columns:
+        shape geometry,              -- or one of the 7 concrete types:
+                                     --   point, linestring, polygon,
+                                     --   multipoint, multilinestring,
+                                     --   multipolygon, geometrycollection
+                                     -- with an optional per-column option:
+                                     --   indexing=none|natural|ystripes
+
+        -- 0 to 16 data columns:
+        label text                   -- text | int | integer | float
+                                     --   | double | blob
+      );
       ```
-    example: " "
+
+      Column kinds, declarable in any order:
+
+      - **Primary key** (optional): `id integer primary key` aliases the
+        rowid, like an ordinary SQLite table. `id text primary key` declares
+        a `WITHOUT ROWID` table keyed by text ids. With no primary key the
+        table has plain rowids.
+      - **Geometry columns** (1 to 8): `geometry` accepts any geometry type;
+        the 7 concrete type keywords narrow the column to exactly that type.
+        Geometry columns are `NOT NULL` and strictly typed — inserting a
+        `NULL` or a `Polygon` into a `multipolygon` column raises a
+        constraint error, with no implicit promotion. The optional
+        `indexing=none|natural|ystripes` option picks the
+        [tg polygon index](https://github.com/tidwall/tg/blob/main/docs/POLYGON_INDEXING.md)
+        used when stored geometries are parsed at query time.
+      - **Data columns** (0 to 16): plain values stored alongside the
+        geometries. Nullable, and type-enforced on write: a type mismatch
+        raises a constraint error, except integers are accepted into
+        `float` columns.
+
+      Writes accept geometries in [any supported format](#supported-formats);
+      reading a geometry column always returns WKB. All 8 predicate
+      functions are accelerated when called on a geometry column in a
+      `WHERE` clause:
+
+      | predicate | R-Tree prefilter |
+      |-|-|
+      | `tg_intersects`, `tg_touches`, `tg_equals` | bounding boxes overlap |
+      | `tg_contains`, `tg_covers` | stored bbox contains query bbox |
+      | `tg_within`, `tg_coveredby` | stored bbox within query bbox |
+      | `tg_disjoint` | none — full scan + exact test |
+
+      Prefiltered candidates are always re-checked with the exact predicate,
+      so results are identical to a full scan. Multiple predicates in one
+      `WHERE` clause are fine: one drives the R-Tree plan and the rest run
+      as ordinary functions. `rowid =` / primary key lookups are point
+      queries, and `=`, `!=`, `<`, `<=`, `>`, `>=` constraints on data
+      columns are pushed down into the content-table scan.
+
+      Also supported: `UPDATE` of geometry and data columns (changing a
+      row's rowid or primary key is not), `ALTER TABLE ... RENAME TO`, and
+      `PRAGMA integrity_check`. A hidden `distance` column reserves the
+      surface for KNN queries, which are **not implemented yet**: `MATCH` or
+      `distance` constraints currently error with "KNN queries are not
+      supported on tg0 tables yet".
+
+      **Breaking change in v0.0.1-alpha.22:** earlier versions used
+      `tg0(aux1, aux2, ...)`, where every argument became an untyped
+      auxiliary column next to an implicit `_shape` geometry column. That
+      syntax and its storage layout were removed — newer builds cannot open
+      old tg0 tables (they fail with a "tg0 constructor error" pointing
+      here). There is no in-place migration: dump the old table with the
+      extension version that created it (for example
+      `create table dump as select rowid as id, _shape, aux1, ... from old_table;`),
+      or re-fetch the source data, then recreate the table with typed
+      columns and re-insert.
+    example: |
+      create virtual table businesses using tg0(
+        name text,
+        location point
+      );
+      insert into businesses(rowid, name, location) values
+        (1, 'in sf', 'POINT(-122.4075 37.787994)'),
+        (2, 'in nyc', 'POINT(-73.985130 40.758896)');
+      select rowid, name
+      from businesses
+      where tg_intersects(location, 'POLYGON((
+        -122.51610563264538 37.81424532146113,
+        -122.51610563264538 37.69618409220847,
+        -122.35290547288255 37.69618409220847,
+        -122.35290547288255 37.81424532146113,
+        -122.51610563264538 37.81424532146113
+      ))');
+      /*
+      ┌───────┬─────────┐
+      │ rowid │ name    │
+      ├───────┼─────────┤
+      │ 1     │ 'in sf' │
+      └───────┴─────────┘
+      */

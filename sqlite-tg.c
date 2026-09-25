@@ -6,6 +6,7 @@ SQLITE_EXTENSION_INIT1
 #include "sqlite-tg.h"
 #include <ctype.h>
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2605,11 +2606,9 @@ static sqlite3_module tg_bboxModule = {
 
 #pragma region tg0 virtual table
 
-#define TG0_COLUMN_SHAPE 0
-#define TG0_COLUMN_REST 1
-
-#define TG0_SQL_RTREE_DROP "DROP TABLE \"%w\".\"%w_rtree\""
-#define TG0_SQL_DELETE "DELETE FROM \"%w\".\"%w_rtree\" WHERE id = ?1"
+#define TG0_MAX_GEOMETRY_COLUMNS 8
+#define TG0_MAX_DATA_COLUMNS 16
+#define TG0_MAX_USER_COLUMNS (TG0_MAX_GEOMETRY_COLUMNS + TG0_MAX_DATA_COLUMNS)
 
 // clang-format off
 // The different overloaded and intercepted functions for tg0() tables.
@@ -2623,16 +2622,517 @@ static sqlite3_module tg_bboxModule = {
 #define TG0_FUNC_EQUALS     SQLITE_INDEX_CONSTRAINT_FUNCTION + 7
 // clang-format on
 
-enum TG0_PLAN {
-  // full scan, admit all rtree entries
-  FULLSCAN,
-  // only emit boundaries that interect a query geometry
-  INTERSECT,
-  // only emit boundaries that touch a query geometry
-  TOUCHES,
-  // only emit boundaries that equal a query geometry
-  EQUALS,
-  // TODO disjoint/contains/within/covers/coveredby
+// ---------------------------------------------------------------------------
+// tg0 idxStr encoding (plan.md "Query plans / idxStr encoding")
+//
+// idxNum is unused. idxStr is a header character naming the plan, followed by
+// one fixed-width 4-character block per consumed argv slot:
+//
+//   idxStr := header block*
+//   header := '1'   -- fullscan: iterate t_content directly
+//           | '2'   -- point: rowid EQ / text-pk id EQ, argv[0] = the key
+//           | '3'   -- predicate: rtree prefilter + exact tg predicate,
+//                      argv[0] = the query geometry
+//           | '4'   -- reserved for KNN (decision 9); never emitted today
+//   block  := 'P' [geom-col] [pred-op] [strategy]   -- predicate block
+//           | '&' [data-col] [cmp-op] '_'           -- pushdown block
+//
+// Blocks appear in argv order: the k'th block describes argv[k]. A predicate
+// plan carries exactly one 'P' block, always first: [geom-col] is 'A' + the
+// geometry column's index into geometry_columns[], [pred-op] identifies the
+// tg predicate, and [strategy] the rtree prefilter (see
+// tg0_predicate_plans[] for both alphabets).
+//
+// Predicate and fullscan plans may then carry up to TG0_MAX_PUSHDOWN_BLOCKS
+// '&' pushdown blocks — EQ/NE/LT/LE/GT/GE constraints on plain data columns
+// folded into the content scan's WHERE clause so cheap B-tree compares run
+// before WKB parse + exact predicate (plan.md decision 10). Pure
+// optimization: their omit flag stays 0, so SQLite re-checks every pushed
+// constraint and correctness never depends on the prefilter. [data-col] is
+// 'A' + the column's index into data_columns[] and [cmp-op] is the vec0
+// metadata operator alphabet ('a'= 'b'> 'c'<= 'd'< 'e'>= 'f'!=,
+// sqlite-vec's vec0_metadata_operator).
+// ---------------------------------------------------------------------------
+
+#define TG0_PLAN_FULLSCAN '1'
+#define TG0_PLAN_POINT '2'
+#define TG0_PLAN_PREDICATE '3'
+#define TG0_PLAN_KNN '4' // reserved, unimplemented
+
+#define TG0_IDXSTR_KIND_PREDICATE 'P'
+#define TG0_IDXSTR_KIND_PUSHDOWN '&'
+
+// pushdown block [cmp-op] alphabet, mirroring vec0's vec0_metadata_operator
+#define TG0_PUSHDOWN_OP_EQ 'a'
+#define TG0_PUSHDOWN_OP_GT 'b'
+#define TG0_PUSHDOWN_OP_LE 'c'
+#define TG0_PUSHDOWN_OP_LT 'd'
+#define TG0_PUSHDOWN_OP_GE 'e'
+#define TG0_PUSHDOWN_OP_NE 'f'
+
+// cap on consumed '&' pushdown blocks per plan, bounding idxStr size. Extra
+// data-column constraints stay unconsumed; SQLite post-filters them
+#define TG0_MAX_PUSHDOWN_BLOCKS 8
+
+// rtree prefilter strategies for predicate plans
+#define TG0_STRATEGY_OVERLAP 'O'  // stored bbox overlaps the query bbox
+#define TG0_STRATEGY_CONTAINS 'C' // stored bbox contains the query bbox
+#define TG0_STRATEGY_WITHIN 'W'   // stored bbox within the query bbox
+#define TG0_STRATEGY_FULLSCAN 'F' // no prefilter (disjoint): exact test only
+
+// ---------------------------------------------------------------------------
+// tg0 constructor parser
+//
+// Hand-rolled tokenizer + parsers for the arguments of
+// `CREATE VIRTUAL TABLE ... USING tg0(...)`. Grammar:
+//
+//   column-def :=
+//       name INTEGER PRIMARY KEY
+//     | name TEXT PRIMARY KEY
+//     | name geom-type [INDEXING "=" (NONE | NATURAL | YSTRIPES)]*
+//     | name (TEXT | INT | INTEGER | FLOAT | DOUBLE | BLOB)
+//
+//   geom-type := GEOMETRY | POINT | LINESTRING | POLYGON | MULTIPOINT
+//              | MULTILINESTRING | MULTIPOLYGON | GEOMETRYCOLLECTION
+//
+// Identifiers are [A-Za-z][A-Za-z0-9_]*, keywords are case-insensitive, and
+// each argv[i] is tried against the parsers most-specific-first: primary key,
+// then geometry column, then data column.
+// ---------------------------------------------------------------------------
+
+#define TG0_CONSTRUCTOR_ERROR "tg0 constructor error: "
+
+// Migration hint for the pre-typed-column tg0 syntax, where every argument
+// became an auxiliary column next to an implicit `_shape` column. Bare
+// identifiers with no type are how that old syntax shows up to the new parser.
+#define TG0_OLD_SYNTAX_HINT                                                    \
+  "tg0's syntax changed in v0.0.1-alpha.22: columns now require types, and "   \
+  "the _shape column was removed. Drop and recreate this table. See "          \
+  "https://github.com/asg017/sqlite-tg/blob/main/docs.md#tg0 for details."
+
+enum Tg0TokenType {
+  TG0_TOKEN_TYPE_IDENTIFIER,
+  TG0_TOKEN_TYPE_DIGIT,
+  TG0_TOKEN_TYPE_EQ,
+  TG0_TOKEN_TYPE_COMMA,
+};
+
+struct Tg0Token {
+  enum Tg0TokenType token_type;
+  char *start;
+  char *end;
+};
+
+static int tg0_is_alpha(char x) {
+  return (x >= 'a' && x <= 'z') || (x >= 'A' && x <= 'Z');
+}
+static int tg0_is_digit(char x) { return (x >= '0' && x <= '9'); }
+static int tg0_is_whitespace(char x) {
+  return x == ' ' || x == '\t' || x == '\n' || x == '\r';
+}
+
+#define TG0_TOKEN_RESULT_EOF 1
+#define TG0_TOKEN_RESULT_SOME 2
+#define TG0_TOKEN_RESULT_ERROR 3
+
+static int tg0_token_next(char *start, char *end, struct Tg0Token *out) {
+  char *ptr = start;
+  while (ptr < end) {
+    char curr = *ptr;
+    if (tg0_is_whitespace(curr)) {
+      ptr++;
+      continue;
+    } else if (curr == '=') {
+      ptr++;
+      out->start = ptr;
+      out->end = ptr;
+      out->token_type = TG0_TOKEN_TYPE_EQ;
+      return TG0_TOKEN_RESULT_SOME;
+    } else if (curr == ',') {
+      ptr++;
+      out->start = ptr;
+      out->end = ptr;
+      out->token_type = TG0_TOKEN_TYPE_COMMA;
+      return TG0_TOKEN_RESULT_SOME;
+    } else if (tg0_is_alpha(curr)) {
+      char *startIdentifier = ptr;
+      while (ptr < end &&
+             (tg0_is_alpha(*ptr) || tg0_is_digit(*ptr) || *ptr == '_')) {
+        ptr++;
+      }
+      out->start = startIdentifier;
+      out->end = ptr;
+      out->token_type = TG0_TOKEN_TYPE_IDENTIFIER;
+      return TG0_TOKEN_RESULT_SOME;
+    } else if (tg0_is_digit(curr)) {
+      char *startDigit = ptr;
+      while (ptr < end && tg0_is_digit(*ptr)) {
+        ptr++;
+      }
+      out->start = startDigit;
+      out->end = ptr;
+      out->token_type = TG0_TOKEN_TYPE_DIGIT;
+      return TG0_TOKEN_RESULT_SOME;
+    } else {
+      return TG0_TOKEN_RESULT_ERROR;
+    }
+  }
+  return TG0_TOKEN_RESULT_EOF;
+}
+
+struct Tg0Scanner {
+  char *start;
+  char *end;
+};
+
+static void tg0_scanner_init(struct Tg0Scanner *scanner, const char *source,
+                             int source_length) {
+  scanner->start = (char *)source;
+  scanner->end = (char *)source + source_length;
+}
+static int tg0_scanner_next(struct Tg0Scanner *scanner, struct Tg0Token *out) {
+  int rc = tg0_token_next(scanner->start, scanner->end, out);
+  if (rc == TG0_TOKEN_RESULT_SOME) {
+    scanner->start = out->end;
+  }
+  return rc;
+}
+
+// Case-insensitive whole-token keyword match. Compares lengths first, so
+// unlike a bare sqlite3_strnicmp(token, keyword, token_length), a token
+// that is a strict prefix of keyword (like 'tex' vs 'text') does not match.
+static int tg0_token_is(struct Tg0Token *token, const char *keyword) {
+  int n = (int)(token->end - token->start);
+  return (int)strlen(keyword) == n &&
+         sqlite3_strnicmp(token->start, keyword, n) == 0;
+}
+
+// Matches token against the geometry type keywords. Returns 0 for the generic
+// "geometry" keyword, the corresponding enum tg_geom_type for a narrowing
+// type, or -1 when the token is not a geometry type keyword.
+static int tg0_token_geom_type(struct Tg0Token *token) {
+  if (tg0_token_is(token, "geometry"))
+    return 0;
+  if (tg0_token_is(token, "point"))
+    return TG_POINT;
+  if (tg0_token_is(token, "linestring"))
+    return TG_LINESTRING;
+  if (tg0_token_is(token, "polygon"))
+    return TG_POLYGON;
+  if (tg0_token_is(token, "multipoint"))
+    return TG_MULTIPOINT;
+  if (tg0_token_is(token, "multilinestring"))
+    return TG_MULTILINESTRING;
+  if (tg0_token_is(token, "multipolygon"))
+    return TG_MULTIPOLYGON;
+  if (tg0_token_is(token, "geometrycollection"))
+    return TG_GEOMETRYCOLLECTION;
+  return -1;
+}
+
+// The canonical keyword for a geometry column's declared type, for
+// declare_vtab. geomType is 0 (generic) or an enum tg_geom_type value.
+static const char *tg0_geom_type_keyword(int geomType) {
+  switch (geomType) {
+  case TG_POINT:
+    return "point";
+  case TG_LINESTRING:
+    return "linestring";
+  case TG_POLYGON:
+    return "polygon";
+  case TG_MULTIPOINT:
+    return "multipoint";
+  case TG_MULTILINESTRING:
+    return "multilinestring";
+  case TG_MULTIPOLYGON:
+    return "multipolygon";
+  case TG_GEOMETRYCOLLECTION:
+    return "geometrycollection";
+  default:
+    return "geometry";
+  }
+}
+
+/**
+ * Parse an argv[i] entry of a tg0 virtual table definition, and see if it's a
+ * primary key definition: `name integer primary key` | `name text primary
+ * key`.
+ *
+ * out_column_name points into source (same lifetime), out_column_type is
+ * SQLITE_INTEGER or SQLITE_TEXT.
+ * Returns SQLITE_EMPTY if not a primary key definition, SQLITE_OK if it is.
+ */
+static int tg0_parse_primary_key_definition(const char *source,
+                                            int source_length,
+                                            char **out_column_name,
+                                            int *out_column_name_length,
+                                            int *out_column_type) {
+  struct Tg0Scanner scanner;
+  struct Tg0Token token;
+  char *column_name;
+  int column_name_length;
+  int column_type;
+  int rc;
+  tg0_scanner_init(&scanner, source, source_length);
+
+  rc = tg0_scanner_next(&scanner, &token);
+  if (rc != TG0_TOKEN_RESULT_SOME ||
+      token.token_type != TG0_TOKEN_TYPE_IDENTIFIER) {
+    return SQLITE_EMPTY;
+  }
+  column_name = token.start;
+  column_name_length = token.end - token.start;
+
+  rc = tg0_scanner_next(&scanner, &token);
+  if (rc != TG0_TOKEN_RESULT_SOME ||
+      token.token_type != TG0_TOKEN_TYPE_IDENTIFIER) {
+    return SQLITE_EMPTY;
+  }
+  if (tg0_token_is(&token, "integer")) {
+    column_type = SQLITE_INTEGER;
+  } else if (tg0_token_is(&token, "text")) {
+    column_type = SQLITE_TEXT;
+  } else {
+    return SQLITE_EMPTY;
+  }
+
+  rc = tg0_scanner_next(&scanner, &token);
+  if (rc != TG0_TOKEN_RESULT_SOME ||
+      token.token_type != TG0_TOKEN_TYPE_IDENTIFIER ||
+      !tg0_token_is(&token, "primary")) {
+    return SQLITE_EMPTY;
+  }
+
+  rc = tg0_scanner_next(&scanner, &token);
+  if (rc != TG0_TOKEN_RESULT_SOME ||
+      token.token_type != TG0_TOKEN_TYPE_IDENTIFIER ||
+      !tg0_token_is(&token, "key")) {
+    return SQLITE_EMPTY;
+  }
+
+  rc = tg0_scanner_next(&scanner, &token);
+  if (rc != TG0_TOKEN_RESULT_EOF) {
+    return SQLITE_EMPTY;
+  }
+
+  *out_column_name = column_name;
+  *out_column_name_length = column_name_length;
+  *out_column_type = column_type;
+  return SQLITE_OK;
+}
+
+/**
+ * Parse an argv[i] entry of a tg0 virtual table definition, and see if it's a
+ * geometry column definition: `name <geom-type> [indexing=...]*`.
+ *
+ * out_column_name points into source (same lifetime). out_geom_type is 0 for
+ * generic `geometry` columns or an enum tg_geom_type value for narrowed ones.
+ * out_indexing is the tg_index to use when parsing stored geometries at query
+ * time, TG_DEFAULT unless an `indexing=` option overrides it.
+ * Returns SQLITE_EMPTY if not a geometry column definition, SQLITE_OK if it
+ * is, or SQLITE_ERROR when it is one but has a bad option — in which case
+ * *out_errmsg is set to an sqlite3_mprintf'd error message.
+ */
+static int tg0_parse_geometry_column_definition(
+    const char *source, int source_length, char **out_column_name,
+    int *out_column_name_length, int *out_geom_type,
+    enum tg_index *out_indexing, char **out_errmsg) {
+  struct Tg0Scanner scanner;
+  struct Tg0Token token;
+  struct Tg0Token key;
+  char *column_name;
+  int column_name_length;
+  int geom_type;
+  enum tg_index indexing = TG_DEFAULT;
+  int rc;
+  tg0_scanner_init(&scanner, source, source_length);
+
+  rc = tg0_scanner_next(&scanner, &token);
+  if (rc != TG0_TOKEN_RESULT_SOME ||
+      token.token_type != TG0_TOKEN_TYPE_IDENTIFIER) {
+    return SQLITE_EMPTY;
+  }
+  column_name = token.start;
+  column_name_length = token.end - token.start;
+
+  rc = tg0_scanner_next(&scanner, &token);
+  if (rc != TG0_TOKEN_RESULT_SOME ||
+      token.token_type != TG0_TOKEN_TYPE_IDENTIFIER) {
+    return SQLITE_EMPTY;
+  }
+  geom_type = tg0_token_geom_type(&token);
+  if (geom_type < 0) {
+    return SQLITE_EMPTY;
+  }
+
+  // optional `key=value` options. Only `indexing=none|natural|ystripes` is
+  // recognized; a recognizable option shape with an unknown key or value is
+  // a hard error, anything structurally off falls back to the caller's
+  // generic could-not-parse error.
+  while (1) {
+    rc = tg0_scanner_next(&scanner, &key);
+    if (rc == TG0_TOKEN_RESULT_EOF) {
+      break;
+    }
+    if (rc != TG0_TOKEN_RESULT_SOME ||
+        key.token_type != TG0_TOKEN_TYPE_IDENTIFIER) {
+      return SQLITE_EMPTY;
+    }
+    rc = tg0_scanner_next(&scanner, &token);
+    if (rc != TG0_TOKEN_RESULT_SOME || token.token_type != TG0_TOKEN_TYPE_EQ) {
+      return SQLITE_EMPTY;
+    }
+    rc = tg0_scanner_next(&scanner, &token);
+    if (rc != TG0_TOKEN_RESULT_SOME ||
+        (token.token_type != TG0_TOKEN_TYPE_IDENTIFIER &&
+         token.token_type != TG0_TOKEN_TYPE_DIGIT)) {
+      return SQLITE_EMPTY;
+    }
+    if (tg0_token_is(&key, "indexing")) {
+      if (tg0_token_is(&token, "none")) {
+        indexing = TG_NONE;
+      } else if (tg0_token_is(&token, "natural")) {
+        indexing = TG_NATURAL;
+      } else if (tg0_token_is(&token, "ystripes")) {
+        indexing = TG_YSTRIPES;
+      } else {
+        *out_errmsg = sqlite3_mprintf(
+            TG0_CONSTRUCTOR_ERROR
+            "unknown indexing option '%.*s' in '%.*s', expected one of none, "
+            "natural, or ystripes",
+            (int)(token.end - token.start), token.start, source_length, source);
+        return SQLITE_ERROR;
+      }
+    } else {
+      *out_errmsg = sqlite3_mprintf(
+          TG0_CONSTRUCTOR_ERROR
+          "unknown option '%.*s' in '%.*s', only 'indexing=' is supported on "
+          "geometry columns",
+          (int)(key.end - key.start), key.start, source_length, source);
+      return SQLITE_ERROR;
+    }
+  }
+
+  *out_column_name = column_name;
+  *out_column_name_length = column_name_length;
+  *out_geom_type = geom_type;
+  *out_indexing = indexing;
+  return SQLITE_OK;
+}
+
+/**
+ * Parse an argv[i] entry of a tg0 virtual table definition, and see if it's a
+ * plain data column definition: `name text|int|integer|float|double|blob`.
+ *
+ * out_column_name points into source (same lifetime), out_column_type is one
+ * of SQLITE_TEXT, SQLITE_INTEGER, SQLITE_FLOAT, or SQLITE_BLOB.
+ * Returns SQLITE_EMPTY if not a data column definition, SQLITE_OK if it is,
+ * or SQLITE_ERROR (with *out_errmsg set) for an `indexing=` option on a data
+ * column.
+ */
+static int tg0_parse_data_column_definition(const char *source,
+                                            int source_length,
+                                            char **out_column_name,
+                                            int *out_column_name_length,
+                                            int *out_column_type,
+                                            char **out_errmsg) {
+  struct Tg0Scanner scanner;
+  struct Tg0Token token;
+  char *column_name;
+  int column_name_length;
+  int column_type;
+  int rc;
+  tg0_scanner_init(&scanner, source, source_length);
+
+  rc = tg0_scanner_next(&scanner, &token);
+  if (rc != TG0_TOKEN_RESULT_SOME ||
+      token.token_type != TG0_TOKEN_TYPE_IDENTIFIER) {
+    return SQLITE_EMPTY;
+  }
+  column_name = token.start;
+  column_name_length = token.end - token.start;
+
+  rc = tg0_scanner_next(&scanner, &token);
+  if (rc != TG0_TOKEN_RESULT_SOME ||
+      token.token_type != TG0_TOKEN_TYPE_IDENTIFIER) {
+    return SQLITE_EMPTY;
+  }
+  if (tg0_token_is(&token, "text")) {
+    column_type = SQLITE_TEXT;
+  } else if (tg0_token_is(&token, "int") || tg0_token_is(&token, "integer")) {
+    column_type = SQLITE_INTEGER;
+  } else if (tg0_token_is(&token, "float") || tg0_token_is(&token, "double")) {
+    column_type = SQLITE_FLOAT;
+  } else if (tg0_token_is(&token, "blob")) {
+    column_type = SQLITE_BLOB;
+  } else {
+    return SQLITE_EMPTY;
+  }
+
+  rc = tg0_scanner_next(&scanner, &token);
+  if (rc == TG0_TOKEN_RESULT_SOME &&
+      token.token_type == TG0_TOKEN_TYPE_IDENTIFIER &&
+      tg0_token_is(&token, "indexing")) {
+    *out_errmsg = sqlite3_mprintf(
+        TG0_CONSTRUCTOR_ERROR
+        "'indexing=' is only supported on geometry columns, in '%.*s'",
+        source_length, source);
+    return SQLITE_ERROR;
+  }
+  if (rc != TG0_TOKEN_RESULT_EOF) {
+    return SQLITE_EMPTY;
+  }
+
+  *out_column_name = column_name;
+  *out_column_name_length = column_name_length;
+  *out_column_type = column_type;
+  return SQLITE_OK;
+}
+
+// Returns 1 when the whole source is a single bare identifier — how a column
+// of the removed pre-typed tg0 syntax (`tg0(aux1, aux2)`) looks to the new
+// parser. Used to attach the migration hint to could-not-parse errors.
+static int tg0_is_bare_identifier(const char *source, int source_length) {
+  struct Tg0Scanner scanner;
+  struct Tg0Token token;
+  int rc;
+  tg0_scanner_init(&scanner, source, source_length);
+  rc = tg0_scanner_next(&scanner, &token);
+  if (rc != TG0_TOKEN_RESULT_SOME ||
+      token.token_type != TG0_TOKEN_TYPE_IDENTIFIER) {
+    return 0;
+  }
+  return tg0_scanner_next(&scanner, &token) == TG0_TOKEN_RESULT_EOF;
+}
+
+// ---------------------------------------------------------------------------
+// tg0 column model
+// ---------------------------------------------------------------------------
+
+typedef enum {
+  // geometry column, ie `boundary polygon indexing=natural`
+  TG0_USER_COLUMN_KIND_GEOMETRY = 1,
+  // plain data column, ie `label text`
+  TG0_USER_COLUMN_KIND_DATA = 2,
+} tg0_user_column_kind;
+
+struct tg0_geometry_column {
+  // column name. Must be freed with sqlite3_free() on destruction
+  char *name;
+  // 0 for generic `geometry` columns (accepts all 7 tg types), otherwise the
+  // enum tg_geom_type this column is narrowed to, enforced on write
+  int geomType;
+  // the tg_index used when parsing stored geometries at query time
+  // (`indexing=` option, defaults to TG_DEFAULT)
+  enum tg_index indexing;
+};
+
+struct tg0_data_column {
+  // column name. Must be freed with sqlite3_free() on destruction
+  char *name;
+  // declared type, enforced on write: SQLITE_TEXT, SQLITE_INTEGER,
+  // SQLITE_FLOAT, or SQLITE_BLOB
+  int type;
 };
 
 typedef struct tg0_vtab tg0_vtab;
@@ -2648,21 +3148,410 @@ struct tg0_vtab {
   // destruction
   char *tableName;
 
-  int numAuxColumns;
+  // 0 when no explicit primary key column was declared, otherwise
+  // SQLITE_INTEGER (rowid alias) or SQLITE_TEXT (WITHOUT ROWID + rowids
+  // mapping shadow table)
+  int pkColumnType;
+  // name of the declared primary key column, or NULL when none was declared.
+  // Must be freed with sqlite3_free() on destruction
+  char *pkColumnName;
+
+  // number of declared geometry columns, 1 <= n <= TG0_MAX_GEOMETRY_COLUMNS
+  int numGeometryColumns;
+  // number of declared data columns, 0 <= n <= TG0_MAX_DATA_COLUMNS
+  int numDataColumns;
+
+  // kind of the i'th user column, in declaration order. User columns exclude
+  // the primary key (always declared column 0 when present) and the hidden
+  // distance column (always declared last). Only the first
+  // (numGeometryColumns + numDataColumns) entries are meaningful.
+  tg0_user_column_kind user_column_kinds[TG0_MAX_USER_COLUMNS];
+  // index of the i'th user column into geometry_columns[] or data_columns[],
+  // depending on user_column_kinds[i]
+  int user_column_idxs[TG0_MAX_USER_COLUMNS];
+
+  // Only the first numGeometryColumns entries are meaningful.
+  struct tg0_geometry_column geometry_columns[TG0_MAX_GEOMETRY_COLUMNS];
+  // Only the first numDataColumns entries are meaningful.
+  struct tg0_data_column data_columns[TG0_MAX_DATA_COLUMNS];
 };
+
+// Number of non-pk, non-hidden user columns.
+static int tg0_num_user_columns(tg0_vtab *p) {
+  return p->numGeometryColumns + p->numDataColumns;
+}
+
+// 1 when a primary key column was declared (it occupies declared column 0),
+// 0 otherwise. Add this to a user column's position to get its declared
+// column index, ie the `i` that xColumn receives.
+static int tg0_pk_column_offset(tg0_vtab *p) {
+  return p->pkColumnName ? 1 : 0;
+}
+
+// Declared column index of the hidden `distance` column (reserved for KNN).
+static int tg0_column_distance_idx(tg0_vtab *p) {
+  return tg0_pk_column_offset(p) + tg0_num_user_columns(p);
+}
+
+// Declared column index of the i'th user column.
+static int tg0_user_column_idx(tg0_vtab *p, int iUser) {
+  return tg0_pk_column_offset(p) + iUser;
+}
+
+// Map a declared column index (as passed to xColumn/xBestIndex) to its user
+// column kind and its index into geometry_columns[]/data_columns[]. Returns
+// SQLITE_OK on success, or SQLITE_ERROR when iColumn is the primary key
+// column, the hidden distance column, or out of range.
+static int tg0_column_lookup(tg0_vtab *p, int iColumn,
+                             tg0_user_column_kind *outKind, int *outIdx) {
+  int iUser = iColumn - tg0_pk_column_offset(p);
+  if (iColumn < tg0_pk_column_offset(p) || iUser >= tg0_num_user_columns(p)) {
+    return SQLITE_ERROR;
+  }
+  if (outKind) {
+    *outKind = p->user_column_kinds[iUser];
+  }
+  if (outIdx) {
+    *outIdx = p->user_column_idxs[iUser];
+  }
+  return SQLITE_OK;
+}
+
+// Frees a tg0_vtab and everything it owns. Safe on partially-initialized
+// vtabs (all fields start zeroed).
+static void tg0_free(tg0_vtab *p) {
+  if (!p) {
+    return;
+  }
+  sqlite3_free(p->schemaName);
+  sqlite3_free(p->tableName);
+  sqlite3_free(p->pkColumnName);
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    sqlite3_free(p->geometry_columns[i].name);
+  }
+  for (int i = 0; i < p->numDataColumns; i++) {
+    sqlite3_free(p->data_columns[i].name);
+  }
+  sqlite3_free(p);
+}
+
+// `distance` is the hidden KNN column, `rowid` conflicts with SQLite's own
+// rowid naming on rowid tables.
+static int tg0_column_name_reserved(const char *name, int nName) {
+  return (nName == 8 && sqlite3_strnicmp(name, "distance", 8) == 0) ||
+         (nName == 5 && sqlite3_strnicmp(name, "rowid", 5) == 0);
+}
+
+static int tg0_column_name_taken(tg0_vtab *p, const char *name, int nName) {
+  if (p->pkColumnName && (int)strlen(p->pkColumnName) == nName &&
+      sqlite3_strnicmp(p->pkColumnName, name, nName) == 0) {
+    return 1;
+  }
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    if ((int)strlen(p->geometry_columns[i].name) == nName &&
+        sqlite3_strnicmp(p->geometry_columns[i].name, name, nName) == 0) {
+      return 1;
+    }
+  }
+  for (int i = 0; i < p->numDataColumns; i++) {
+    if ((int)strlen(p->data_columns[i].name) == nName &&
+        sqlite3_strnicmp(p->data_columns[i].name, name, nName) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+// Validates a newly parsed user column name against the reserved names and
+// the columns declared so far. Returns SQLITE_OK when the name is fine,
+// SQLITE_ERROR with *pzErr set to an sqlite3_mprintf'd message when it is
+// not, or SQLITE_NOMEM when building that message fails — so an OOM can
+// never read as the name having passed the check.
+static int tg0_check_column_name(tg0_vtab *p, const char *arg,
+                                 const char *name, int nName, char **pzErr) {
+  const char *zProblem;
+  if (tg0_column_name_reserved(name, nName)) {
+    zProblem = "reserved";
+  } else if (tg0_column_name_taken(p, name, nName)) {
+    zProblem = "duplicate";
+  } else {
+    return SQLITE_OK;
+  }
+  *pzErr = sqlite3_mprintf(TG0_CONSTRUCTOR_ERROR "%s column name '%.*s' in '%s'",
+                           zProblem, nName, name, arg);
+  return *pzErr ? SQLITE_ERROR : SQLITE_NOMEM;
+}
+
+// ---------------------------------------------------------------------------
+// tg0 shadow tables
+//
+// For a tg0 table `t` with geometry columns g0..gN and data columns d0..dM
+// (plan.md "Shadow tables"):
+//
+//   t_info(key TEXT PRIMARY KEY, value ANY)   -- 'CREATE_VERSION' row; future
+//                                                migration hook
+//   t_content(rowid INTEGER PRIMARY KEY,
+//             geom00 BLOB NOT NULL, ..., data00, ...)
+//   t_rtree00 .. t_rtreeNN                    -- rtree(id, minX, maxX, minY,
+//                                                maxY), one per geometry column
+//   t_rowids(rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+//            id TEXT UNIQUE NOT NULL)         -- text primary keys only
+//
+// Row data lives in t_content, so rowid/primary key lookups are B-tree point
+// queries, and the rtrees hold nothing but float32 bboxes. Numbered internal
+// names (geom00, data00, rtree00 — NN is the index into geometry_columns[]
+// or data_columns[]) avoid identifier-quoting issues: user column names
+// exist only in declare_vtab. Data columns are declared with no affinity;
+// their declared types are enforced in C on write.
+// ---------------------------------------------------------------------------
+
+// Schema-qualified, %w-quoted shadow table names, filled in with
+// sqlite3_mprintf(..., schemaName, tableName). TG0_SHADOW_RTREE_NAME
+// additionally takes the geometry column's index into geometry_columns[].
+#define TG0_SHADOW_INFO_NAME "\"%w\".\"%w_info\""
+#define TG0_SHADOW_CONTENT_NAME "\"%w\".\"%w_content\""
+#define TG0_SHADOW_ROWIDS_NAME "\"%w\".\"%w_rowids\""
+#define TG0_SHADOW_RTREE_NAME "\"%w\".\"%w_rtree%02d\""
+
+// Prepares and steps a single shadow-table DDL/DML statement. zSql is an
+// sqlite3_mprintf'd string, freed here; a NULL zSql (OOM in the caller's
+// sqlite3_mprintf) returns SQLITE_NOMEM. On a prepare/step failure, returns
+// SQLITE_ERROR with *pzErrMsg (when pzErrMsg is non-NULL) set to an
+// sqlite3_mprintf'd "<zWhat>: <sqlite3_errmsg>" message.
+static int tg0_shadow_sql(sqlite3 *db, char *zSql, const char *zWhat,
+                          char **pzErrMsg) {
+  sqlite3_stmt *stmt = NULL;
+  int rc;
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK || sqlite3_step(stmt) != SQLITE_DONE) {
+    if (pzErrMsg) {
+      *pzErrMsg = sqlite3_mprintf("%s: %s", zWhat, sqlite3_errmsg(db));
+    }
+    rc = SQLITE_ERROR;
+  } else {
+    rc = SQLITE_OK;
+  }
+  sqlite3_finalize(stmt);
+  sqlite3_free(zSql);
+  return rc;
+}
+
+// Creates the shadow tables for a freshly xCreate'd tg0 table and seeds
+// t_info with its CREATE_VERSION row. Stops at the first failure: returns
+// SQLITE_NOMEM, or SQLITE_ERROR with *pzErrMsg set — the caller cleans up
+// whatever was created before the failure with tg0_drop_shadow_tables().
+static int tg0_create_shadow_tables(tg0_vtab *p, char **pzErrMsg) {
+  int rc;
+
+  rc = tg0_shadow_sql(p->db,
+                      sqlite3_mprintf("CREATE TABLE " TG0_SHADOW_INFO_NAME
+                                      "(key TEXT PRIMARY KEY, value ANY)",
+                                      p->schemaName, p->tableName),
+                      "Could not create the tg0 info shadow table", pzErrMsg);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+
+  rc = tg0_shadow_sql(
+      p->db,
+      sqlite3_mprintf("INSERT INTO " TG0_SHADOW_INFO_NAME
+                      "(key, value) VALUES ('CREATE_VERSION', %Q)",
+                      p->schemaName, p->tableName, SQLITE_TG_VERSION),
+      "Could not seed the tg0 info shadow table", pzErrMsg);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+
+  sqlite3_str *strContent = sqlite3_str_new(NULL);
+  sqlite3_str_appendf(strContent,
+                      "CREATE TABLE " TG0_SHADOW_CONTENT_NAME
+                      "(rowid INTEGER PRIMARY KEY",
+                      p->schemaName, p->tableName);
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    sqlite3_str_appendf(strContent, ", geom%02d BLOB NOT NULL", i);
+  }
+  for (int i = 0; i < p->numDataColumns; i++) {
+    sqlite3_str_appendf(strContent, ", data%02d", i);
+  }
+  sqlite3_str_appendall(strContent, ")");
+  rc = tg0_shadow_sql(p->db, sqlite3_str_finish(strContent),
+                      "Could not create the tg0 content shadow table",
+                      pzErrMsg);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    rc = tg0_shadow_sql(
+        p->db,
+        sqlite3_mprintf("CREATE VIRTUAL TABLE " TG0_SHADOW_RTREE_NAME
+                        " USING rtree(id, minX, maxX, minY, maxY)",
+                        p->schemaName, p->tableName, i),
+        "Could not create a tg0 rtree shadow table", pzErrMsg);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+  }
+
+  if (p->pkColumnType == SQLITE_TEXT) {
+    rc = tg0_shadow_sql(
+        p->db,
+        sqlite3_mprintf("CREATE TABLE " TG0_SHADOW_ROWIDS_NAME
+                        "(rowid INTEGER PRIMARY KEY AUTOINCREMENT, "
+                        "id TEXT UNIQUE NOT NULL)",
+                        p->schemaName, p->tableName),
+        "Could not create the tg0 rowids shadow table", pzErrMsg);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+  }
+
+  return SQLITE_OK;
+}
+
+// Drops every shadow table belonging to p: info, content, one rtree per
+// geometry column, and rowids for text-primary-key tables. Every drop is
+// attempted even after a failure (the first failure is the one reported),
+// and IF EXISTS keeps a missing table — a partially-created table being
+// cleaned up after an xCreate failure — from counting as one. Returns
+// SQLITE_OK, or the first failure's SQLITE_NOMEM/SQLITE_ERROR with *pzErrMsg
+// (when pzErrMsg is non-NULL) set to an sqlite3_mprintf'd message.
+static int tg0_drop_shadow_tables(tg0_vtab *p, char **pzErrMsg) {
+  int rc = SQLITE_OK;
+  int n = 0;
+  char *azSql[3 + TG0_MAX_GEOMETRY_COLUMNS];
+
+  azSql[n++] = sqlite3_mprintf("DROP TABLE IF EXISTS " TG0_SHADOW_INFO_NAME,
+                               p->schemaName, p->tableName);
+  azSql[n++] = sqlite3_mprintf("DROP TABLE IF EXISTS " TG0_SHADOW_CONTENT_NAME,
+                               p->schemaName, p->tableName);
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    azSql[n++] = sqlite3_mprintf("DROP TABLE IF EXISTS " TG0_SHADOW_RTREE_NAME,
+                                 p->schemaName, p->tableName, i);
+  }
+  if (p->pkColumnType == SQLITE_TEXT) {
+    azSql[n++] = sqlite3_mprintf("DROP TABLE IF EXISTS " TG0_SHADOW_ROWIDS_NAME,
+                                 p->schemaName, p->tableName);
+  }
+  for (int i = 0; i < n; i++) {
+    int rc2 = tg0_shadow_sql(p->db, azSql[i],
+                             "Could not drop a tg0 shadow table",
+                             rc == SQLITE_OK ? pzErrMsg : NULL);
+    if (rc == SQLITE_OK) {
+      rc = rc2;
+    }
+  }
+  return rc;
+}
 
 typedef struct tg0_cursor tg0_cursor;
 struct tg0_cursor {
   sqlite3_vtab_cursor base;
-  // a statement that iterates over some sort of `select id, _shape` query.
+  // current scan over t_content (joined with t_rowids on text-primary-key
+  // tables and, on predicate plans, the geometry column's rtree), prepared
+  // by tg0Filter. NULL before the first xFilter call
   sqlite3_stmt *stmt;
-  // the result code of the most recent sqlite3_step() on stmt
-  int stepStatus;
-  // The type of tree query that should be made
-  enum TG0_PLAN plan;
-  // the "query geometry" in predicate-style queries.
+  // 1 only on real scan completion (SQLITE_DONE). A mid-scan step failure
+  // returns its error from xFilter/xNext and leaves eof unset, so the
+  // failure can never read as a clean end-of-results
+  int eof;
+  // the current plan's idxStr header character (TG0_PLAN_*)
+  char plan;
+  // predicate plans only: index into p->geometry_columns[] of the scanned
+  // geometry column, the exact tg predicate applied per candidate row, and
+  // the parsed query geometry (owned; freed on re-Filter and xClose)
+  int predGeomIdx;
+  GeomPredicateFunc predFunc;
   struct tg_geom *queryGeom;
 };
+
+// One row per intercepted predicate: the xFindFunction constraint op, its
+// idxStr [op] letter, its rtree prefilter [strategy] letter (plan.md decision
+// 8), and the exact tg predicate applied to each candidate row. The exact
+// predicate is always called as func(candidate, query), matching
+// tg_predicate_impl's tg_pred(column-value, argument) argument order.
+static const struct {
+  int constraintOp; // TG0_FUNC_*
+  char opChar;
+  char strategy;
+  GeomPredicateFunc func;
+} tg0_predicate_plans[] = {
+    {TG0_FUNC_INTERSECTS, 'I', TG0_STRATEGY_OVERLAP, tg_geom_intersects},
+    {TG0_FUNC_TOUCHES, 'T', TG0_STRATEGY_OVERLAP, tg_geom_touches},
+    {TG0_FUNC_EQUALS, 'E', TG0_STRATEGY_OVERLAP, tg_geom_equals},
+    {TG0_FUNC_CONTAINS, 'C', TG0_STRATEGY_CONTAINS, tg_geom_contains},
+    {TG0_FUNC_COVERS, 'V', TG0_STRATEGY_CONTAINS, tg_geom_covers},
+    {TG0_FUNC_WITHIN, 'W', TG0_STRATEGY_WITHIN, tg_geom_within},
+    {TG0_FUNC_COVEREDBY, 'B', TG0_STRATEGY_WITHIN, tg_geom_coveredby},
+    {TG0_FUNC_DISJOINT, 'D', TG0_STRATEGY_FULLSCAN, tg_geom_disjoint},
+};
+#define TG0_NUM_PREDICATE_PLANS                                                \
+  ((int)(sizeof(tg0_predicate_plans) / sizeof(tg0_predicate_plans[0])))
+
+// The tg0_predicate_plans[] row for an xBestIndex constraint op, or -1.
+static int tg0_predicate_plan_by_op(int constraintOp) {
+  for (int i = 0; i < TG0_NUM_PREDICATE_PLANS; i++) {
+    if (tg0_predicate_plans[i].constraintOp == constraintOp) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// The tg0_predicate_plans[] row for an idxStr [op] letter, or -1.
+static int tg0_predicate_plan_by_char(char opChar) {
+  for (int i = 0; i < TG0_NUM_PREDICATE_PLANS; i++) {
+    if (tg0_predicate_plans[i].opChar == opChar) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// The idxStr pushdown [cmp-op] letter for an xBestIndex constraint op, or 0
+// when the op is not pushdown-eligible.
+static char tg0_pushdown_op_char(int constraintOp) {
+  switch (constraintOp) {
+  case SQLITE_INDEX_CONSTRAINT_EQ:
+    return TG0_PUSHDOWN_OP_EQ;
+  case SQLITE_INDEX_CONSTRAINT_GT:
+    return TG0_PUSHDOWN_OP_GT;
+  case SQLITE_INDEX_CONSTRAINT_LE:
+    return TG0_PUSHDOWN_OP_LE;
+  case SQLITE_INDEX_CONSTRAINT_LT:
+    return TG0_PUSHDOWN_OP_LT;
+  case SQLITE_INDEX_CONSTRAINT_GE:
+    return TG0_PUSHDOWN_OP_GE;
+  case SQLITE_INDEX_CONSTRAINT_NE:
+    return TG0_PUSHDOWN_OP_NE;
+  default:
+    return 0;
+  }
+}
+
+// The SQL comparison operator for an idxStr pushdown [cmp-op] letter, or
+// NULL when the letter is not part of the alphabet.
+static const char *tg0_pushdown_op_sql(char opChar) {
+  switch (opChar) {
+  case TG0_PUSHDOWN_OP_EQ:
+    return "=";
+  case TG0_PUSHDOWN_OP_GT:
+    return ">";
+  case TG0_PUSHDOWN_OP_LE:
+    return "<=";
+  case TG0_PUSHDOWN_OP_LT:
+    return "<";
+  case TG0_PUSHDOWN_OP_GE:
+    return ">=";
+  case TG0_PUSHDOWN_OP_NE:
+    return "<>";
+  default:
+    return NULL;
+  }
+}
 
 void tg_vtab_set_error(sqlite3_vtab *pVTab, const char *zFormat, ...) {
   va_list args;
@@ -2692,75 +3581,226 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     *pzErr = sqlite3_mprintf("The current SQLite connection does not include the R-Tree extension, which is required by tg0.");
     return SQLITE_ERROR;
   }
-  sqlite3_str *strSchema = sqlite3_str_new(NULL);
-  sqlite3_str_appendall(strSchema, "CREATE TABLE x(_shape");
-  for (int i = 3; i < argc; i++) {
-    sqlite3_str_appendf(strSchema, ", %w", argv[i]);
-  }
-  sqlite3_str_appendall(strSchema, ")");
-  const char *zSchema = sqlite3_str_finish(strSchema);
-  if (!zSchema) {
+
+  pNew = sqlite3_malloc(sizeof(*pNew));
+  if (pNew == 0) {
     return SQLITE_NOMEM;
   }
+  memset(pNew, 0, sizeof(*pNew));
 
+  for (int i = 3; i < argc; i++) {
+    const char *arg = argv[i];
+    int nArg = (int)strlen(arg);
+    char *cName = NULL;
+    int nName = 0;
+    int columnType = 0;
+    int geomType = 0;
+    enum tg_index indexing = TG_DEFAULT;
+    char *errmsg = NULL;
+
+    // 1) primary key column, ie `id integer primary key`
+    rc = tg0_parse_primary_key_definition(arg, nArg, &cName, &nName,
+                                          &columnType);
+    if (rc == SQLITE_OK) {
+      if (pNew->pkColumnName) {
+        *pzErr = sqlite3_mprintf(
+            TG0_CONSTRUCTOR_ERROR
+            "more than one primary key column was declared ('%s'), only one "
+            "primary key is allowed",
+            arg);
+        goto error;
+      }
+      rc = tg0_check_column_name(pNew, arg, cName, nName, pzErr);
+      if (rc == SQLITE_NOMEM) {
+        goto nomem;
+      }
+      if (rc != SQLITE_OK) {
+        goto error;
+      }
+      pNew->pkColumnType = columnType;
+      pNew->pkColumnName = sqlite3_mprintf("%.*s", nName, cName);
+      if (!pNew->pkColumnName) {
+        goto nomem;
+      }
+      continue;
+    }
+
+    // 2) geometry column, ie `boundary polygon indexing=natural`
+    rc = tg0_parse_geometry_column_definition(arg, nArg, &cName, &nName,
+                                              &geomType, &indexing, &errmsg);
+    if (rc == SQLITE_ERROR) {
+      *pzErr = errmsg;
+      goto error;
+    }
+    if (rc == SQLITE_OK) {
+      if (pNew->numGeometryColumns >= TG0_MAX_GEOMETRY_COLUMNS) {
+        *pzErr = sqlite3_mprintf(
+            TG0_CONSTRUCTOR_ERROR
+            "too many geometry columns ('%s'), a maximum of %d geometry "
+            "columns are allowed",
+            arg, TG0_MAX_GEOMETRY_COLUMNS);
+        goto error;
+      }
+      rc = tg0_check_column_name(pNew, arg, cName, nName, pzErr);
+      if (rc == SQLITE_NOMEM) {
+        goto nomem;
+      }
+      if (rc != SQLITE_OK) {
+        goto error;
+      }
+      struct tg0_geometry_column *column =
+          &pNew->geometry_columns[pNew->numGeometryColumns];
+      column->name = sqlite3_mprintf("%.*s", nName, cName);
+      if (!column->name) {
+        goto nomem;
+      }
+      column->geomType = geomType;
+      column->indexing = indexing;
+      int iUser = tg0_num_user_columns(pNew);
+      pNew->user_column_kinds[iUser] = TG0_USER_COLUMN_KIND_GEOMETRY;
+      pNew->user_column_idxs[iUser] = pNew->numGeometryColumns;
+      pNew->numGeometryColumns++;
+      continue;
+    }
+
+    // 3) data column, ie `label text`
+    rc = tg0_parse_data_column_definition(arg, nArg, &cName, &nName,
+                                          &columnType, &errmsg);
+    if (rc == SQLITE_ERROR) {
+      *pzErr = errmsg;
+      goto error;
+    }
+    if (rc == SQLITE_OK) {
+      if (pNew->numDataColumns >= TG0_MAX_DATA_COLUMNS) {
+        *pzErr = sqlite3_mprintf(
+            TG0_CONSTRUCTOR_ERROR
+            "too many data columns ('%s'), a maximum of %d data columns are "
+            "allowed",
+            arg, TG0_MAX_DATA_COLUMNS);
+        goto error;
+      }
+      rc = tg0_check_column_name(pNew, arg, cName, nName, pzErr);
+      if (rc == SQLITE_NOMEM) {
+        goto nomem;
+      }
+      if (rc != SQLITE_OK) {
+        goto error;
+      }
+      struct tg0_data_column *column =
+          &pNew->data_columns[pNew->numDataColumns];
+      column->name = sqlite3_mprintf("%.*s", nName, cName);
+      if (!column->name) {
+        goto nomem;
+      }
+      column->type = columnType;
+      int iUser = tg0_num_user_columns(pNew);
+      pNew->user_column_kinds[iUser] = TG0_USER_COLUMN_KIND_DATA;
+      pNew->user_column_idxs[iUser] = pNew->numDataColumns;
+      pNew->numDataColumns++;
+      continue;
+    }
+
+    if (tg0_is_bare_identifier(arg, nArg)) {
+      *pzErr = sqlite3_mprintf(
+          TG0_CONSTRUCTOR_ERROR "could not parse '%s'. " TG0_OLD_SYNTAX_HINT,
+          arg);
+    } else {
+      *pzErr =
+          sqlite3_mprintf(TG0_CONSTRUCTOR_ERROR "could not parse '%s'", arg);
+    }
+    goto error;
+  }
+
+  if (pNew->numGeometryColumns < 1) {
+    *pzErr = sqlite3_mprintf(TG0_CONSTRUCTOR_ERROR
+                             "at least one geometry column is required");
+    goto error;
+  }
+
+  // declare_vtab: primary key (if any), then user columns in declaration
+  // order, then the hidden `distance` column (reserved for KNN). Text
+  // primary keys make the table WITHOUT ROWID; a rowids mapping shadow table
+  // supplies the int64 rowids that rtrees need.
+  sqlite3_str *strSchema = sqlite3_str_new(NULL);
+  sqlite3_str_appendall(strSchema, "CREATE TABLE x(");
+  if (pNew->pkColumnName) {
+    sqlite3_str_appendf(strSchema, "\"%w\" %s primary key, ",
+                        pNew->pkColumnName,
+                        pNew->pkColumnType == SQLITE_TEXT ? "text" : "integer");
+  }
+  for (int i = 0; i < tg0_num_user_columns(pNew); i++) {
+    int idx = pNew->user_column_idxs[i];
+    if (pNew->user_column_kinds[i] == TG0_USER_COLUMN_KIND_GEOMETRY) {
+      sqlite3_str_appendf(
+          strSchema, "\"%w\" %s, ", pNew->geometry_columns[idx].name,
+          tg0_geom_type_keyword(pNew->geometry_columns[idx].geomType));
+    } else {
+      const char *zType;
+      switch (pNew->data_columns[idx].type) {
+      case SQLITE_INTEGER:
+        zType = "integer";
+        break;
+      case SQLITE_FLOAT:
+        zType = "float";
+        break;
+      case SQLITE_BLOB:
+        zType = "blob";
+        break;
+      default:
+        zType = "text";
+        break;
+      }
+      sqlite3_str_appendf(strSchema, "\"%w\" %s, ",
+                          pNew->data_columns[idx].name, zType);
+    }
+  }
+  sqlite3_str_appendall(strSchema, "distance hidden)");
+  if (pNew->pkColumnType == SQLITE_TEXT) {
+    sqlite3_str_appendall(strSchema, " WITHOUT ROWID");
+  }
+  const char *zSchema = sqlite3_str_finish(strSchema);
+  if (!zSchema) {
+    goto nomem;
+  }
   rc = sqlite3_declare_vtab(db, zSchema);
   sqlite3_free((void *)zSchema);
   if (rc != SQLITE_OK) {
-    *pzErr = sqlite3_mprintf("Error declaring vtab schema for tg0 virtual table.");
-    return rc;
+    *pzErr =
+        sqlite3_mprintf("Error declaring vtab schema for tg0 virtual table: %s",
+                        sqlite3_errmsg(db));
+    goto error;
   }
-  pNew = sqlite3_malloc(sizeof(*pNew));
-  *ppVtab = (sqlite3_vtab *)pNew;
-  if (pNew == 0)
-    return SQLITE_NOMEM;
-  memset(pNew, 0, sizeof(*pNew));
-  const char *schemaName = argv[1];
-  const char *tableName = argv[2];
 
   pNew->db = db;
-  pNew->schemaName = sqlite3_mprintf("%s", schemaName);
-  pNew->tableName = sqlite3_mprintf("%s", tableName);
-  pNew->numAuxColumns = argc - 3;
+  pNew->schemaName = sqlite3_mprintf("%s", argv[1]);
+  pNew->tableName = sqlite3_mprintf("%s", argv[2]);
+  if (!pNew->schemaName || !pNew->tableName) {
+    goto nomem;
+  }
 
   if (isCreate) {
-    sqlite3_stmt *stmt = NULL;
-    int rcCreate = SQLITE_OK;
-    sqlite3_str *strRtreeSchema = sqlite3_str_new(NULL);
-    sqlite3_str_appendf(strRtreeSchema,
-                        "CREATE VIRTUAL TABLE \"%w\".\"%w_rtree\" using "
-                        "rtree(id, minX, maxX, minY, maxY, +_shape BLOB",
-                        schemaName, tableName);
-    for (int i = 3; i < argc; i++) {
-      sqlite3_str_appendf(strRtreeSchema, ", +c%d", i - 3 + 1);
-    }
-    sqlite3_str_appendall(strRtreeSchema, ")");
-    const char *zCreate = sqlite3_str_finish(strRtreeSchema);
-    if (!zCreate) {
-      rcCreate = SQLITE_NOMEM;
-    } else {
-      rcCreate = sqlite3_prepare_v2(db, zCreate, -1, &stmt, 0);
-      sqlite3_free((void *)zCreate);
-      if (rcCreate != SQLITE_OK) {
-        *pzErr = sqlite3_mprintf("Error preparing rtree shadow table for tg0 table.");
-        rcCreate = SQLITE_ERROR;
-      } else {
-        rcCreate = sqlite3_step(stmt) == SQLITE_DONE ? SQLITE_OK : SQLITE_ERROR;
-        if (rcCreate != SQLITE_OK) {
-          *pzErr = sqlite3_mprintf("Error creating rtree shadow table for tg0 table.");
-        }
+    rc = tg0_create_shadow_tables(pNew, pzErr);
+    if (rc != SQLITE_OK) {
+      // best-effort removal of the shadow tables created before the failure
+      tg0_drop_shadow_tables(pNew, NULL);
+      if (rc == SQLITE_NOMEM) {
+        goto nomem;
       }
-    }
-    sqlite3_finalize(stmt);
-    if (rcCreate != SQLITE_OK) {
-      // xDisconnect is not called when xCreate fails, so clean up here
-      sqlite3_free(pNew->schemaName);
-      sqlite3_free(pNew->tableName);
-      sqlite3_free(pNew);
-      *ppVtab = NULL;
-      return rcCreate;
+      goto error;
     }
   }
+
+  *ppVtab = (sqlite3_vtab *)pNew;
   return SQLITE_OK;
+
+nomem:
+  tg0_free(pNew);
+  return SQLITE_NOMEM;
+
+error:
+  // xDisconnect is not called when xCreate/xConnect fail, so clean up here
+  tg0_free(pNew);
+  return SQLITE_ERROR;
 }
 
 static int tg0Create(sqlite3 *db, void *pAux, int argc, const char *const *argv,
@@ -2774,26 +3814,20 @@ static int tg0Connect(sqlite3 *db, void *pAux, int argc,
 }
 
 static int tg0Disconnect(sqlite3_vtab *pVtab) {
-  tg0_vtab *p = (tg0_vtab *)pVtab;
-  sqlite3_free(p->schemaName);
-  sqlite3_free(p->tableName);
-  sqlite3_free(p);
+  tg0_free((tg0_vtab *)pVtab);
   return SQLITE_OK;
 }
 static int tg0Destroy(sqlite3_vtab *pVtab) {
   tg0_vtab *p = (tg0_vtab *)pVtab;
-  sqlite3_stmt *stmt;
-  const char *zSql =
-      sqlite3_mprintf(TG0_SQL_RTREE_DROP, p->schemaName, p->tableName);
-  int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, 0);
-  sqlite3_free((void *)zSql);
-
-  if (rc == SQLITE_OK) {
-    // ignore if there's an error?
-    sqlite3_step(stmt);
+  char *zErrMsg = NULL;
+  int rc = tg0_drop_shadow_tables(p, &zErrMsg);
+  if (rc != SQLITE_OK) {
+    // the DROP TABLE fails and the virtual table stays connected, so report
+    // the failure on the vtab and leave it alive
+    sqlite3_free(pVtab->zErrMsg);
+    pVtab->zErrMsg = zErrMsg;
+    return rc;
   }
-
-  sqlite3_finalize(stmt);
   tg0Disconnect(pVtab);
   return SQLITE_OK;
 }
@@ -2810,19 +3844,23 @@ static int tg0Open(sqlite3_vtab *p, sqlite3_vtab_cursor **ppCursor) {
 
 static int tg0Close(sqlite3_vtab_cursor *cur) {
   tg0_cursor *pCur = (tg0_cursor *)cur;
-  if (pCur->stmt) {
-    sqlite3_finalize(pCur->stmt);
-  }
+  sqlite3_finalize(pCur->stmt);
   tg_geom_free(pCur->queryGeom);
-  pCur->queryGeom = NULL;
   sqlite3_free(pCur);
   return SQLITE_OK;
 }
 
 static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
-
+  tg0_vtab *p = (tg0_vtab *)pVtab;
+  int iPointTerm = -1;
   int iPredicateTerm = -1;
-  int predicate = 0;
+  int predicatePlan = -1;
+  int predicateGeomIdx = -1;
+  // data-column pushdown candidates (decision 10), in constraint order
+  int nPushdown = 0;
+  int pushdownTerm[TG0_MAX_PUSHDOWN_BLOCKS];
+  int pushdownDataIdx[TG0_MAX_PUSHDOWN_BLOCKS];
+  char pushdownOp[TG0_MAX_PUSHDOWN_BLOCKS];
 
   for (int i = 0; i < pIdxInfo->nConstraint; i++) {
     if (!pIdxInfo->aConstraint[i].usable)
@@ -2830,182 +3868,462 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
 
     int iColumn = pIdxInfo->aConstraint[i].iColumn;
     int op = pIdxInfo->aConstraint[i].op;
-    if (op == TG0_FUNC_INTERSECTS || op == TG0_FUNC_DISJOINT ||
-        op == TG0_FUNC_CONTAINS || op == TG0_FUNC_WITHIN ||
-        op == TG0_FUNC_COVERS || op == TG0_FUNC_COVEREDBY ||
-        op == TG0_FUNC_TOUCHES || op == TG0_FUNC_EQUALS) {
-      if (iPredicateTerm >= 0) {
-        sqlite3_free(pVtab->zErrMsg);
-        pVtab->zErrMsg = sqlite3_mprintf(
-            "only 1 predicate is allowed on tg0 WHERE clauses.");
-        return SQLITE_ERROR;
+
+    // the KNN surface (plan '4', decision 9) is reserved but unimplemented:
+    // its query shapes — MATCH on a geometry column, or any constraint on
+    // the hidden distance column — get a clear error instead of a crash.
+    // LIMIT/OFFSET constraints are excluded: their iColumn is documented as
+    // meaningless and must not be mistaken for the distance column
+    if (op == SQLITE_INDEX_CONSTRAINT_MATCH ||
+        (iColumn == tg0_column_distance_idx(p) &&
+         op != SQLITE_INDEX_CONSTRAINT_LIMIT &&
+         op != SQLITE_INDEX_CONSTRAINT_OFFSET)) {
+      tg_vtab_set_error(pVtab, "KNN queries are not supported on tg0 tables "
+                               "yet");
+      return SQLITE_ERROR;
+    }
+
+    // rowid EQ — or primary key EQ, the declared primary key is always
+    // column 0 — becomes a single content-table point lookup
+    if (op == SQLITE_INDEX_CONSTRAINT_EQ &&
+        (iColumn < 0 || (p->pkColumnName && iColumn == 0))) {
+      if (iPointTerm < 0) {
+        iPointTerm = i;
       }
-      iPredicateTerm = i;
-      predicate = op;
+      continue;
+    }
+
+    // EQ/NE/LT/LE/GT/GE on a plain data column: a pushdown candidate,
+    // folded into the content scan's WHERE clause as a prefilter when a
+    // fullscan or predicate plan is chosen (decision 10). Constraints on
+    // the primary key or on geometry columns are never pushed
+    // (tg0_column_lookup rejects the pk / distance columns, and the kind
+    // check rejects geometry columns)
+    char pushOpChar = tg0_pushdown_op_char(op);
+    if (pushOpChar) {
+      tg0_user_column_kind kind;
+      int idx;
+      if (tg0_column_lookup(p, iColumn, &kind, &idx) == SQLITE_OK &&
+          kind == TG0_USER_COLUMN_KIND_DATA &&
+          nPushdown < TG0_MAX_PUSHDOWN_BLOCKS) {
+        // TEXT columns: the shadow-table prefilter always compares with
+        // BINARY collation (untyped shadow columns, no COLLATE clause), so
+        // only consume the constraint when SQLite itself would compare with
+        // BINARY. Under NOCASE etc. a prefilter miss would be a false
+        // negative that the omit=0 re-check cannot repair — re-checking
+        // only ever removes rows
+        if (p->data_columns[idx].type == SQLITE_TEXT) {
+          const char *collation = sqlite3_vtab_collation(pIdxInfo, i);
+          if (!collation || sqlite3_stricmp(collation, "BINARY") != 0) {
+            continue;
+          }
+        }
+        pushdownTerm[nPushdown] = i;
+        pushdownDataIdx[nPushdown] = idx;
+        pushdownOp[nPushdown] = pushOpChar;
+        nPushdown++;
+      }
+      continue;
+    }
+
+    int iPlan = tg0_predicate_plan_by_op(op);
+    if (iPlan >= 0) {
+      tg0_user_column_kind kind;
+      int idx;
+      // only intercept a predicate whose first argument is one of this
+      // table's geometry columns. Predicates on the primary key or on data
+      // columns are left unconsumed, and run as ordinary scalar functions
+      // over the values xColumn returns — exactly like outside a tg0 WHERE
+      // clause (fixes the old aux-interception bug)
+      if (tg0_column_lookup(p, iColumn, &kind, &idx) != SQLITE_OK ||
+          kind != TG0_USER_COLUMN_KIND_GEOMETRY) {
+        continue;
+      }
+      // consume exactly one predicate for the rtree plan, preferring the
+      // first non-disjoint one: disjoint's matches live outside the query
+      // bbox, so its prefilter is a fullscan. Every other predicate stays
+      // unconsumed and SQLite post-evaluates it as a scalar function over
+      // the returned WKB — multiple predicates in one WHERE clause simply
+      // intersect (decision 8)
+      if (iPredicateTerm < 0 ||
+          (tg0_predicate_plans[predicatePlan].strategy ==
+               TG0_STRATEGY_FULLSCAN &&
+           tg0_predicate_plans[iPlan].strategy != TG0_STRATEGY_FULLSCAN)) {
+        iPredicateTerm = i;
+        predicatePlan = iPlan;
+        predicateGeomIdx = idx;
+      }
     }
   }
-  if (iPredicateTerm >= 0) {
-    pIdxInfo->idxStr = (char *)"predicate";
-    pIdxInfo->idxNum = predicate;
-    pIdxInfo->aConstraintUsage[iPredicateTerm].argvIndex = 1;
-    pIdxInfo->aConstraintUsage[iPredicateTerm].omit = 1;
-    pIdxInfo->estimatedCost = 30.0;
-    pIdxInfo->estimatedRows = 10;
+
+  char *idxStr;
+  if (iPointTerm >= 0) {
+    // point plans consume no pushdown blocks: the scan is already a single
+    // B-tree lookup, and SQLite evaluates the data-column constraints on
+    // the one returned row
+    idxStr = sqlite3_mprintf("%c", TG0_PLAN_POINT);
+    pIdxInfo->aConstraintUsage[iPointTerm].argvIndex = 1;
+    pIdxInfo->estimatedCost = 1.0;
+    pIdxInfo->estimatedRows = 1;
   } else {
-    pIdxInfo->idxStr = (char *)"fullscan";
-    pIdxInfo->estimatedCost = 3000000.0;
-    pIdxInfo->estimatedRows = 100000;
+    // predicate and fullscan plans share the trailing '&' pushdown blocks:
+    // argv slots are assigned in consumed order — the query geometry (when
+    // present) stays argv[0], pushdown values follow
+    sqlite3_str *str = sqlite3_str_new(NULL);
+    int argvIndex = 1;
+    if (iPredicateTerm >= 0) {
+      sqlite3_str_appendf(str, "%c%c%c%c%c", TG0_PLAN_PREDICATE,
+                          TG0_IDXSTR_KIND_PREDICATE, 'A' + predicateGeomIdx,
+                          tg0_predicate_plans[predicatePlan].opChar,
+                          tg0_predicate_plans[predicatePlan].strategy);
+      pIdxInfo->aConstraintUsage[iPredicateTerm].argvIndex = argvIndex++;
+      pIdxInfo->aConstraintUsage[iPredicateTerm].omit = 1;
+      pIdxInfo->estimatedCost = 30.0;
+      pIdxInfo->estimatedRows = 10;
+    } else {
+      sqlite3_str_appendf(str, "%c", TG0_PLAN_FULLSCAN);
+      pIdxInfo->estimatedCost = 3000000.0;
+      pIdxInfo->estimatedRows = 100000;
+    }
+    for (int k = 0; k < nPushdown; k++) {
+      sqlite3_str_appendf(str, "%c%c%c%c", TG0_IDXSTR_KIND_PUSHDOWN,
+                          'A' + pushdownDataIdx[k], pushdownOp[k], '_');
+      pIdxInfo->aConstraintUsage[pushdownTerm[k]].argvIndex = argvIndex++;
+      // omit stays 0 on pushdown terms: SQLite re-evaluates the original
+      // comparison against xColumn's values with its own affinity and
+      // collation semantics, so the shadow-table prefilter only ever
+      // removes rows. Correctness then only needs the prefilter to avoid
+      // false negatives (tg0Filter documents how); everything subtler stays
+      // exactly SQLite's, and a prefilter clause can be skipped freely
+      pIdxInfo->estimatedCost *= 0.9;
+    }
+    idxStr = sqlite3_str_finish(str);
   }
+  if (!idxStr) {
+    return SQLITE_NOMEM;
+  }
+  pIdxInfo->idxStr = idxStr;
+  pIdxInfo->needToFreeIdxStr = 1;
 
   return SQLITE_OK;
 }
 
-// forward delcaration bc tg0Filter uses it
-static int tg0Next(sqlite3_vtab_cursor *cur);
+// ---------------------------------------------------------------------------
+// tg0 read path.
+//
+// Every plan scans t_content (joined with t_rowids on text-primary-key
+// tables) through the same SELECT shape; the plans differ only in how the
+// candidate rows are narrowed:
+//
+//   fullscan  ('1'): iterate t_content directly.
+//   point     ('2'): WHERE c.rowid = ?1 (or r.id = ?1 for text pks).
+//   predicate ('3'): join the geometry column's rtree on a bbox condition
+//                    per the strategy letter, then apply the exact tg
+//                    predicate to each candidate row in tg0_cursor_step —
+//                    the rtree is only ever a prefilter, correctness comes
+//                    from the exact test.
+// ---------------------------------------------------------------------------
 
-// Prepares pCur->stmt as an rtree scan over every entry whose bbox intersects
-// the query geometry's bbox, and sets pCur->queryGeom to the parsed query
-// geometry. This is a safe over-approximation for INTERSECT, TOUCHES, and
-// EQUALS plans alike (touching/equal geometries always have intersecting
-// bboxes; equal geometries in fact have identical bboxes, but we don't
-// bother with the tighter bbox-equality constraint here — bbox-intersects is
-// simple and already narrows the rtree scan, and tg0Next() applies the exact
-// predicate as a post-filter regardless).
-static int tg0FilterBboxIntersect(sqlite3_vtab_cursor *pVtabCursor,
-                                  sqlite3_value *queryValue) {
-  tg0_cursor *pCur = (tg0_cursor *)pVtabCursor;
-  tg0_vtab *p = (tg0_vtab *)pVtabCursor->pVtab;
+// Number of leading header columns (c.rowid, then r.id on text-primary-key
+// tables) in a tg0_cursor's content scan, before the geomNN/dataNN columns.
+static int tg0_scan_header_columns(tg0_vtab *p) {
+  return p->pkColumnType == SQLITE_TEXT ? 2 : 1;
+}
 
-  char * errmsg;
-  int rc = geomValue(queryValue, &pCur->queryGeom, &errmsg);
-  if (rc != SQLITE_OK) {
-    sqlite3_free(pVtabCursor->pVtab->zErrMsg);
-    pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("%s", errmsg);
-    sqlite3_free(errmsg);
-    return SQLITE_ERROR;
+// Round v to the nearest float32-representable double at or below (down) /
+// at or above (up) v. Used to grow query bboxes outward before binding them
+// against rtree coordinates, mirroring the outward float32 rounding the
+// rtree module applies to stored bboxes.
+static double tg0_f32_down(double v) {
+  float f = (float)v;
+  if ((double)f > v) {
+    f = nextafterf(f, -INFINITY);
   }
-  struct tg_rect rect = tg_geom_rect(pCur->queryGeom);
-
-  sqlite3_str *strSqlIntersect = sqlite3_str_new(NULL);
-  sqlite3_str_appendall(strSqlIntersect, "SELECT id, _shape");
-  for (int i = 0; i < p->numAuxColumns; i++) {
-    sqlite3_str_appendf(strSqlIntersect, ", c%d", i + 1);
+  return (double)f;
+}
+static double tg0_f32_up(double v) {
+  float f = (float)v;
+  if ((double)f < v) {
+    f = nextafterf(f, INFINITY);
   }
-  sqlite3_str_appendf(strSqlIntersect, " FROM \"%w\".\"%w_rtree\" as r ",
-                      p->schemaName, p->tableName);
-  sqlite3_str_appendall(strSqlIntersect, "WHERE r.minX <= ?1  "
-                                         "AND r.maxX >= ?2 "
-                                         "AND r.minY <= ?3 "
-                                         "AND r.maxY >= ?4");
+  return (double)f;
+}
 
-  const char *zSql = sqlite3_str_finish(strSqlIntersect);
-  if (!zSql) {
-    // TODO what needs to be freed here
-    return SQLITE_NOMEM;
+// Advances the cursor's scan to the next result row, setting eof at the end.
+// On predicate plans this steps until a candidate passes the exact tg
+// predicate: the candidate's stored WKB is parsed with the geometry column's
+// indexing= option (decision 7) and tested as func(candidate, query) —
+// tg_predicate_impl's argument order for tg_pred(column-value, argument).
+// A step or parse failure returns its error with eof still unset, so a
+// mid-scan failure never reads as a clean end of results.
+static int tg0_cursor_step(tg0_cursor *pCur) {
+  tg0_vtab *p = (tg0_vtab *)pCur->base.pVtab;
+  while (1) {
+    int rc = sqlite3_step(pCur->stmt);
+    if (rc == SQLITE_DONE) {
+      pCur->eof = 1;
+      return SQLITE_OK;
+    }
+    if (rc != SQLITE_ROW) {
+      tg_vtab_set_error(&p->base, "Error stepping tg0 content rows: %s",
+                        sqlite3_errmsg(p->db));
+      return rc;
+    }
+    if (pCur->plan != TG0_PLAN_PREDICATE) {
+      return SQLITE_OK;
+    }
+    // exact post-filter for predicate plans
+    int iScan = tg0_scan_header_columns(p) + pCur->predGeomIdx;
+    const void *wkb = sqlite3_column_blob(pCur->stmt, iScan);
+    int nWkb = sqlite3_column_bytes(pCur->stmt, iScan);
+    struct tg_geom *candidate = tg_parse_wkb_ix(
+        wkb, nWkb, p->geometry_columns[pCur->predGeomIdx].indexing);
+    if (tg_geom_error(candidate)) {
+      tg_vtab_set_error(&p->base, "Error parsing tg0 stored geometry in %s.%s: %s",
+                        p->tableName,
+                        p->geometry_columns[pCur->predGeomIdx].name,
+                        tg_geom_error(candidate));
+      tg_geom_free(candidate);
+      return SQLITE_ERROR;
+    }
+    bool matches = pCur->predFunc(candidate, pCur->queryGeom);
+    tg_geom_free(candidate);
+    if (matches) {
+      return SQLITE_OK;
+    }
   }
-
-  rc = sqlite3_prepare_v2(p->db, zSql, -1, &pCur->stmt, NULL);
-  sqlite3_free((void *)zSql);
-
-  if (rc != SQLITE_OK) {
-    sqlite3_free(pVtabCursor->pVtab->zErrMsg);
-    pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("prep error");
-    return SQLITE_ERROR;
-  }
-  sqlite3_bind_double(pCur->stmt, 1, rect.max.x);
-  sqlite3_bind_double(pCur->stmt, 2, rect.min.x);
-  sqlite3_bind_double(pCur->stmt, 3, rect.max.y);
-  sqlite3_bind_double(pCur->stmt, 4, rect.min.y);
-  return SQLITE_OK;
 }
 
 static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
                      const char *idxStr, int argc, sqlite3_value **argv) {
   tg0_cursor *pCur = (tg0_cursor *)pVtabCursor;
   tg0_vtab *p = (tg0_vtab *)pVtabCursor->pVtab;
+  char strategy = 0;
+  struct tg_rect queryRect = {{0, 0}, {0, 0}};
+  int rc;
+  // parsed '&' pushdown blocks: data_columns[] index, [cmp-op] letter, and
+  // whether the block's prefilter clause is applied to this scan. Block k
+  // describes argv[argvOffset + k] and binds parameter ?(bindBase + k)
+  int nPushdown = 0;
+  int pushdownDataIdx[TG0_MAX_PUSHDOWN_BLOCKS];
+  char pushdownOp[TG0_MAX_PUSHDOWN_BLOCKS];
+  int pushdownInclude[TG0_MAX_PUSHDOWN_BLOCKS];
+  int argvOffset = 0;
+  // pushdown parameter numbers start after the prefilter's own ?1..?4
+  // (point key / rtree bbox); unreferenced lower numbers are harmless
+  int bindBase = 5;
 
-  if (pCur->stmt) {
-    sqlite3_finalize(pCur->stmt);
-    pCur->stmt = 0;
-  }
-  if (pCur->queryGeom) {
-    tg_geom_free(pCur->queryGeom);
-    pCur->queryGeom = NULL;
-  }
+  // cursors are reused: tear down the previous scan's state entirely
+  sqlite3_finalize(pCur->stmt);
+  pCur->stmt = NULL;
+  tg_geom_free(pCur->queryGeom);
+  pCur->queryGeom = NULL;
+  pCur->predFunc = NULL;
+  pCur->predGeomIdx = -1;
+  pCur->eof = 0;
+  pCur->plan = idxStr[0];
 
-  if (strcmp(idxStr, "fullscan") == 0) {
-    pCur->plan = FULLSCAN;
-    sqlite3_str *strSqlFullscan = sqlite3_str_new(NULL);
-    sqlite3_str_appendall(strSqlFullscan, "SELECT id, _shape");
-    for (int i = 0; i < p->numAuxColumns; i++) {
-      sqlite3_str_appendf(strSqlFullscan, ", c%d", i + 1);
+  if (pCur->plan == TG0_PLAN_PREDICATE) {
+    // idxStr = '3' + [kind][geom-col][op][strategy], argv[0] = query geometry
+    int iPlan = strlen(idxStr) >= 5 ? tg0_predicate_plan_by_char(idxStr[3]) : -1;
+    pCur->predGeomIdx = strlen(idxStr) >= 5 ? idxStr[2] - 'A' : -1;
+    if (iPlan < 0 || idxStr[1] != TG0_IDXSTR_KIND_PREDICATE ||
+        pCur->predGeomIdx < 0 || pCur->predGeomIdx >= p->numGeometryColumns ||
+        argc < 1) {
+      tg_vtab_set_error(&p->base, "Internal tg0 error: bad predicate plan '%s'",
+                        idxStr);
+      return SQLITE_ERROR;
     }
-    sqlite3_str_appendf(strSqlFullscan, " FROM \"%w\".\"%w_rtree\"",
+    pCur->predFunc = tg0_predicate_plans[iPlan].func;
+    strategy = idxStr[4];
+
+    char *errmsg = NULL;
+    if (geomValue(argv[0], &pCur->queryGeom, &errmsg) != SQLITE_OK) {
+      tg_vtab_set_error(&p->base, "%s", errmsg);
+      sqlite3_free(errmsg);
+      return SQLITE_ERROR;
+    }
+    queryRect = tg_geom_rect(pCur->queryGeom);
+  }
+
+  // trailing '&' pushdown blocks (fullscan and predicate plans only)
+  if (pCur->plan == TG0_PLAN_FULLSCAN || pCur->plan == TG0_PLAN_PREDICATE) {
+    argvOffset = pCur->plan == TG0_PLAN_PREDICATE ? 1 : 0;
+    const char *block = idxStr + (pCur->plan == TG0_PLAN_PREDICATE ? 5 : 1);
+    for (; *block; block += 4) {
+      if (strlen(block) < 4 || block[0] != TG0_IDXSTR_KIND_PUSHDOWN ||
+          block[1] - 'A' < 0 || block[1] - 'A' >= p->numDataColumns ||
+          !tg0_pushdown_op_sql(block[2]) ||
+          nPushdown >= TG0_MAX_PUSHDOWN_BLOCKS ||
+          argvOffset + nPushdown >= argc) {
+        tg_vtab_set_error(&p->base,
+                          "Internal tg0 error: bad pushdown block in '%s'",
+                          idxStr);
+        return SQLITE_ERROR;
+      }
+      pushdownDataIdx[nPushdown] = block[1] - 'A';
+      pushdownOp[nPushdown] = block[2];
+      nPushdown++;
+    }
+  }
+
+  // Decide, per pushdown block, whether its prefilter clause is applied.
+  // xBestIndex left omit=0 on every pushed constraint, so SQLite re-checks
+  // each one with its own comparison semantics: a skipped clause is always
+  // correct, and an applied clause must only never exclude a row SQLite's
+  // own check would keep (no false negatives).
+  //
+  // Affinity: the shadow data columns are declared typeless (no affinity),
+  // so the prefilter compares by storage class under BINARY collation.
+  // Writes are type-checked, so stored classes always match the declared
+  // column type (integers widen to REAL in float columns at bind time), and
+  // xColumn returns the shadow values verbatim — the values SQLite's own
+  // check compares, after applying the vtab column's declared affinity to
+  // the constraint value. Mirroring that here:
+  //
+  // - INTEGER/FLOAT columns: apply numeric affinity to the argv value
+  //   (sqlite3_value_numeric_type) before binding — the same conversion
+  //   SQLite's comparison applies, so e.g. `size = '5'` prefilters as the
+  //   integer 5 and a non-numeric text RHS stays text (ordering above every
+  //   stored numeric on both sides).
+  // - TEXT columns: a numeric RHS would be text-ified by SQLite's
+  //   TEXT-affinity comparison but compares as a bare storage-class
+  //   mismatch in the shadow table (numerics order below text — false
+  //   negatives for '<'/'<='). Skip the clause instead of reproducing
+  //   SQLite's number->text rendering; text/blob/NULL RHS compare
+  //   identically on both sides (xBestIndex already required BINARY
+  //   collation for TEXT columns).
+  // - BLOB columns: no affinity conversion on either side in either check;
+  //   bind verbatim.
+  // - NULL RHS: always included — `x <op> NULL` matches nothing in the
+  //   shadow scan, exactly SQL's semantics.
+  for (int k = 0; k < nPushdown; k++) {
+    sqlite3_value *value = argv[argvOffset + k];
+    int columnType = p->data_columns[pushdownDataIdx[k]].type;
+    int valueType = sqlite3_value_type(value);
+    pushdownInclude[k] = 1;
+    if (columnType == SQLITE_INTEGER || columnType == SQLITE_FLOAT) {
+      sqlite3_value_numeric_type(value);
+    } else if (columnType == SQLITE_TEXT && (valueType == SQLITE_INTEGER ||
+                                             valueType == SQLITE_FLOAT)) {
+      pushdownInclude[k] = 0;
+    }
+  }
+
+  sqlite3_str *str = sqlite3_str_new(NULL);
+  sqlite3_str_appendall(str, "SELECT c.rowid");
+  if (p->pkColumnType == SQLITE_TEXT) {
+    sqlite3_str_appendall(str, ", r.id");
+  }
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    sqlite3_str_appendf(str, ", c.geom%02d", i);
+  }
+  for (int i = 0; i < p->numDataColumns; i++) {
+    sqlite3_str_appendf(str, ", c.data%02d", i);
+  }
+  sqlite3_str_appendf(str, " FROM " TG0_SHADOW_CONTENT_NAME " AS c",
+                      p->schemaName, p->tableName);
+  if (p->pkColumnType == SQLITE_TEXT) {
+    sqlite3_str_appendf(str,
+                        " JOIN " TG0_SHADOW_ROWIDS_NAME
+                        " AS r ON r.rowid = c.rowid",
                         p->schemaName, p->tableName);
-
-    const char *zSql = sqlite3_str_finish(strSqlFullscan);
-    if (!zSql) {
-      // TODO what needs to be freed here
-      return SQLITE_NOMEM;
-    }
-    int rc = sqlite3_prepare_v2(p->db, zSql, -1, &pCur->stmt, NULL);
-    sqlite3_free((void *)zSql);
-    if (rc != SQLITE_OK) {
-      sqlite3_free(pVtabCursor->pVtab->zErrMsg);
-      pVtabCursor->pVtab->zErrMsg =
-          sqlite3_mprintf("prep error: %s", sqlite3_errmsg(p->db));
-      return SQLITE_ERROR;
-    }
-    return tg0Next(pVtabCursor);
-  } else if (strcmp(idxStr, "predicate") == 0) {
-    switch (idxNum) {
-    case TG0_FUNC_INTERSECTS: {
-      pCur->plan = INTERSECT;
-      int rc = tg0FilterBboxIntersect(pVtabCursor, argv[0]);
-      if (rc != SQLITE_OK) {
-        return rc;
-      }
+  }
+  if (pCur->plan == TG0_PLAN_POINT) {
+    sqlite3_str_appendall(str, p->pkColumnType == SQLITE_TEXT
+                                   ? " WHERE r.id = ?1"
+                                   : " WHERE c.rowid = ?1");
+  } else if (pCur->plan == TG0_PLAN_PREDICATE &&
+             strategy != TG0_STRATEGY_FULLSCAN) {
+    // rtree bbox prefilter. Bind order: ?1=qminX ?2=qmaxX ?3=qminY ?4=qmaxY
+    sqlite3_str_appendf(str,
+                        " JOIN " TG0_SHADOW_RTREE_NAME " AS i ON i.id = c.rowid",
+                        p->schemaName, p->tableName, pCur->predGeomIdx);
+    switch (strategy) {
+    case TG0_STRATEGY_OVERLAP:
+      sqlite3_str_appendall(str, " WHERE i.minX <= ?2 AND i.maxX >= ?1"
+                                 " AND i.minY <= ?4 AND i.maxY >= ?3");
+      break;
+    case TG0_STRATEGY_CONTAINS:
+      sqlite3_str_appendall(str, " WHERE i.minX <= ?1 AND i.maxX >= ?2"
+                                 " AND i.minY <= ?3 AND i.maxY >= ?4");
+      break;
+    case TG0_STRATEGY_WITHIN:
+      sqlite3_str_appendall(str, " WHERE i.minX >= ?1 AND i.maxX <= ?2"
+                                 " AND i.minY >= ?3 AND i.maxY <= ?4");
       break;
     }
-    case TG0_FUNC_TOUCHES: {
-      pCur->plan = TOUCHES;
-      int rc = tg0FilterBboxIntersect(pVtabCursor, argv[0]);
-      if (rc != SQLITE_OK) {
-        return rc;
-      }
-      break;
+  }
+  // applied pushdown clauses. Fullscan plans and disjoint-strategy
+  // predicate plans have no WHERE clause yet; the first applied clause
+  // starts one
+  int hasWhere = pCur->plan == TG0_PLAN_POINT ||
+                 (pCur->plan == TG0_PLAN_PREDICATE &&
+                  strategy != TG0_STRATEGY_FULLSCAN);
+  for (int k = 0; k < nPushdown; k++) {
+    if (!pushdownInclude[k]) {
+      continue;
     }
-    case TG0_FUNC_EQUALS: {
-      pCur->plan = EQUALS;
-      int rc = tg0FilterBboxIntersect(pVtabCursor, argv[0]);
-      if (rc != SQLITE_OK) {
-        return rc;
-      }
-      break;
-    }
-    case TG0_FUNC_DISJOINT:
-    case TG0_FUNC_CONTAINS:
-    case TG0_FUNC_WITHIN:
-    case TG0_FUNC_COVERS:
-    case TG0_FUNC_COVEREDBY: {
-      sqlite3_free(pVtabCursor->pVtab->zErrMsg);
-      pVtabCursor->pVtab->zErrMsg =
-          sqlite3_mprintf("The given predicate inside the WHERE clause on tg0 "
-                          "table is not supported yet");
-      return SQLITE_ERROR;
-    }
-    default: {
-      sqlite3_free(pVtabCursor->pVtab->zErrMsg);
-      pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("unknown query plan");
-      return SQLITE_ERROR;
-    }
-    }
-    return tg0Next(pVtabCursor);
-  } else {
-    sqlite3_free(pVtabCursor->pVtab->zErrMsg);
-    pVtabCursor->pVtab->zErrMsg = sqlite3_mprintf("unknown idxStr");
+    sqlite3_str_appendf(str, "%s c.data%02d %s ?%d",
+                        hasWhere ? " AND" : " WHERE", pushdownDataIdx[k],
+                        tg0_pushdown_op_sql(pushdownOp[k]), bindBase + k);
+    hasWhere = 1;
+  }
+  char *zSql = sqlite3_str_finish(str);
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, &pCur->stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    tg_vtab_set_error(&p->base, "Error preparing tg0 content scan: %s",
+                      sqlite3_errmsg(p->db));
     return SQLITE_ERROR;
   }
+  rc = SQLITE_OK;
+  if (pCur->plan == TG0_PLAN_POINT && argc > 0) {
+    rc = sqlite3_bind_value(pCur->stmt, 1, argv[0]);
+  } else if (pCur->plan == TG0_PLAN_PREDICATE &&
+             strategy != TG0_STRATEGY_FULLSCAN) {
+    // The rtree stores each bbox as float32 rounded *outward* (min
+    // coordinates toward -inf, max toward +inf — the rtree module's own
+    // rounding), so a stored bbox is a superset of the row's true float64
+    // bbox. The query bbox is grown outward to float32 the same way before
+    // binding (plan.md "Float32 caveat"):
+    //
+    // - WITHIN ('W', stored.min >= qmin AND stored.max <= qmax): required
+    //   for correctness. A true match's stored.min can round below an exact
+    //   qmin bind, which would false-negative it; binding
+    //   f32down(qmin)/f32up(qmax) keeps every outward-rounded stored bbox
+    //   inside the comparison.
+    // - CONTAINS ('C', stored.min <= qmin AND stored.max >= qmax): safe and
+    //   lossless. A true match already has stored.min <= true.min <= qmin,
+    //   and because stored values are float32, `stored.min <= f32down(qmin)`
+    //   admits exactly the same stored values as `stored.min <= qmin`
+    //   (f32down(qmin) is the largest float32 <= qmin) — likewise for max.
+    // - OVERLAP ('O'): grows the query bbox by under one float32 ulp per
+    //   edge, a harmless over-approximation.
+    //
+    // Any over-included candidate is discarded by the exact predicate in
+    // tg0_cursor_step, so outward rounding never changes results.
+    sqlite3_bind_double(pCur->stmt, 1, tg0_f32_down(queryRect.min.x));
+    sqlite3_bind_double(pCur->stmt, 2, tg0_f32_up(queryRect.max.x));
+    sqlite3_bind_double(pCur->stmt, 3, tg0_f32_down(queryRect.min.y));
+    rc = sqlite3_bind_double(pCur->stmt, 4, tg0_f32_up(queryRect.max.y));
+  }
+  for (int k = 0; k < nPushdown && rc == SQLITE_OK; k++) {
+    if (pushdownInclude[k]) {
+      rc = sqlite3_bind_value(pCur->stmt, bindBase + k, argv[argvOffset + k]);
+    }
+  }
+  if (rc != SQLITE_OK) {
+    // a failed bind (OOM copying an argv value) must error out: stepping the
+    // half-bound statement would silently scan with NULL parameters
+    tg_vtab_set_error(&p->base, "Error binding tg0 content scan: %s",
+                      sqlite3_errmsg(p->db));
+    return rc;
+  }
+  return tg0_cursor_step(pCur);
 }
 
 static int tg0Rowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid) {
@@ -3015,222 +4333,678 @@ static int tg0Rowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid) {
 }
 
 static int tg0Next(sqlite3_vtab_cursor *cur) {
-  tg0_cursor *pCur = (tg0_cursor *)cur;
-  tg0_vtab *p = (tg0_vtab *)cur->pVtab;
-  int stop = 0;
-  while (!stop) {
-    pCur->stepStatus = sqlite3_step(pCur->stmt);
-    if (pCur->stepStatus == SQLITE_DONE) {
-      break;
-    }
-    if (pCur->stepStatus != SQLITE_ROW) {
-      sqlite3_free(cur->pVtab->zErrMsg);
-      cur->pVtab->zErrMsg =
-          sqlite3_mprintf("tg0Next step error: %d", pCur->stepStatus);
-      return SQLITE_ERROR;
-    }
-
-    switch (pCur->plan) {
-    case FULLSCAN: {
-      stop = 1;
-      break;
-    }
-    case INTERSECT:
-    case TOUCHES:
-    case EQUALS: {
-
-      struct tg_geom *geom;
-      char * errmsg;
-      int rc = geomValue(sqlite3_column_value(pCur->stmt, 1), &geom, &errmsg);
-      if (rc != SQLITE_OK) {
-        sqlite3_free(cur->pVtab->zErrMsg);
-        cur->pVtab->zErrMsg = sqlite3_mprintf("%s", errmsg);
-
-        sqlite3_free(errmsg);
-        return SQLITE_ERROR;
-      }
-
-      bool matches;
-      switch (pCur->plan) {
-      case TOUCHES:
-        matches = tg_geom_touches(geom, pCur->queryGeom);
-        break;
-      case EQUALS:
-        matches = tg_geom_equals(geom, pCur->queryGeom);
-        break;
-      default:
-        matches = tg_geom_intersects(geom, pCur->queryGeom);
-        break;
-      }
-
-      if (matches) {
-        stop = 1;
-      } else {
-        stop = 0;
-      }
-      tg_geom_free(geom);
-      break;
-    }
-    }
-  }
-  return SQLITE_OK;
+  return tg0_cursor_step((tg0_cursor *)cur);
 }
 
-static int tg0Eof(sqlite3_vtab_cursor *cur) {
-  tg0_cursor *pCur = (tg0_cursor *)cur;
-  return pCur->stepStatus != SQLITE_ROW;
-}
+static int tg0Eof(sqlite3_vtab_cursor *cur) { return ((tg0_cursor *)cur)->eof; }
 
 static int tg0Column(sqlite3_vtab_cursor *cur, sqlite3_context *context,
                      int i) {
   tg0_cursor *pCur = (tg0_cursor *)cur;
-  if (i == TG0_COLUMN_SHAPE) {
-    sqlite3_result_value(context, sqlite3_column_value(pCur->stmt, 1));
-  } else if (i >= TG0_COLUMN_REST) {
+  tg0_vtab *p = (tg0_vtab *)cur->pVtab;
+  tg0_user_column_kind kind;
+  int idx;
+
+  // During an UPDATE, SQLite probes the columns the statement does not SET
+  // with the nochange flag: returning without a result here is what makes
+  // sqlite3_value_nochange() true for them in tg0Update.
+  if (sqlite3_vtab_nochange(context)) {
+    return SQLITE_OK;
+  }
+  if (p->pkColumnName && i == 0) {
+    // integer primary keys alias the content rowid (scan column 0); text
+    // primary keys resolve through t_rowids (scan column 1)
     sqlite3_result_value(
-        context, sqlite3_column_value(pCur->stmt, 2 + i - TG0_COLUMN_REST));
+        context, sqlite3_column_value(pCur->stmt,
+                                      p->pkColumnType == SQLITE_TEXT ? 1 : 0));
+    return SQLITE_OK;
+  }
+  if (tg0_column_lookup(p, i, &kind, &idx) != SQLITE_OK) {
+    // the hidden distance column: NULL until KNN lands
+    sqlite3_result_null(context);
+    return SQLITE_OK;
+  }
+  int iScan = tg0_scan_header_columns(p) +
+              (kind == TG0_USER_COLUMN_KIND_GEOMETRY
+                   ? idx
+                   : p->numGeometryColumns + idx);
+  sqlite3_result_value(context, sqlite3_column_value(pCur->stmt, iScan));
+  return SQLITE_OK;
+}
+
+// ---------------------------------------------------------------------------
+// tg0 write path (xUpdate): INSERT, DELETE, and UPDATE.
+//
+// Every write validates first and touches the shadow tables second: geometry
+// columns are NOT NULL and strictly typed, data columns are type-checked
+// (NULL allowed, integers are accepted into float columns), so those
+// constraint failures happen before any shadow row is written. Failures
+// after the first shadow write (like a duplicate rowid or text id) are
+// rolled back by SQLite's statement-level atomicity: the shadow writes run
+// inside the statement transaction that wraps the xUpdate call.
+// ---------------------------------------------------------------------------
+
+// The user-facing SQL type keyword for an SQLITE_* fundamental type code.
+static const char *tg0_sqlite_type_keyword(int type) {
+  switch (type) {
+  case SQLITE_INTEGER:
+    return "integer";
+  case SQLITE_FLOAT:
+    return "float";
+  case SQLITE_TEXT:
+    return "text";
+  case SQLITE_BLOB:
+    return "blob";
+  default:
+    return "null";
+  }
+}
+
+// 1 when value already holds WKB bytes: a blob that isn't sniffed as GeoJSON
+// (mirroring geomValue's blob-vs-GeoJSON rules). Those bytes are stored in
+// the content table verbatim instead of being re-serialized.
+static int tg0_value_is_wkb(sqlite3_value *value) {
+  return sqlite3_value_type(value) == SQLITE_BLOB &&
+         sqlite3_value_subtype(value) != JSON_SUBTYPE &&
+         !(sqlite3_value_bytes(value) > 0 &&
+           ((const char *)sqlite3_value_blob(value))[0] == '{');
+}
+
+// Parses and validates a value being written to geometry column iGeom: NULL
+// is rejected (geometry columns are NOT NULL), the value must parse through
+// geomValue(), and narrowed columns must match their declared type exactly.
+// On success *out_geom is an owned tg_geom the caller must tg_geom_free().
+// On failure the vtab error is set and SQLITE_CONSTRAINT (NULL value / type
+// mismatch) or SQLITE_ERROR (unparseable input) is returned.
+static int tg0_validate_geometry_value(tg0_vtab *p, int iGeom,
+                                       sqlite3_value *value,
+                                       struct tg_geom **out_geom) {
+  struct tg0_geometry_column *column = &p->geometry_columns[iGeom];
+  struct tg_geom *geom = NULL;
+  char *errmsg = NULL;
+
+  if (sqlite3_value_type(value) == SQLITE_NULL &&
+      sqlite3_value_pointer(value, TG_GEOM_POINTER_NAME) == NULL) {
+    tg_vtab_set_error(&p->base, "%s.%s: geometry columns cannot be NULL",
+                      p->tableName, column->name);
+    return SQLITE_CONSTRAINT;
+  }
+  if (geomValue(value, &geom, &errmsg) != SQLITE_OK) {
+    tg_vtab_set_error(&p->base, "%s.%s: %s", p->tableName, column->name,
+                      errmsg);
+    sqlite3_free(errmsg);
+    return SQLITE_ERROR;
+  }
+  if (column->geomType != 0 && (int)tg_geom_typeof(geom) != column->geomType) {
+    tg_vtab_set_error(&p->base, "%s.%s: expected a %s, received a %s",
+                      p->tableName, column->name,
+                      tg_geom_type_string(column->geomType),
+                      tg_geom_type_string(tg_geom_typeof(geom)));
+    tg_geom_free(geom);
+    return SQLITE_CONSTRAINT;
+  }
+  *out_geom = geom;
+  return SQLITE_OK;
+}
+
+// Validates a value being written to data column iData against its declared
+// type. NULL is always allowed, and integers are accepted into float columns
+// (the affinity behavior SQLite users expect from an ordinary REAL column);
+// everything else must match exactly.
+static int tg0_validate_data_value(tg0_vtab *p, int iData,
+                                   sqlite3_value *value) {
+  struct tg0_data_column *column = &p->data_columns[iData];
+  int type = sqlite3_value_type(value);
+  if (type == SQLITE_NULL || type == column->type ||
+      (column->type == SQLITE_FLOAT && type == SQLITE_INTEGER)) {
+    return SQLITE_OK;
+  }
+  tg_vtab_set_error(&p->base, "%s.%s: expected %s value, received %s",
+                    p->tableName, column->name,
+                    tg0_sqlite_type_keyword(column->type),
+                    tg0_sqlite_type_keyword(type));
+  return SQLITE_CONSTRAINT;
+}
+
+// Binds a value being written to data column iData. Integers going into
+// float columns are bound as doubles so the stored type matches the declared
+// column type; everything else binds verbatim.
+static int tg0_bind_data_value(sqlite3_stmt *stmt, int iParam,
+                               struct tg0_data_column *column,
+                               sqlite3_value *value) {
+  if (column->type == SQLITE_FLOAT &&
+      sqlite3_value_type(value) == SQLITE_INTEGER) {
+    return sqlite3_bind_double(stmt, iParam, sqlite3_value_double(value));
+  }
+  return sqlite3_bind_value(stmt, iParam, value);
+}
+
+// Binds a geometry column's content blob: the input value's bytes verbatim
+// when the input already is WKB, a fresh tg_geom_wkb serialization of geom
+// otherwise.
+static int tg0_bind_geometry_wkb(sqlite3_stmt *stmt, int iParam,
+                                 sqlite3_value *value, struct tg_geom *geom) {
+  if (tg0_value_is_wkb(value)) {
+    return sqlite3_bind_value(stmt, iParam, value);
+  }
+  size_t size = tg_geom_wkb(geom, NULL, 0);
+  uint8_t *buffer = sqlite3_malloc64(size + 1);
+  if (!buffer) {
+    return SQLITE_NOMEM;
+  }
+  tg_geom_wkb(geom, buffer, size + 1);
+  return sqlite3_bind_blob64(stmt, iParam, buffer, size, sqlite3_free);
+}
+
+// Prepares an sqlite3_mprintf'd statement against a shadow table, freeing
+// zSql. A NULL zSql (OOM upstream) returns SQLITE_NOMEM; prepare failures
+// set the vtab error (including sqlite3_errmsg) and return SQLITE_ERROR.
+static int tg0_write_prepare(tg0_vtab *p, char *zSql, sqlite3_stmt **out_stmt,
+                             const char *zWhat) {
+  int rc;
+  *out_stmt = NULL;
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, out_stmt, NULL);
+  sqlite3_free(zSql);
+  if (rc != SQLITE_OK) {
+    tg_vtab_set_error(&p->base, "%s: %s", zWhat, sqlite3_errmsg(p->db));
+    return SQLITE_ERROR;
+  }
+  return SQLITE_OK;
+}
+
+// Steps a fully-bound shadow-table DML statement to completion and finalizes
+// it. Failures set the vtab error (including sqlite3_errmsg) and return the
+// step's result code, so constraint violations (like a duplicate rowid or
+// text id) propagate as SQLITE_CONSTRAINT.
+static int tg0_write_step(tg0_vtab *p, sqlite3_stmt *stmt, const char *zWhat) {
+  int rc = sqlite3_step(stmt);
+  if (rc == SQLITE_DONE) {
+    sqlite3_finalize(stmt);
+    return SQLITE_OK;
+  }
+  tg_vtab_set_error(&p->base, "%s: %s", zWhat, sqlite3_errmsg(p->db));
+  sqlite3_finalize(stmt);
+  return rc == SQLITE_ROW ? SQLITE_ERROR : rc;
+}
+
+// Resolves the argv[0] rowid/primary-key value of a DELETE or UPDATE to the
+// int64 rowid the shadow tables are keyed by. Text primary keys go through
+// the t_rowids mapping table; everything else is the value itself.
+static int tg0_resolve_rowid(tg0_vtab *p, sqlite3_value *idValue,
+                             sqlite3_int64 *out_rowid) {
+  if (p->pkColumnType != SQLITE_TEXT) {
+    *out_rowid = sqlite3_value_int64(idValue);
+    return SQLITE_OK;
+  }
+  sqlite3_stmt *stmt;
+  int rc = tg0_write_prepare(
+      p,
+      sqlite3_mprintf("SELECT rowid FROM " TG0_SHADOW_ROWIDS_NAME
+                      " WHERE id = ?1",
+                      p->schemaName, p->tableName),
+      &stmt, "Error preparing tg0 rowids lookup");
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  rc = sqlite3_bind_value(stmt, 1, idValue);
+  if (rc != SQLITE_OK) {
+    tg_vtab_set_error(&p->base, "Error binding tg0 rowids lookup: %s",
+                      sqlite3_errmsg(p->db));
+    sqlite3_finalize(stmt);
+    return rc;
+  }
+  rc = sqlite3_step(stmt);
+  if (rc == SQLITE_ROW) {
+    *out_rowid = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return SQLITE_OK;
+  }
+  if (rc == SQLITE_DONE) {
+    // clean scan, no mapping row: the primary key does not exist
+    tg_vtab_set_error(&p->base, "Could not find a tg0 row with primary key %Q",
+                      (const char *)sqlite3_value_text(idValue));
+    sqlite3_finalize(stmt);
+    return SQLITE_ERROR;
+  }
+  tg_vtab_set_error(&p->base, "Error looking up tg0 primary key: %s",
+                    sqlite3_errmsg(p->db));
+  sqlite3_finalize(stmt);
+  return rc;
+}
+
+// The hidden distance column (reserved for KNN) is read-only: only NULL or
+// an unchanged value may be written to it.
+static int tg0_check_distance_write(tg0_vtab *p, sqlite3_value *value) {
+  if (sqlite3_value_nochange(value) ||
+      sqlite3_value_type(value) == SQLITE_NULL) {
+    return SQLITE_OK;
+  }
+  tg_vtab_set_error(&p->base,
+                    "%s.distance: the distance column is reserved and cannot "
+                    "be written to",
+                    p->tableName);
+  return SQLITE_ERROR;
+}
+
+// 1 when a and b hold different values under sqlite3_value semantics — used
+// to detect rowid/primary-key changes (argv[0] vs argv[1] of an UPDATE).
+static int tg0_value_changed(sqlite3_value *a, sqlite3_value *b) {
+  int typeA = sqlite3_value_type(a);
+  int typeB = sqlite3_value_type(b);
+  if (typeA != typeB) {
+    return 1;
+  }
+  if (typeA == SQLITE_INTEGER) {
+    return sqlite3_value_int64(a) != sqlite3_value_int64(b);
+  }
+  if (typeA == SQLITE_FLOAT) {
+    return sqlite3_value_double(a) != sqlite3_value_double(b);
+  }
+  if (typeA == SQLITE_TEXT || typeA == SQLITE_BLOB) {
+    const void *dataA = typeA == SQLITE_TEXT
+                            ? (const void *)sqlite3_value_text(a)
+                            : sqlite3_value_blob(a);
+    const void *dataB = typeB == SQLITE_TEXT
+                            ? (const void *)sqlite3_value_text(b)
+                            : sqlite3_value_blob(b);
+    int nA = sqlite3_value_bytes(a);
+    int nB = sqlite3_value_bytes(b);
+    return nA != nB || memcmp(dataA, dataB, nA) != 0;
+  }
+  return 0;
+}
+
+// INSERT: validate every column value, resolve the new rowid (t_rowids
+// assigns one for text primary keys; otherwise argv[1] or content-table
+// autoassign), then write content + one rtree row per geometry column.
+static int tg0_write_insert(tg0_vtab *p, int argc, sqlite3_value **argv,
+                            sqlite_int64 *pRowid) {
+  struct tg_geom *geoms[TG0_MAX_GEOMETRY_COLUMNS] = {NULL};
+  sqlite3_stmt *stmt = NULL;
+  sqlite3_int64 rowid = 0;
+  int hasRowid = 0;
+  int pkOffset = tg0_pk_column_offset(p);
+  int rc;
+
+  rc = tg0_check_distance_write(p, argv[2 + tg0_column_distance_idx(p)]);
+  if (rc != SQLITE_OK) {
+    return rc;
   }
 
-  return SQLITE_OK;
+  // validate every geometry and data value before the first shadow write,
+  // so these constraint failures leave no partial rows behind
+  for (int i = 0; i < tg0_num_user_columns(p); i++) {
+    sqlite3_value *value = argv[2 + pkOffset + i];
+    int idx = p->user_column_idxs[i];
+    if (p->user_column_kinds[i] == TG0_USER_COLUMN_KIND_GEOMETRY) {
+      rc = tg0_validate_geometry_value(p, idx, value, &geoms[idx]);
+    } else {
+      rc = tg0_validate_data_value(p, idx, value);
+    }
+    if (rc != SQLITE_OK) {
+      goto done;
+    }
+  }
+
+  // resolve the new row's rowid. SQLite does not treat a declared primary
+  // key as a rowid alias for virtual tables: the pk value arrives in the pk
+  // column's own slot (argv[2] — the pk is always declared column 0), and
+  // argv[1] only carries an explicit `rowid` on rowid tables.
+  if (p->pkColumnType == SQLITE_TEXT) {
+    // the declared primary key is the text id; t_rowids assigns the int64
+    // rowid that the content table and rtrees are keyed by
+    sqlite3_value *idValue = argv[2];
+    if (sqlite3_value_type(idValue) != SQLITE_TEXT) {
+      if (sqlite3_value_type(idValue) == SQLITE_NULL) {
+        tg_vtab_set_error(&p->base, "%s.%s: primary key cannot be NULL",
+                          p->tableName, p->pkColumnName);
+      } else {
+        tg_vtab_set_error(
+            &p->base, "%s.%s: expected text primary key, received %s",
+            p->tableName, p->pkColumnName,
+            tg0_sqlite_type_keyword(sqlite3_value_type(idValue)));
+      }
+      rc = SQLITE_CONSTRAINT;
+      goto done;
+    }
+    rc = tg0_write_prepare(p,
+                           sqlite3_mprintf("INSERT INTO " TG0_SHADOW_ROWIDS_NAME
+                                           "(id) VALUES (?1)",
+                                           p->schemaName, p->tableName),
+                           &stmt, "Error preparing tg0 rowids insert");
+    if (rc != SQLITE_OK) {
+      goto done;
+    }
+    rc = sqlite3_bind_value(stmt, 1, idValue);
+    if (rc != SQLITE_OK) {
+      tg_vtab_set_error(&p->base, "Error binding tg0 rowids insert: %s",
+                        sqlite3_errmsg(p->db));
+      goto done;
+    }
+    // a duplicate id surfaces here as the id column's UNIQUE violation
+    rc = tg0_write_step(p, stmt, "Error inserting tg0 primary key");
+    stmt = NULL;
+    if (rc != SQLITE_OK) {
+      goto done;
+    }
+    rowid = sqlite3_last_insert_rowid(p->db);
+    hasRowid = 1;
+  } else {
+    sqlite3_value *rowidValue = argv[1];
+    if (p->pkColumnType == SQLITE_INTEGER &&
+        sqlite3_value_type(argv[2]) != SQLITE_NULL) {
+      rowidValue = argv[2];
+    }
+    if (sqlite3_value_type(rowidValue) == SQLITE_INTEGER) {
+      rowid = sqlite3_value_int64(rowidValue);
+      hasRowid = 1;
+    } else if (sqlite3_value_type(rowidValue) != SQLITE_NULL) {
+      tg_vtab_set_error(&p->base, "%s: rowid values must be integers",
+                        p->tableName);
+      rc = SQLITE_MISMATCH;
+      goto done;
+    }
+  }
+
+  // content row: rowid (NULL autoassigns) + geometry WKB + data values
+  sqlite3_str *str = sqlite3_str_new(NULL);
+  sqlite3_str_appendf(str, "INSERT INTO " TG0_SHADOW_CONTENT_NAME "(rowid",
+                      p->schemaName, p->tableName);
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    sqlite3_str_appendf(str, ", geom%02d", i);
+  }
+  for (int i = 0; i < p->numDataColumns; i++) {
+    sqlite3_str_appendf(str, ", data%02d", i);
+  }
+  sqlite3_str_appendall(str, ") VALUES (?");
+  for (int i = 0; i < tg0_num_user_columns(p); i++) {
+    sqlite3_str_appendall(str, ", ?");
+  }
+  sqlite3_str_appendall(str, ")");
+  rc = tg0_write_prepare(p, sqlite3_str_finish(str), &stmt,
+                         "Error preparing tg0 content insert");
+  if (rc != SQLITE_OK) {
+    goto done;
+  }
+  rc = hasRowid ? sqlite3_bind_int64(stmt, 1, rowid)
+                : sqlite3_bind_null(stmt, 1);
+  for (int i = 0; i < tg0_num_user_columns(p) && rc == SQLITE_OK; i++) {
+    sqlite3_value *value = argv[2 + pkOffset + i];
+    int idx = p->user_column_idxs[i];
+    if (p->user_column_kinds[i] == TG0_USER_COLUMN_KIND_GEOMETRY) {
+      rc = tg0_bind_geometry_wkb(stmt, 2 + idx, value, geoms[idx]);
+    } else {
+      rc = tg0_bind_data_value(stmt, 2 + p->numGeometryColumns + idx,
+                               &p->data_columns[idx], value);
+    }
+  }
+  if (rc != SQLITE_OK) {
+    tg_vtab_set_error(&p->base, "Error binding tg0 content insert: %s",
+                      sqlite3_errmsg(p->db));
+    goto done;
+  }
+  rc = tg0_write_step(p, stmt, "Error inserting tg0 content row");
+  stmt = NULL;
+  if (rc != SQLITE_OK) {
+    goto done;
+  }
+  if (!hasRowid) {
+    rowid = sqlite3_last_insert_rowid(p->db);
+  }
+
+  // one bbox row per geometry column's rtree
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    struct tg_rect rect = tg_geom_rect(geoms[i]);
+    rc = tg0_write_prepare(
+        p,
+        sqlite3_mprintf("INSERT INTO " TG0_SHADOW_RTREE_NAME
+                        "(id, minX, maxX, minY, maxY)"
+                        " VALUES (?1, ?2, ?3, ?4, ?5)",
+                        p->schemaName, p->tableName, i),
+        &stmt, "Error preparing tg0 rtree insert");
+    if (rc != SQLITE_OK) {
+      goto done;
+    }
+    sqlite3_bind_int64(stmt, 1, rowid);
+    sqlite3_bind_double(stmt, 2, rect.min.x);
+    sqlite3_bind_double(stmt, 3, rect.max.x);
+    sqlite3_bind_double(stmt, 4, rect.min.y);
+    sqlite3_bind_double(stmt, 5, rect.max.y);
+    rc = tg0_write_step(p, stmt, "Error inserting tg0 rtree row");
+    stmt = NULL;
+    if (rc != SQLITE_OK) {
+      goto done;
+    }
+  }
+  *pRowid = rowid;
+
+done:
+  sqlite3_finalize(stmt);
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    tg_geom_free(geoms[i]);
+  }
+  return rc;
+}
+
+// DELETE: remove the content row, every rtree entry, and the rowids mapping
+// row on text-primary-key tables. Every step failure propagates.
+static int tg0_write_delete(tg0_vtab *p, sqlite3_value *idValue) {
+  sqlite3_stmt *stmt;
+  sqlite3_int64 rowid;
+  int rc = tg0_resolve_rowid(p, idValue, &rowid);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  rc = tg0_write_prepare(p,
+                         sqlite3_mprintf("DELETE FROM " TG0_SHADOW_CONTENT_NAME
+                                         " WHERE rowid = ?1",
+                                         p->schemaName, p->tableName),
+                         &stmt, "Error preparing tg0 content delete");
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  sqlite3_bind_int64(stmt, 1, rowid);
+  rc = tg0_write_step(p, stmt, "Error deleting tg0 content row");
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    rc = tg0_write_prepare(p,
+                           sqlite3_mprintf("DELETE FROM " TG0_SHADOW_RTREE_NAME
+                                           " WHERE id = ?1",
+                                           p->schemaName, p->tableName, i),
+                           &stmt, "Error preparing tg0 rtree delete");
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    sqlite3_bind_int64(stmt, 1, rowid);
+    rc = tg0_write_step(p, stmt, "Error deleting tg0 rtree row");
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+  }
+  if (p->pkColumnType == SQLITE_TEXT) {
+    rc = tg0_write_prepare(p,
+                           sqlite3_mprintf("DELETE FROM " TG0_SHADOW_ROWIDS_NAME
+                                           " WHERE rowid = ?1",
+                                           p->schemaName, p->tableName),
+                           &stmt, "Error preparing tg0 rowids delete");
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    sqlite3_bind_int64(stmt, 1, rowid);
+    rc = tg0_write_step(p, stmt, "Error deleting tg0 rowids row");
+  }
+  return rc;
+}
+
+// UPDATE: sqlite3_value_nochange()-aware — unchanged columns are skipped
+// entirely, changed geometry columns get INSERT-grade validation plus an
+// rtree bbox update, and data-only updates leave every rtree untouched.
+// Changing the rowid/primary key itself is not supported.
+static int tg0_write_update(tg0_vtab *p, int argc, sqlite3_value **argv) {
+  struct tg_geom *geoms[TG0_MAX_GEOMETRY_COLUMNS] = {NULL};
+  sqlite3_value *geomInputs[TG0_MAX_GEOMETRY_COLUMNS] = {NULL};
+  sqlite3_value *dataValues[TG0_MAX_DATA_COLUMNS] = {NULL};
+  sqlite3_stmt *stmt = NULL;
+  sqlite3_int64 rowid;
+  int pkOffset = tg0_pk_column_offset(p);
+  int nChanged = 0;
+  int iParam;
+  int rc;
+
+  // argv[0] vs argv[1] catches rowid changes and text primary key changes
+  // (argv[1] is the new pk on WITHOUT ROWID tables). Integer primary keys
+  // are not rowid-aliased by SQLite for virtual tables, so a `SET id = ...`
+  // arrives in the pk column's own slot (argv[2]) instead.
+  if ((!sqlite3_value_nochange(argv[1]) &&
+       tg0_value_changed(argv[0], argv[1])) ||
+      (p->pkColumnType == SQLITE_INTEGER &&
+       !sqlite3_value_nochange(argv[2]) &&
+       tg0_value_changed(argv[0], argv[2]))) {
+    tg_vtab_set_error(&p->base,
+                      "changing the primary key of a tg0 row is not supported");
+    return SQLITE_ERROR;
+  }
+  rc = tg0_check_distance_write(p, argv[2 + tg0_column_distance_idx(p)]);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+  rc = tg0_resolve_rowid(p, argv[0], &rowid);
+  if (rc != SQLITE_OK) {
+    return rc;
+  }
+
+  // validate every changed value before the first shadow write. A changed
+  // geometry column is marked by its non-NULL geoms[] entry, a changed data
+  // column by its non-NULL dataValues[] entry (NULL SQL values still change
+  // a data column, so track the sqlite3_value itself).
+  int dataChanged[TG0_MAX_DATA_COLUMNS] = {0};
+  for (int i = 0; i < tg0_num_user_columns(p); i++) {
+    sqlite3_value *value = argv[2 + pkOffset + i];
+    int idx = p->user_column_idxs[i];
+    if (sqlite3_value_nochange(value)) {
+      continue;
+    }
+    if (p->user_column_kinds[i] == TG0_USER_COLUMN_KIND_GEOMETRY) {
+      rc = tg0_validate_geometry_value(p, idx, value, &geoms[idx]);
+      geomInputs[idx] = value;
+    } else {
+      rc = tg0_validate_data_value(p, idx, value);
+      dataValues[idx] = value;
+      dataChanged[idx] = 1;
+    }
+    if (rc != SQLITE_OK) {
+      goto done;
+    }
+    nChanged++;
+  }
+  if (nChanged == 0) {
+    rc = SQLITE_OK;
+    goto done;
+  }
+
+  // one UPDATE for all changed content columns
+  sqlite3_str *str = sqlite3_str_new(NULL);
+  sqlite3_str_appendf(str, "UPDATE " TG0_SHADOW_CONTENT_NAME " SET ",
+                      p->schemaName, p->tableName);
+  iParam = 1;
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    if (geoms[i]) {
+      sqlite3_str_appendf(str, "%sgeom%02d = ?%d", iParam > 1 ? ", " : "", i,
+                          iParam);
+      iParam++;
+    }
+  }
+  for (int i = 0; i < p->numDataColumns; i++) {
+    if (dataChanged[i]) {
+      sqlite3_str_appendf(str, "%sdata%02d = ?%d", iParam > 1 ? ", " : "", i,
+                          iParam);
+      iParam++;
+    }
+  }
+  sqlite3_str_appendf(str, " WHERE rowid = ?%d", iParam);
+  rc = tg0_write_prepare(p, sqlite3_str_finish(str), &stmt,
+                         "Error preparing tg0 content update");
+  if (rc != SQLITE_OK) {
+    goto done;
+  }
+  iParam = 1;
+  rc = SQLITE_OK;
+  for (int i = 0; i < p->numGeometryColumns && rc == SQLITE_OK; i++) {
+    if (geoms[i]) {
+      rc = tg0_bind_geometry_wkb(stmt, iParam++, geomInputs[i], geoms[i]);
+    }
+  }
+  for (int i = 0; i < p->numDataColumns && rc == SQLITE_OK; i++) {
+    if (dataChanged[i]) {
+      rc = tg0_bind_data_value(stmt, iParam++, &p->data_columns[i],
+                               dataValues[i]);
+    }
+  }
+  if (rc == SQLITE_OK) {
+    rc = sqlite3_bind_int64(stmt, iParam, rowid);
+  }
+  if (rc != SQLITE_OK) {
+    tg_vtab_set_error(&p->base, "Error binding tg0 content update: %s",
+                      sqlite3_errmsg(p->db));
+    goto done;
+  }
+  rc = tg0_write_step(p, stmt, "Error updating tg0 content row");
+  stmt = NULL;
+  if (rc != SQLITE_OK) {
+    goto done;
+  }
+
+  // move each changed geometry column's rtree bbox
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    if (!geoms[i]) {
+      continue;
+    }
+    struct tg_rect rect = tg_geom_rect(geoms[i]);
+    rc = tg0_write_prepare(
+        p,
+        sqlite3_mprintf("UPDATE " TG0_SHADOW_RTREE_NAME
+                        " SET minX = ?2, maxX = ?3, minY = ?4, maxY = ?5"
+                        " WHERE id = ?1",
+                        p->schemaName, p->tableName, i),
+        &stmt, "Error preparing tg0 rtree update");
+    if (rc != SQLITE_OK) {
+      goto done;
+    }
+    sqlite3_bind_int64(stmt, 1, rowid);
+    sqlite3_bind_double(stmt, 2, rect.min.x);
+    sqlite3_bind_double(stmt, 3, rect.max.x);
+    sqlite3_bind_double(stmt, 4, rect.min.y);
+    sqlite3_bind_double(stmt, 5, rect.max.y);
+    rc = tg0_write_step(p, stmt, "Error updating tg0 rtree row");
+    stmt = NULL;
+    if (rc != SQLITE_OK) {
+      goto done;
+    }
+  }
+
+done:
+  sqlite3_finalize(stmt);
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    tg_geom_free(geoms[i]);
+  }
+  return rc;
 }
 
 static int tg0Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
                      sqlite_int64 *pRowid) {
-
   tg0_vtab *p = (tg0_vtab *)pVTab;
-  // DELETE operation
-  if (argc == 1 && sqlite3_value_type(argv[0]) != SQLITE_NULL) {
-    sqlite3_int64 idToDelete = sqlite3_value_int64(argv[0]);
-    sqlite3_stmt *stmt;
-    sqlite3_free(pVTab->zErrMsg);
-    pVTab->zErrMsg = NULL;
-    char *zSql = sqlite3_mprintf(TG0_SQL_DELETE, p->schemaName, p->tableName);
-    int rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
-    sqlite3_free(zSql);
-    if (rc != SQLITE_OK) {
-      sqlite3_free(pVTab->zErrMsg);
-      pVTab->zErrMsg = sqlite3_mprintf("error preparing delete statement:  %s",
-                                       sqlite3_errmsg(p->db));
-      return SQLITE_ERROR;
-    }
-    sqlite3_bind_int64(stmt, 1, idToDelete);
-    rc = sqlite3_step(stmt);
-    if (rc != SQLITE_DONE) {
-      sqlite3_free(pVTab->zErrMsg);
-      pVTab->zErrMsg = sqlite3_mprintf("error deleting rtree row: %s",
-                                       sqlite3_errmsg(p->db));
-    }
-    sqlite3_finalize(stmt);
-    return SQLITE_OK;
+  if (argc == 1) {
+    return tg0_write_delete(p, argv[0]);
   }
-  // INSERT operations
-  else if (argc > 1 && sqlite3_value_type(argv[0]) == SQLITE_NULL) {
-    // TODO assert argc == 3
-
-    struct tg_geom *geom;
-    char * errmsg;
-    int rc = geomValue(argv[2 + TG0_COLUMN_SHAPE], &geom, &errmsg);
-    if (rc != SQLITE_OK) {
-      sqlite3_free(pVTab->zErrMsg);
-      pVTab->zErrMsg = sqlite3_mprintf("%s", errmsg);
-      sqlite3_free(errmsg);
-      return SQLITE_ERROR;
-    }
-    struct tg_rect rect = tg_geom_rect(geom);
-
-    sqlite3_stmt *stmt;
-    sqlite3_str *strInsert = sqlite3_str_new(NULL);
-    bool hasRowid = sqlite3_value_type(argv[1]) != SQLITE_NULL;
-    if (hasRowid) {
-      sqlite3_str_appendf(
-          strInsert,
-          "INSERT INTO \"%w\".\"%w_rtree\"(id, minX, maxX, minY, maxY, _shape",
-          p->schemaName, p->tableName);
-    } else {
-      sqlite3_str_appendf(
-          strInsert,
-          "INSERT INTO \"%w\".\"%w_rtree\"(minX, maxX, minY, maxY, _shape",
-          p->schemaName, p->tableName);
-    }
-    for (int i = 0; i < p->numAuxColumns; i++) {
-      sqlite3_str_appendf(strInsert, ", c%d", i + 1);
-    }
-    int paramStart;
-    if (hasRowid) {
-      paramStart = 1;
-    } else {
-      paramStart = 0;
-    }
-    if (hasRowid) {
-      sqlite3_str_appendall(strInsert, ") VALUES (?1, ?2, ?3, ?4, ?5, ?6");
-    } else {
-      sqlite3_str_appendall(strInsert, ") VALUES (?1, ?2, ?3, ?4, ?5");
-    }
-    for (int i = 0; i < p->numAuxColumns; i++) {
-      sqlite3_str_appendf(strInsert, ", ?%d", (6 + paramStart) + i);
-    }
-    sqlite3_str_appendall(strInsert, ")");
-
-    const char *zSql = sqlite3_str_finish(strInsert);
-    if (!zSql) {
-      // TODO what needs to be freed here
-      return SQLITE_NOMEM;
-    }
-    rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
-    sqlite3_free((void *)zSql);
-
-    if (rc != SQLITE_OK) {
-      sqlite3_free(pVTab->zErrMsg);
-      pVTab->zErrMsg = sqlite3_mprintf(
-          "tgoUpdate Error while preparing rtree insert statement:  %s",
-          sqlite3_errmsg(p->db));
-      tg_geom_free(geom);
-      return rc;
-    }
-
-    // WKB representation of the inserted geometry
-    // TODO see if the input is already WKB and just use that
-    size_t size = tg_geom_wkb(geom, 0, 0);
-    void *buffer = sqlite3_malloc(size + 1);
-    if (buffer == 0) {
-      tg_geom_free(geom);
-      return SQLITE_NOMEM;
-    }
-    tg_geom_wkb(geom, buffer, size + 1);
-
-    if (hasRowid) {
-      rc = sqlite3_bind_int64(stmt, paramStart, sqlite3_value_int64(argv[1]));
-    }
-    rc = sqlite3_bind_double(stmt, paramStart + 1, rect.min.x);
-    rc = sqlite3_bind_double(stmt, paramStart + 2, rect.max.x);
-    rc = sqlite3_bind_double(stmt, paramStart + 3, rect.min.y);
-    rc = sqlite3_bind_double(stmt, paramStart + 4, rect.max.y);
-    rc = sqlite3_bind_blob(stmt, paramStart + 5, buffer, size, sqlite3_free);
-    for (int i = 0; i < p->numAuxColumns; i++) {
-      rc = sqlite3_bind_value(stmt, paramStart + 6 + i,
-                              argv[2 + TG0_COLUMN_REST + i]);
-    }
-
-    rc = sqlite3_step(stmt);
-    if (rc != SQLITE_DONE) {
-      sqlite3_free(pVTab->zErrMsg);
-      pVTab->zErrMsg =
-          sqlite3_mprintf("stepping not done? %s", sqlite3_errmsg(p->db));
-      tg_geom_free(geom);
-      sqlite3_finalize(stmt);
-      return SQLITE_ERROR;
-    }
-    sqlite3_finalize(stmt);
-    tg_geom_free(geom);
-    return SQLITE_OK;
+  if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+    return tg0_write_insert(p, argc, argv, pRowid);
   }
-  // some sort of UPDATE operation
-  else {
-    sqlite3_free(pVTab->zErrMsg);
-    pVTab->zErrMsg =
-        sqlite3_mprintf("UPDATE operation on tg0 not supported yet.");
-    return SQLITE_ERROR;
-  }
+  return tg0_write_update(p, argc, argv);
 }
 
 static int tg0FindFunction(sqlite3_vtab *pVtab, int nArg, const char *zName,
@@ -3280,43 +5054,263 @@ static int tg0FindFunction(sqlite3_vtab *pVtab, int nArg, const char *zName,
   return 0;
 };
 
-static int tg0ShadowName(const char *zName) {
+// xRename: `ALTER TABLE ... RENAME TO zNew` renames every shadow table to
+// the new name's prefix — info, content, one rtree per geometry column, and
+// rowids for text-primary-key tables. Renaming each t_rtreeNN (an rtree
+// virtual table) triggers the rtree module's own xRename, which moves its
+// _node/_parent/_rowid shadow tables along with it. On failure the error is
+// reported on the vtab and SQLite rolls back the containing ALTER TABLE
+// statement, un-renaming whatever shadow tables already moved.
+static int tg0Rename(sqlite3_vtab *pVtab, const char *zNew) {
+  tg0_vtab *p = (tg0_vtab *)pVtab;
+  char *zErrMsg = NULL;
+  int rc;
 
-  static const char *azName[] = {"rtree", "rtree_node", "rtree_parent",
-                                 "rtree_rowid"};
-
-  for (int i = 0; i < sizeof(azName) / sizeof(azName[0]); i++) {
-    if (sqlite3_stricmp(zName, azName[i]) == 0)
-      return 1;
+  char *zNewName = sqlite3_mprintf("%s", zNew);
+  if (!zNewName) {
+    return SQLITE_NOMEM;
   }
-  return 0;
+
+  rc = tg0_shadow_sql(p->db,
+                      sqlite3_mprintf("ALTER TABLE " TG0_SHADOW_INFO_NAME
+                                      " RENAME TO \"%w_info\"",
+                                      p->schemaName, p->tableName, zNew),
+                      "Could not rename the tg0 info shadow table", &zErrMsg);
+  if (rc == SQLITE_OK) {
+    rc = tg0_shadow_sql(p->db,
+                        sqlite3_mprintf("ALTER TABLE " TG0_SHADOW_CONTENT_NAME
+                                        " RENAME TO \"%w_content\"",
+                                        p->schemaName, p->tableName, zNew),
+                        "Could not rename the tg0 content shadow table",
+                        &zErrMsg);
+  }
+  for (int i = 0; i < p->numGeometryColumns && rc == SQLITE_OK; i++) {
+    rc = tg0_shadow_sql(
+        p->db,
+        sqlite3_mprintf("ALTER TABLE " TG0_SHADOW_RTREE_NAME
+                        " RENAME TO \"%w_rtree%02d\"",
+                        p->schemaName, p->tableName, i, zNew, i),
+        "Could not rename a tg0 rtree shadow table", &zErrMsg);
+  }
+  if (rc == SQLITE_OK && p->pkColumnType == SQLITE_TEXT) {
+    rc = tg0_shadow_sql(p->db,
+                        sqlite3_mprintf("ALTER TABLE " TG0_SHADOW_ROWIDS_NAME
+                                        " RENAME TO \"%w_rowids\"",
+                                        p->schemaName, p->tableName, zNew),
+                        "Could not rename the tg0 rowids shadow table",
+                        &zErrMsg);
+  }
+  if (rc != SQLITE_OK) {
+    sqlite3_free(zNewName);
+    sqlite3_free(pVtab->zErrMsg);
+    pVtab->zErrMsg = zErrMsg;
+    return rc;
+  }
+  // xRename receives the new table name; the vtab keeps serving this
+  // connection after the ALTER, so its shadow SQL must use the new prefix.
+  // The schema name never changes on a rename.
+  sqlite3_free(p->tableName);
+  p->tableName = zNewName;
+  return SQLITE_OK;
 }
 
-static sqlite3_module tg0Module = {
-    /* iVersion      */ 3,
-    /* xCreate       */ tg0Create,
-    /* xConnect      */ tg0Connect,
-    /* xBestIndex    */ tg0BestIndex,
-    /* xDisconnect   */ tg0Disconnect,
-    /* xDestroy      */ tg0Destroy,
-    /* xOpen         */ tg0Open,
-    /* xClose        */ tg0Close,
-    /* xFilter       */ tg0Filter,
-    /* xNext         */ tg0Next,
-    /* xEof          */ tg0Eof,
-    /* xColumn       */ tg0Column,
-    /* xRowid        */ tg0Rowid,
-    /* xUpdate       */ tg0Update,
-    /* xBegin        */ 0,
-    /* xSync         */ 0,
-    /* xCommit       */ 0,
-    /* xRollback     */ 0,
-    /* xFindFunction */ tg0FindFunction,
-    /* xRename       */ 0, // TODO
-    /* xSavepoint    */ 0,
-    /* xRelease      */ 0,
-    /* xRollbackTo   */ 0,
-    /* xShadowName   */ tg0ShadowName};
+// Runs one integrity probe: zSql is an sqlite3_mprintf'd single-row
+// `SELECT count(*) ...`, freed here. On success *outCount is the count. A
+// NULL zSql or an OOM from SQLite is an internal malfunction (SQLITE_NOMEM);
+// any other prepare/step failure — a missing or malformed shadow table —
+// is itself an integrity problem, reported through *pzProblem with
+// SQLITE_OK, matching xIntegrity's only-malfunctions-error contract.
+static int tg0_integrity_probe(tg0_vtab *p, char *zSql, sqlite3_int64 *outCount,
+                               char **pzProblem) {
+  sqlite3_stmt *stmt = NULL;
+  int rc;
+  *outCount = 0;
+  if (!zSql) {
+    return SQLITE_NOMEM;
+  }
+  rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL);
+  if (rc == SQLITE_OK) {
+    rc = sqlite3_step(stmt);
+  }
+  if (rc == SQLITE_ROW) {
+    *outCount = sqlite3_column_int64(stmt, 0);
+    rc = SQLITE_OK;
+  } else if (rc == SQLITE_NOMEM) {
+    // fall through: internal malfunction
+  } else {
+    *pzProblem =
+        sqlite3_mprintf("tg0 table %s: integrity check query failed: %s",
+                        p->tableName, sqlite3_errmsg(p->db));
+    rc = *pzProblem ? SQLITE_OK : SQLITE_NOMEM;
+  }
+  sqlite3_finalize(stmt);
+  sqlite3_free(zSql);
+  return rc;
+}
+
+// xIntegrity (iVersion 4): PRAGMA integrity_check / quick_check hook.
+// Verifies the content↔rtree 1:1 invariant (decision 11: geometry columns
+// are NOT NULL, so every content row has exactly one entry in every rtree)
+// and, for text primary keys, the content↔rowids 1:1 mapping. The first
+// problem found is reported through *pzErr with SQLITE_OK — integrity_check
+// prints the message; only internal malfunctions return non-OK.
+static int tg0Integrity(sqlite3_vtab *pVtab, const char *zSchema,
+                        const char *zTabName, int mFlags, char **pzErr) {
+  tg0_vtab *p = (tg0_vtab *)pVtab;
+  sqlite3_int64 count;
+  int rc;
+  (void)zSchema;
+  (void)zTabName;
+  (void)mFlags;
+  *pzErr = NULL;
+
+  for (int i = 0; i < p->numGeometryColumns; i++) {
+    rc = tg0_integrity_probe(
+        p,
+        sqlite3_mprintf("SELECT count(*) FROM " TG0_SHADOW_CONTENT_NAME
+                        " AS c WHERE NOT EXISTS (SELECT 1 FROM "
+                        TG0_SHADOW_RTREE_NAME " AS i WHERE i.id = c.rowid)",
+                        p->schemaName, p->tableName, p->schemaName,
+                        p->tableName, i),
+        &count, pzErr);
+    if (rc != SQLITE_OK || *pzErr) {
+      return rc;
+    }
+    if (count > 0) {
+      *pzErr = sqlite3_mprintf(
+          "tg0 table %s: %lld content row(s) have no %s_rtree%02d entry "
+          "(geometry column \"%w\")",
+          p->tableName, count, p->tableName, i, p->geometry_columns[i].name);
+      return *pzErr ? SQLITE_OK : SQLITE_NOMEM;
+    }
+    rc = tg0_integrity_probe(
+        p,
+        sqlite3_mprintf("SELECT count(*) FROM " TG0_SHADOW_RTREE_NAME
+                        " AS i WHERE NOT EXISTS (SELECT 1 FROM "
+                        TG0_SHADOW_CONTENT_NAME " AS c WHERE c.rowid = i.id)",
+                        p->schemaName, p->tableName, i, p->schemaName,
+                        p->tableName),
+        &count, pzErr);
+    if (rc != SQLITE_OK || *pzErr) {
+      return rc;
+    }
+    if (count > 0) {
+      *pzErr = sqlite3_mprintf(
+          "tg0 table %s: %lld orphaned %s_rtree%02d entr%s with no content "
+          "row (geometry column \"%w\")",
+          p->tableName, count, p->tableName, i, count == 1 ? "y" : "ies",
+          p->geometry_columns[i].name);
+      return *pzErr ? SQLITE_OK : SQLITE_NOMEM;
+    }
+  }
+
+  if (p->pkColumnType == SQLITE_TEXT) {
+    rc = tg0_integrity_probe(
+        p,
+        sqlite3_mprintf("SELECT count(*) FROM " TG0_SHADOW_CONTENT_NAME
+                        " AS c WHERE NOT EXISTS (SELECT 1 FROM "
+                        TG0_SHADOW_ROWIDS_NAME " AS r WHERE r.rowid = c.rowid)",
+                        p->schemaName, p->tableName, p->schemaName,
+                        p->tableName),
+        &count, pzErr);
+    if (rc != SQLITE_OK || *pzErr) {
+      return rc;
+    }
+    if (count > 0) {
+      *pzErr = sqlite3_mprintf("tg0 table %s: %lld content row(s) have no "
+                               "%s_rowids primary key mapping",
+                               p->tableName, count, p->tableName);
+      return *pzErr ? SQLITE_OK : SQLITE_NOMEM;
+    }
+    rc = tg0_integrity_probe(
+        p,
+        sqlite3_mprintf("SELECT count(*) FROM " TG0_SHADOW_ROWIDS_NAME
+                        " AS r WHERE NOT EXISTS (SELECT 1 FROM "
+                        TG0_SHADOW_CONTENT_NAME " AS c WHERE c.rowid = r.rowid)",
+                        p->schemaName, p->tableName, p->schemaName,
+                        p->tableName),
+        &count, pzErr);
+    if (rc != SQLITE_OK || *pzErr) {
+      return rc;
+    }
+    if (count > 0) {
+      *pzErr = sqlite3_mprintf("tg0 table %s: %lld orphaned %s_rowids "
+                               "mapping row(s) with no content row",
+                               p->tableName, count, p->tableName);
+      return *pzErr ? SQLITE_OK : SQLITE_NOMEM;
+    }
+  }
+
+  return SQLITE_OK;
+}
+
+// Claims the tg0 shadow tables (info, content, rowids, rtreeNN) plus the
+// rtree module's own shadow tables underneath each bbox rtree (rtreeNN_node,
+// rtreeNN_parent, rtreeNN_rowid). zName is the suffix after the virtual
+// table's name; rtree names are matched by prefix + digits rather than a
+// fixed list so every possible NN is covered.
+static int tg0ShadowName(const char *zName) {
+  if (sqlite3_stricmp(zName, "info") == 0 ||
+      sqlite3_stricmp(zName, "content") == 0 ||
+      sqlite3_stricmp(zName, "rowids") == 0) {
+    return 1;
+  }
+  if (sqlite3_strnicmp(zName, "rtree", 5) != 0 || !tg0_is_digit(zName[5]) ||
+      !tg0_is_digit(zName[6])) {
+    return 0;
+  }
+  zName += 7;
+  return *zName == '\0' || sqlite3_stricmp(zName, "_node") == 0 ||
+         sqlite3_stricmp(zName, "_parent") == 0 ||
+         sqlite3_stricmp(zName, "_rowid") == 0;
+}
+
+// The sqlite3_module fields shared by both tg0Module declarations below.
+// iVersion 4 declares the xIntegrity method (PRAGMA integrity_check
+// support, SQLite 3.44+); older hosts never read past xShadowName.
+#define TG0_MODULE_BASE_FIELDS                                                 \
+    /* iVersion      */ 4,                                                     \
+    /* xCreate       */ tg0Create,                                             \
+    /* xConnect      */ tg0Connect,                                            \
+    /* xBestIndex    */ tg0BestIndex,                                          \
+    /* xDisconnect   */ tg0Disconnect,                                         \
+    /* xDestroy      */ tg0Destroy,                                            \
+    /* xOpen         */ tg0Open,                                               \
+    /* xClose        */ tg0Close,                                              \
+    /* xFilter       */ tg0Filter,                                             \
+    /* xNext         */ tg0Next,                                               \
+    /* xEof          */ tg0Eof,                                                \
+    /* xColumn       */ tg0Column,                                             \
+    /* xRowid        */ tg0Rowid,                                              \
+    /* xUpdate       */ tg0Update,                                             \
+    /* xBegin        */ 0,                                                     \
+    /* xSync         */ 0,                                                     \
+    /* xCommit       */ 0,                                                     \
+    /* xRollback     */ 0,                                                     \
+    /* xFindFunction */ tg0FindFunction,                                       \
+    /* xRename       */ tg0Rename,                                             \
+    /* xSavepoint    */ 0,                                                     \
+    /* xRelease      */ 0,                                                     \
+    /* xRollbackTo   */ 0,                                                     \
+    /* xShadowName   */ tg0ShadowName
+
+#if SQLITE_VERSION_NUMBER >= 3044000
+static sqlite3_module tg0Module = {TG0_MODULE_BASE_FIELDS,
+                                   /* xIntegrity    */ tg0Integrity};
+#else
+// this sqlite3.h predates the xIntegrity field (added in SQLite 3.44), so
+// lay the iVersion-4 module struct out manually: the layouts are identical
+// (xIntegrity sits directly after xShadowName), a 3.44+ host loading this
+// build reads xIntegrity at exactly this offset, and older hosts stop at
+// xShadowName.
+static struct {
+  sqlite3_module base;
+  int (*xIntegrity)(sqlite3_vtab *pVTab, const char *zSchema,
+                    const char *zTabName, int mFlags, char **pzErr);
+} tg0ModuleWithIntegrity = {{TG0_MODULE_BASE_FIELDS},
+                            /* xIntegrity    */ tg0Integrity};
+#define tg0Module (*(sqlite3_module *)&tg0ModuleWithIntegrity)
+#endif
 #pragma endregion
 
 #pragma region entrypoint

@@ -26,3 +26,5 @@ examples/*
 !examples/sqlite3
 
 sqlite-tg.h
+
+plans/

@@ -5,4 +5,4 @@
 
 select count(*)
 from tg_buildings
-where tg_intersects(_shape, :query);
+where tg_intersects(boundary, :query);

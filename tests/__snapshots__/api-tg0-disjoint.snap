@@ -1,0 +1,10 @@
+Source: ../api.sql
+select label from tg_demo1 where tg_disjoint(shape, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))');
+---
+{
+	 label: 'far_poly'
+}
+{
+	 label: 'out_point'
+}
+

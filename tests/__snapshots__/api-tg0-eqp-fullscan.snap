@@ -5,6 +5,6 @@ explain query plan select * from tg_demo1;
 	 id: 2
 	 parent: 0
 	 notused: 215
-	 detail: 'SCAN tg_demo1 VIRTUAL TABLE INDEX 0:fullscan'
+	 detail: 'SCAN tg_demo1 VIRTUAL TABLE INDEX 0:1'
 }
 

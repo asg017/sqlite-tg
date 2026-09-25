@@ -1,0 +1,8 @@
+Source: ../api.sql
+select id, label from tg_demo1 where id = 3;
+---
+{
+	 id: 3
+	 label: 'cross_line'
+}
+

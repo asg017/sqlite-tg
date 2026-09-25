@@ -1,0 +1,10 @@
+Source: ../api.sql
+select label from tg_demo1 where tg_covers(shape, 'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))');
+---
+{
+	 label: 'cover_poly'
+}
+{
+	 label: 'equal_poly'
+}
+
