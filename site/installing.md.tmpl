@@ -1,0 +1,139 @@
+
+:::tabs
+==  curl | sh
+
+```bash
+curl -L 'https://github.com/asg017/sqlite-tg/releases/latest/download/install.sh' | sh
+```
+
+==  Python
+
+<!--
+[![PyPI](https://img.shields.io/pypi/v/sqlite-tg.svg?color=blue&logo=python&logoColor=white)](https://pypi.org/project/sqlite-tg/)
+-->
+
+Install the official `sqlite-tg` PyPi package:
+
+```bash
+pip install sqlite-tg
+```
+
+Once installed, use in your Python code like so:
+
+```python
+import sqlite3
+import sqlite_tg
+
+db = sqlite3.connect(":memory:")
+db.enable_load_extension(True)
+sqlite_tg.load(db)
+db.enable_load_extension(False)
+
+tg_version, = db.execute("select tg_version()").fetchone()
+print(f"tg_version={tg_version}")
+```
+
+See the official [`sqlite-tg` PyPi package](https://pypi.org/project/sqlite-tg/) for more details.
+
+
+==  JavaScript 
+
+Install the official `sqlite-tg` package:
+
+```bash
+npm install sqlite-tg
+```
+
+Once installed, use in your Node.js code like so, with the [`better-sqlite3`](https://github.com/WiseLibs/better-sqlite3) library:
+
+```js
+import * as sqliteTg from "sqlite-tg";
+import Database from "better-sqlite3";
+
+const db = new Database(":memory:");
+sqliteTg.load(db);
+
+const { tg_version } = db
+  .prepare("select tg_version() as tg_version")
+  .get();
+
+console.log(`tg_version=${tg_version}`);
+```
+
+See the official [`sqlite-tg` NPM package](https://www.npmjs.com/package/sqlite-tg) for more details.
+
+==  Bun
+```bash
+bun install sqlite-tg
+```
+
+```ts
+import { Database } from "bun:sqlite";
+import * as sqliteTg from "sqlite-tg";
+
+const db = new Database(":memory:");
+sqliteTg.load(db);
+
+const { tg_version } = db
+  .prepare("select tg_version() as tg_version",)
+  .get();
+
+console.log(tg_version);
+```
+
+==  Deno
+```bash
+deno add npm:sqlite-tg
+```
+
+```ts
+// sqlite-tg with Deno
+import { Database } from "jsr:@db/sqlite@0.11";
+import * as sqliteTg from "npm:sqlite-tg@latest";
+
+const db = new Database(":memory:");
+db.enableLoadExtension = true;
+sqliteTg.load(db);
+db.enableLoadExtension = false;
+
+const [tgVersion] = db
+  .prepare("select tg_version()")
+  .value<[string]>();
+
+console.log(tgVersion);
+```
+
+==  Ruby
+```bash
+gem install sqlite-tg
+```
+
+==  Rust
+```bash
+cargo add sqlite-tg
+```
+
+==  Datasette
+```bash
+datasette install datasette-sqlite-tg
+```
+
+Or with [uv](https://github.com/astral-sh/uv):
+
+```bash
+uvx --with datasette-sqlite-tg datasette
+```
+
+==  sqlite-utils
+```bash
+sqlite-utils install sqlite-utils-sqlite-tg
+```
+
+Or with [uv](https://github.com/astral-sh/uv):
+
+```bash
+uvx --with sqlite-utils-sqlite-tg sqlite-utils
+```
+
+
+:::

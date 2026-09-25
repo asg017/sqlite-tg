@@ -1,0 +1,5 @@
+.vitepress/cache
+.vitepress/dist
+node_modules
+public/playground/sqlite3.mjs
+public/playground/sqlite3.wasm
