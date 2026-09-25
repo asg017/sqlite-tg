@@ -1,0 +1,482 @@
+{
+ "rows": 2024512,
+ "systems": {
+  "balltree-haversine": {
+   "knn": {
+    "1": {
+     "kth_dist_rel_err": 1.5538475159522993e-10,
+     "max_ms": 0.2098330296576023,
+     "mean_ms": 0.08203628589399159,
+     "median_ms": 0.08029153104871511,
+     "order_match": 1.0,
+     "p95_ms": 0.15249787247739732,
+     "set_match": 1.0
+    },
+    "10": {
+     "kth_dist_rel_err": 5.780704363954139e-11,
+     "max_ms": 0.23870798759162426,
+     "mean_ms": 0.09479667758569121,
+     "median_ms": 0.09008351480588317,
+     "order_match": 1.0,
+     "p95_ms": 0.17198156565427777,
+     "set_match": 1.0
+    },
+    "100": {
+     "kth_dist_rel_err": 5.042294351088458e-12,
+     "max_ms": 1.5829999465495348,
+     "mean_ms": 0.24937380105257034,
+     "median_ms": 0.2382500097155571,
+     "order_match": 1.0,
+     "p95_ms": 0.4231024126056582,
+     "set_match": 1.0
+    },
+    "1000": {
+     "kth_dist_rel_err": 1.7632813997681339e-12,
+     "max_ms": 2.310624928213656,
+     "mean_ms": 1.0723937407601625,
+     "median_ms": 1.0655000223778188,
+     "order_match": 1.0,
+     "p95_ms": 1.8179043952841312,
+     "set_match": 1.0
+    }
+   },
+   "open_s": 1.2662199169863015
+  },
+  "brute-numpy": {
+   "knn": {
+    "1": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 42.782583041116595,
+     "mean_ms": 34.22274372540414,
+     "median_ms": 33.4431670489721,
+     "order_match": 1.0,
+     "p95_ms": 39.0921785205137,
+     "set_match": 1.0
+    },
+    "10": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 54.81262505054474,
+     "mean_ms": 43.82405126001686,
+     "median_ms": 44.79822947178036,
+     "order_match": 1.0,
+     "p95_ms": 51.31225978839211,
+     "set_match": 1.0
+    },
+    "100": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 53.04229201283306,
+     "mean_ms": 43.781082989880815,
+     "median_ms": 44.91508303908631,
+     "order_match": 1.0,
+     "p95_ms": 50.197046069661155,
+     "set_match": 1.0
+    },
+    "1000": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 53.463792079128325,
+     "mean_ms": 44.21273208572529,
+     "median_ms": 45.32037500757724,
+     "order_match": 1.0,
+     "p95_ms": 50.1959711604286,
+     "set_match": 1.0
+    }
+   },
+   "open_s": 0.1920029999455437,
+   "radius": {
+    "avg_rows": 2117.83,
+    "median_ms": 31.282707990612835,
+    "meters": 2000.0,
+    "p95_ms": 33.39037534315139,
+    "set_match": 1.0
+   }
+  },
+  "duckdb": {
+   "build_s": 1.002098708995618,
+   "doc": "DuckDB spatial, no index: ORDER BY ST_Distance_Sphere LIMIT k \u2014 a\nvectorized brute-force top-k over every row.",
+   "knn": {
+    "1": {
+     "kth_dist_rel_err": 1.3813900131102258e-06,
+     "max_ms": 21.34495903737843,
+     "mean_ms": 19.99121246044524,
+     "median_ms": 19.8702709749341,
+     "order_match": 1.0,
+     "p95_ms": 20.50153129384853,
+     "set_match": 1.0
+    },
+    "10": {
+     "kth_dist_rel_err": 1.3813349337044017e-06,
+     "max_ms": 27.91070903185755,
+     "mean_ms": 21.189850476803258,
+     "median_ms": 20.838083524722606,
+     "order_match": 1.0,
+     "p95_ms": 22.743550001177933,
+     "set_match": 1.0
+    },
+    "100": {
+     "kth_dist_rel_err": 1.3812633671152863e-06,
+     "max_ms": 21.017667022533715,
+     "mean_ms": 19.7738487215247,
+     "median_ms": 19.68522951938212,
+     "order_match": 1.0,
+     "p95_ms": 20.315531245432794,
+     "set_match": 1.0
+    },
+    "1000": {
+     "kth_dist_rel_err": 1.381258684300796e-06,
+     "max_ms": 28.60870899166912,
+     "mean_ms": 20.698200833285227,
+     "median_ms": 20.371520949993283,
+     "order_match": 1.0,
+     "p95_ms": 22.02524554450065,
+     "set_match": 1.0
+    }
+   },
+   "open_s": 0.029249624931253493,
+   "radius": {
+    "avg_rows": 2117.83,
+    "median_ms": 20.285958016756922,
+    "meters": 2000.0,
+    "p95_ms": 21.521232719533145,
+    "set_match": 1.0
+   },
+   "size_bytes": 69218304
+  },
+  "duckdb-rtree": {
+   "build_s": 1.2705960420425981,
+   "doc": "DuckDB spatial with an R-tree index (usable for ST_Within against a\nconstant box, not for ordering), driven by the same expanding-box search\nas the plain SQLite R-tree variant.",
+   "knn": {
+    "1": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 588.9682499691844,
+     "mean_ms": 10.210563738364726,
+     "median_ms": 0.8540420094504952,
+     "order_match": 1.0,
+     "p95_ms": 5.122188967652617,
+     "set_match": 1.0
+    },
+    "10": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 943.6219999333844,
+     "mean_ms": 28.046904943184927,
+     "median_ms": 1.255375042092055,
+     "order_match": 1.0,
+     "p95_ms": 13.955654157325377,
+     "set_match": 1.0
+    },
+    "100": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 945.426500053145,
+     "mean_ms": 33.58012954588048,
+     "median_ms": 3.4207914723083377,
+     "order_match": 1.0,
+     "p95_ms": 103.91037114313795,
+     "set_match": 1.0
+    },
+    "1000": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 1414.6586250280961,
+     "mean_ms": 96.02013999014162,
+     "median_ms": 26.294187468010932,
+     "order_match": 1.0,
+     "p95_ms": 600.623880588682,
+     "set_match": 1.0
+    }
+   },
+   "open_s": 0.01995183399412781,
+   "radius": {
+    "avg_rows": 2117.83,
+    "median_ms": 8.224291552323848,
+    "meters": 2000.0,
+    "p95_ms": 67.73209137609228,
+    "set_match": 1.0
+   },
+   "size_bytes": 119025664
+  },
+  "kdtree-degrees": {
+   "knn": {
+    "1": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 0.024084001779556274,
+     "mean_ms": 0.011644228361546993,
+     "median_ms": 0.010708521585911512,
+     "order_match": 0.88,
+     "p95_ms": 0.01650420599617064,
+     "set_match": 0.88
+    },
+    "10": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 0.6096250144764781,
+     "mean_ms": 0.03999299951829016,
+     "median_ms": 0.03364606527611613,
+     "order_match": 0.03,
+     "p95_ms": 0.04167951992712915,
+     "set_match": 0.33
+    },
+    "100": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 0.7261249702423811,
+     "mean_ms": 0.26962043019011617,
+     "median_ms": 0.26452098973095417,
+     "order_match": 0.0,
+     "p95_ms": 0.2854694670531899,
+     "set_match": 0.01
+    },
+    "1000": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 2.772417035885155,
+     "mean_ms": 2.64414117555134,
+     "median_ms": 2.6574369985610247,
+     "order_match": 0.0,
+     "p95_ms": 2.747605921467766,
+     "set_match": 0.0
+    }
+   },
+   "open_s": 0.6688535410212353
+  },
+  "kdtree-xyz": {
+   "knn": {
+    "1": {
+     "kth_dist_rel_err": 1.4961165914472217e-10,
+     "max_ms": 0.0706670107319951,
+     "mean_ms": 0.014465514104813337,
+     "median_ms": 0.013458949979394674,
+     "order_match": 1.0,
+     "p95_ms": 0.015829096082597967,
+     "set_match": 1.0
+    },
+    "10": {
+     "kth_dist_rel_err": 4.5775371414732086e-11,
+     "max_ms": 0.06616604514420033,
+     "mean_ms": 0.01688701333478093,
+     "median_ms": 0.015228928532451391,
+     "order_match": 1.0,
+     "p95_ms": 0.029808026738464825,
+     "set_match": 1.0
+    },
+    "100": {
+     "kth_dist_rel_err": 5.328179462472688e-12,
+     "max_ms": 20.38175007328391,
+     "mean_ms": 0.25625965325161815,
+     "median_ms": 0.047895999159663916,
+     "order_match": 1.0,
+     "p95_ms": 0.10408157249912611,
+     "set_match": 1.0
+    },
+    "1000": {
+     "kth_dist_rel_err": 1.7280574414517838e-12,
+     "max_ms": 0.747875077649951,
+     "mean_ms": 0.33121911459602416,
+     "median_ms": 0.32049999572336674,
+     "order_match": 1.0,
+     "p95_ms": 0.39749834104441095,
+     "set_match": 1.0
+    }
+   },
+   "open_s": 0.858693459071219,
+   "radius": {
+    "avg_rows": 2117.83,
+    "median_ms": 0.12260448420420289,
+    "meters": 2000.0,
+    "p95_ms": 1.1812516953796148,
+    "set_match": 1.0
+   }
+  },
+  "postgis": {
+   "build_s": 9.197551541030407,
+   "doc": "PostGIS 3.5 geography KNN: ORDER BY geom <-> point LIMIT k on a GiST\nindex (exact spheroidal distances).",
+   "knn": {
+    "1": {
+     "kth_dist_rel_err": 0.0025614796074061317,
+     "max_ms": 1.2343330308794975,
+     "mean_ms": 0.42290213517844677,
+     "median_ms": 0.3463124739937484,
+     "order_match": 1.0,
+     "p95_ms": 0.9377732872962948,
+     "set_match": 1.0
+    },
+    "10": {
+     "kth_dist_rel_err": 0.002590754854838292,
+     "max_ms": 1.3192499754950404,
+     "mean_ms": 0.46602836111560464,
+     "median_ms": 0.3761249827221036,
+     "order_match": 1.0,
+     "p95_ms": 1.004607614595443,
+     "set_match": 1.0
+    },
+    "100": {
+     "kth_dist_rel_err": 0.0026898222926488753,
+     "max_ms": 25.375000084750354,
+     "mean_ms": 1.0000346286688,
+     "median_ms": 0.703354540746659,
+     "order_match": 1.0,
+     "p95_ms": 1.3221726461779324,
+     "set_match": 1.0
+    },
+    "1000": {
+     "kth_dist_rel_err": 0.002564613887733069,
+     "max_ms": 5.058375070802867,
+     "mean_ms": 3.0325566651299596,
+     "median_ms": 2.9212500085122883,
+     "order_match": 1.0,
+     "p95_ms": 4.128066403791308,
+     "set_match": 1.0
+    }
+   },
+   "open_s": 0.09294700005557388,
+   "radius": {
+    "avg_rows": 2117.83,
+    "median_ms": 3.5863335360772908,
+    "meters": 2000.0,
+    "p95_ms": 32.696497935103245,
+    "set_match": 1.0
+   },
+   "size_bytes": 381706240
+  },
+  "spatialite": {
+   "build_s": 38.541516957920976,
+   "doc": "SpatiaLite 5's KNN2 virtual table over its R*Tree spatial index. KNN2\nneeds a search radius in CRS units (degrees) and ranks by planar CRS\ndistance (distance_crs), reporting geodesic meters alongside.",
+   "knn": {
+    "1": {
+     "kth_dist_rel_err": 0.0025614795998637075,
+     "max_ms": 607.28754196316,
+     "mean_ms": 8.104818818392232,
+     "median_ms": 0.19889604300260544,
+     "order_match": 0.98,
+     "p95_ms": 1.228466682368889,
+     "set_match": 0.98
+    },
+    "10": {
+     "kth_dist_rel_err": 0.0025907548550271045,
+     "max_ms": 2325.008666026406,
+     "mean_ms": 38.68063253350556,
+     "median_ms": 0.551416480448097,
+     "order_match": 0.77,
+     "p95_ms": 2.1449560066685076,
+     "set_match": 0.85
+    },
+    "100": {
+     "kth_dist_rel_err": 0.0026898222768646867,
+     "max_ms": 2356.5687499940395,
+     "mean_ms": 41.21934711700305,
+     "median_ms": 2.4408125318586826,
+     "order_match": 0.02,
+     "p95_ms": 12.311022926587594,
+     "set_match": 0.69
+    },
+    "1000": {
+     "kth_dist_rel_err": 0.0026547187432874163,
+     "max_ms": 3446.820499957539,
+     "mean_ms": 106.42210956080817,
+     "median_ms": 24.300645978655666,
+     "order_match": 0.0,
+     "p95_ms": 371.37812081491575,
+     "set_match": 0.19
+    }
+   },
+   "open_s": 0.07391820801422,
+   "size_bytes": 308903936
+  },
+  "sqlite-rtree": {
+   "build_s": 28.686542749986984,
+   "doc": "What you would hand-roll without tg0: a plain SQLite R*Tree of the\npoints plus an expanding-box search in the application. Starts with a\nsmall box, quadruples it until k rows are inside, then re-queries with a\nbox that provably covers the k-th geodesic distance and ranks the\ncandidates by haversine in numpy.",
+   "knn": {
+    "1": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 126.24637503176928,
+     "mean_ms": 2.019169647246599,
+     "median_ms": 0.09233300806954503,
+     "order_match": 1.0,
+     "p95_ms": 0.7845499378163353,
+     "set_match": 1.0
+    },
+    "10": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 1519.1777079598978,
+     "mean_ms": 30.450470820069313,
+     "median_ms": 0.2126250183209777,
+     "order_match": 1.0,
+     "p95_ms": 4.4408416608347805,
+     "set_match": 1.0
+    },
+    "100": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 1566.9479999924079,
+     "mean_ms": 33.140489551005885,
+     "median_ms": 0.7693745428696275,
+     "order_match": 1.0,
+     "p95_ms": 28.84386466466818,
+     "set_match": 1.0
+    },
+    "1000": {
+     "kth_dist_rel_err": 0.0,
+     "max_ms": 2857.7237500576302,
+     "mean_ms": 81.18711248855107,
+     "median_ms": 6.213354005012661,
+     "order_match": 1.0,
+     "p95_ms": 165.37942114518955,
+     "set_match": 1.0
+    }
+   },
+   "open_s": 0.002806417061947286,
+   "radius": {
+    "avg_rows": 2117.83,
+    "median_ms": 2.3155625094659626,
+    "meters": 2000.0,
+    "p95_ms": 18.38257316849194,
+    "set_match": 1.0
+   },
+   "size_bytes": 210874368
+  },
+  "tg0": {
+   "build_s": 32.70985949994065,
+   "doc": "",
+   "knn": {
+    "1": {
+     "kth_dist_rel_err": 2.5712505198148656e-16,
+     "max_ms": 0.10950001887977123,
+     "mean_ms": 0.058463780442252755,
+     "median_ms": 0.05658401641994715,
+     "order_match": 1.0,
+     "p95_ms": 0.09292892063967884,
+     "set_match": 1.0
+    },
+    "10": {
+     "kth_dist_rel_err": 2.786747430864294e-16,
+     "max_ms": 0.15812506899237633,
+     "mean_ms": 0.0916016788687557,
+     "median_ms": 0.08962501306086779,
+     "order_match": 1.0,
+     "p95_ms": 0.13313749805092812,
+     "set_match": 1.0
+    },
+    "100": {
+     "kth_dist_rel_err": 2.550888215962719e-16,
+     "max_ms": 0.7584999548271298,
+     "mean_ms": 0.306395860388875,
+     "median_ms": 0.2983749727718532,
+     "order_match": 1.0,
+     "p95_ms": 0.3665707656182349,
+     "set_match": 1.0
+    },
+    "1000": {
+     "kth_dist_rel_err": 2.763805861231076e-16,
+     "max_ms": 3.0112079111859202,
+     "mean_ms": 2.2872475092299283,
+     "median_ms": 2.2795000695623457,
+     "order_match": 1.0,
+     "p95_ms": 2.4480473657604307,
+     "set_match": 1.0
+    }
+   },
+   "open_s": 0.0013017080491408706,
+   "radius": {
+    "avg_rows": 2117.83,
+    "median_ms": 2.443937526550144,
+    "meters": 2000.0,
+    "p95_ms": 21.55944385449402,
+    "set_match": 1.0
+   },
+   "size_bytes": 219123712
+  }
+ }
+}

@@ -362,6 +362,14 @@ static const char *OOM_SCENARIO[] = {
     "select label from temp.oom where tg_within(boundary, "
     "'POLYGON((-1 -1, 5 -1, 5 5, -1 5, -1 -1))')",
     "select count(*) from temp.oom where tg_disjoint(shape, 'POINT(100 100)')",
+    // KNN: the MATCH value parse, the rtree node read + heap growth, the
+    // per-candidate content fetch / WKB parse / exact distance
+    "insert into temp.oom(id, label, shape, boundary) values "
+    "('b', 'two', 'LINESTRING(5 5, 6 6)', 'POLYGON((5 5, 6 5, 6 6, 5 5))')",
+    "select label, distance from temp.oom where shape match 'POINT(1 1)' "
+    "order by distance limit 1",
+    "select label from temp.oom where boundary match tg_point(9, 9) "
+    "order by distance",
     "delete from temp.oom where id = 'a'",
     "drop table temp.oom",
 };
@@ -510,6 +518,10 @@ int main(int argc, char *argv[]) {
       "select tg_m(tg_point(1, 2, 3))",
       "select tg_m(tg_point(1, 2, 3, 4))",
       "select tg_min_x('POLYGON ((1 1, 2 2, 3 3, 1 1))')",
+      "select tg_distance_sphere('POINT(5 -1)', "
+      "'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (4 4, 6 4, 6 6, 4 6, 4 4))')",
+      "select tg_distance_sphere(tg_point(0, 0), "
+      "'GEOMETRYCOLLECTION(POINT(0 2), LINESTRING(1 1, 1 -1))')",
       "select tg_min_y('POLYGON ((1 1, 2 2, 3 3, 1 1))')",
       "select tg_max_x('POLYGON ((1 1, 2 2, 3 3, 1 1))')",
       "select tg_max_y('POLYGON ((1 1, 2 2, 3 3, 1 1))')",
@@ -575,6 +587,24 @@ int main(int argc, char *argv[]) {
       "'POINT(100 100)')",
       "select count(*) from temp.demo where tg_intersects(shape, "
       "'POINT(9 9)') and tg_touches(boundary, 'POINT(100 100)')",
+      // KNN plan: best-first rtree node walk with exact-distance refinement,
+      // every ordering/limit shape, on both the geometry and polygon columns
+      "select label, distance from temp.demo where shape match 'POINT(1 1)' "
+      "order by distance",
+      "select label from temp.demo where shape match tg_point(9, 9) "
+      "order by distance limit 1",
+      "select label from temp.demo where boundary match 'POINT(5.5 5.5)' "
+      "and label <> 'nope' order by distance",
+      // ticket 04 folds: a same-column predicate (cell prune + exact test),
+      // a distance bound (early stop), and pushdown on the candidate fetch
+      "select label, distance from temp.demo where shape match 'POINT(1 1)' "
+      "and tg_intersects(shape, 'POLYGON((0 0, 4 0, 4 4, 0 4, 0 0))') "
+      "and distance <= 1000000 and label <> 'nope' order by distance",
+      "select label from temp.demo where boundary match 'POINT(1 1)' "
+      "and tg_within(boundary, 'POLYGON((-1 -1, 7 -1, 7 7, -1 7, -1 -1))') "
+      "and distance < 1e12 order by distance limit 1",
+      "select a.label, (select b.label from temp.demo b where b.shape match "
+      "a.shape and b.id <> a.id order by b.distance limit 1) from temp.demo a",
       // ticket 05: data-column constraint pushdown — the label comparison
       // is consumed as an idxStr '&' block and prefilters the content scan
       "select label from temp.demo where tg_intersects(shape, "
@@ -604,6 +634,10 @@ int main(int argc, char *argv[]) {
       "'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))')",
       "delete from temp.demo_tpk where id = 'a'",
       "drop table temp.demo_tpk",
+      // kept alive (never dropped) so ERROR_STATEMENTS can exercise the KNN
+      // error paths on a real table; IF NOT EXISTS makes re-runs idempotent
+      "create virtual table if not exists temp.knn_err using tg0("
+      "label text, shape point)",
   };
   static const char *ERROR_STATEMENTS[] = {
       "select tg_to_wkt('not a geometry')",
@@ -648,6 +682,18 @@ int main(int argc, char *argv[]) {
       "select tg_m('LINESTRING(0 0, 1 1)')",
       "select tg_m(NULL)",
       "select tg_min_x(NULL)",
+      "select tg_distance_sphere('LINESTRING(0 0, 1 1)', "
+      "'POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))')",
+      "select tg_distance_sphere('POINT(0 0)', 'POINT(0 91)')",
+      "select tg_distance_sphere('POINT(0 0)', NULL)",
+      // KNN error paths on a table that stays alive across iterations
+      "select * from temp.knn_err where shape match 'LINESTRING(0 0, 1 1)'",
+      "select * from temp.knn_err where shape match 'nope'",
+      "select * from temp.knn_err where shape match 'POINT(500 0)'",
+      "select * from temp.knn_err where label match 'POINT(0 0)'",
+      "select * from temp.knn_err where distance < 1",
+      "select * from temp.knn_err where shape match 'POINT(0 0)' "
+      "and tg_intersects(shape, 'nope') order by distance",
       "select tg_intersects('POINT(1 1)', 'nope')",
       "select tg_equals('POINT(1 1)', 'nope')",
       "select tg_to_wkt(tg_group_multipoint(value)) "

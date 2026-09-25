@@ -2604,6 +2604,462 @@ static sqlite3_module tg_bboxModule = {
     /* xShadowName */ 0};
 #pragma endregion
 
+#pragma region distance
+
+// ---------------------------------------------------------------------------
+// Distance kernel (plans/knn/plan.md decisions 6, 7, 9).
+//
+// tg is strictly planar and has no geometry-to-geometry distance, so every
+// distance number sqlite-tg produces is computed here. Two metrics:
+//
+//   TG_METRIC_GEODESIC: inputs are lon/lat degrees, outputs meters — the
+//     great-circle (haversine) distance on a sphere of radius
+//     TG_EARTH_RADIUS_METERS. Exact for point-to-point. For a segment, the
+//     closest point is found on tg's planar lon/lat edge in a local frame
+//     scaled by cos(lat_query), then the haversine to it — an approximation
+//     whose error is second-order in edge length. Edges stay planar because
+//     that is what every tg predicate and both bbox indexes assume;
+//     great-circle edges would bulge outside their vertices' bbox and
+//     disagree with tg's point-in-polygon.
+//   TG_METRIC_PLANAR: Euclidean in coordinate units.
+//
+// Rect distances are *lower bounds* that drive best-first traversals (the
+// tg0 rtree walk and tg's own tg_ring/line_nearest_segment): for every point
+// X inside rect, point_rect(q, rect) <= point_point(q, X). The geodesic bound
+// is the S2LatLngRect::GetDistance construction and is wrap-aware in
+// longitude, so a query at lon 179.9 is near a rect at lon -179.9 even though
+// rtree bboxes themselves never wrap.
+// ---------------------------------------------------------------------------
+
+typedef enum {
+  TG_METRIC_GEODESIC = 0,
+  TG_METRIC_PLANAR = 1,
+} tg_metric;
+
+// IUGG mean Earth radius, the constant turf.js and PostGIS's spherical
+// functions use
+#define TG_EARTH_RADIUS_METERS 6371008.8
+#define TG_DEG_TO_RAD (M_PI / 180.0)
+
+// 1 when (x, y) is a finite lon/lat coordinate pair.
+static int tg_lonlat_valid(double x, double y) {
+  return isfinite(x) && isfinite(y) && fabs(x) <= 180.0 && fabs(y) <= 90.0;
+}
+
+// The parameter t in [0, 1] of p's closest point on segment s in the plane:
+// clamped projection, 0 for a degenerate (or NaN) segment.
+static double tg_segment_project(struct tg_point p, struct tg_segment s) {
+  double c = s.b.x - s.a.x;
+  double d = s.b.y - s.a.y;
+  double e = c * c + d * d;
+  if (!(e > 0)) {
+    return 0.0;
+  }
+  double t = ((p.x - s.a.x) * c + (p.y - s.a.y) * d) / e;
+  return t < 0 ? 0 : (t > 1 ? 1 : t);
+}
+
+// The point at parameter t along segment s.
+static struct tg_point tg_segment_lerp(struct tg_segment s, double t) {
+  return (struct tg_point){s.a.x + t * (s.b.x - s.a.x),
+                           s.a.y + t * (s.b.y - s.a.y)};
+}
+
+static double tg_planar_point_point(struct tg_point a, struct tg_point b) {
+  double dx = a.x - b.x;
+  double dy = a.y - b.y;
+  return sqrt(dx * dx + dy * dy);
+}
+
+static double tg_planar_point_segment(struct tg_point p, struct tg_segment s) {
+  double t = tg_segment_project(p, s);
+  struct tg_point c = {s.a.x + t * (s.b.x - s.a.x), s.a.y + t * (s.b.y - s.a.y)};
+  return tg_planar_point_point(p, c);
+}
+
+static double tg_planar_point_rect(struct tg_point p, struct tg_rect r) {
+  double dx = fmax(fmax(r.min.x - p.x, p.x - r.max.x), 0.0);
+  double dy = fmax(fmax(r.min.y - p.y, p.y - r.max.y), 0.0);
+  return sqrt(dx * dx + dy * dy);
+}
+
+// Great-circle distance in meters between two lon/lat points. The
+// sin^2(dlon/2) term is 2*pi-periodic, so the antimeridian needs no special
+// handling.
+static double tg_haversine(struct tg_point a, struct tg_point b) {
+  double lat1 = a.y * TG_DEG_TO_RAD;
+  double lat2 = b.y * TG_DEG_TO_RAD;
+  double sinLat = sin((lat2 - lat1) / 2);
+  double sinLon = sin((b.x - a.x) * TG_DEG_TO_RAD / 2);
+  double h = sinLat * sinLat + cos(lat1) * cos(lat2) * sinLon * sinLon;
+  h = h < 0 ? 0 : (h > 1 ? 1 : h);
+  return 2 * TG_EARTH_RADIUS_METERS * asin(sqrt(h));
+}
+
+// Great-circle distance from q to the nearest point of planar lon/lat
+// segment s. The nearest point is found by golden-section search of the
+// haversine along the edge (unimodal for any edge that does not wrap around
+// the sphere), with both endpoints checked explicitly so a constrained
+// minimum is exact. The result is always the distance to a point *on* the
+// edge, so a rect bound over the edge's bbox remains a valid lower bound.
+static double tg_geodesic_point_segment(struct tg_point q,
+                                        struct tg_segment s) {
+  double best = fmin(tg_haversine(q, s.a), tg_haversine(q, s.b));
+  if (s.a.x == s.b.x && s.a.y == s.b.y) {
+    return best;
+  }
+  const double invphi = 0.6180339887498949;
+  double lo = 0.0;
+  double hi = 1.0;
+  double c = hi - invphi * (hi - lo);
+  double d = lo + invphi * (hi - lo);
+  double fc = tg_haversine(q, tg_segment_lerp(s, c));
+  double fd = tg_haversine(q, tg_segment_lerp(s, d));
+  // 40 halvings shrink the bracket below 5e-9 of the edge length
+  for (int i = 0; i < 40; i++) {
+    if (fc < fd) {
+      hi = d;
+      d = c;
+      fd = fc;
+      c = hi - invphi * (hi - lo);
+      fc = tg_haversine(q, tg_segment_lerp(s, c));
+    } else {
+      lo = c;
+      c = d;
+      fc = fd;
+      d = lo + invphi * (hi - lo);
+      fd = tg_haversine(q, tg_segment_lerp(s, d));
+    }
+  }
+  return fmin(best, fmin(fc, fd));
+}
+
+static void tg_lonlat_to_xyz(double lon, double lat, double v[3]) {
+  double la = lat * TG_DEG_TO_RAD;
+  double lo = lon * TG_DEG_TO_RAD;
+  v[0] = cos(la) * cos(lo);
+  v[1] = cos(la) * sin(lo);
+  v[2] = sin(la);
+}
+
+static void tg_xyz_cross(const double a[3], const double b[3], double out[3]) {
+  out[0] = a[1] * b[2] - a[2] * b[1];
+  out[1] = a[2] * b[0] - a[0] * b[2];
+  out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+static double tg_xyz_dot(const double a[3], const double b[3]) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static double tg_xyz_norm(const double a[3]) { return sqrt(tg_xyz_dot(a, a)); }
+
+// Angle in radians between two unit vectors; atan2 form stays accurate for
+// tiny angles where acos(dot) would not.
+static double tg_xyz_angle(const double a[3], const double b[3]) {
+  double c[3];
+  tg_xyz_cross(a, b, c);
+  return atan2(tg_xyz_norm(c), tg_xyz_dot(a, b));
+}
+
+// Angular distance from unit vector q to the great-circle arc a..b (shorter
+// than a half circle). When q's perpendicular foot lies inside the arc the
+// distance is to the great circle itself, otherwise to the nearer endpoint.
+static double tg_xyz_point_arc(const double q[3], const double a[3],
+                               const double b[3]) {
+  double n[3];
+  tg_xyz_cross(a, b, n);
+  double nn = tg_xyz_norm(n);
+  if (nn < 1e-15) {
+    // a == b: a degenerate arc
+    return tg_xyz_angle(q, a);
+  }
+  // tangents at a (toward b) and at b (toward a): q projects inside the arc
+  // when it is on the far side of both endpoint planes
+  double ta[3], tb[3];
+  tg_xyz_cross(n, a, ta);
+  tg_xyz_cross(b, n, tb);
+  if (tg_xyz_dot(q, ta) >= 0 && tg_xyz_dot(q, tb) >= 0) {
+    double d = tg_xyz_dot(q, n) / nn;
+    d = d < -1 ? -1 : (d > 1 ? 1 : d);
+    return asin(fabs(d));
+  }
+  return fmin(tg_xyz_angle(q, a), tg_xyz_angle(q, b));
+}
+
+// Lower bound, in meters, of the great-circle distance from lon/lat point q
+// to any point of the lon/lat rectangle r (S2LatLngRect::GetDistance):
+//
+// - q inside r: 0.
+// - q's longitude within r's longitude span: the nearest point is straight
+//   north or south along q's meridian, on the nearer parallel edge — exact,
+//   because for a line of constant latitude the closest point is at the
+//   query's own longitude (cos d is monotone in |dlon|).
+// - otherwise: the nearest point lies on the meridian edge nearer to q in
+//   (wrapped) longitude, but generally not at q's latitude — meridians are
+//   great circles and the perpendicular foot slides along them — so it is a
+//   3-D point-to-arc computation. Clamp-then-haversine would be an *upper*
+//   bound here and would silently break best-first ordering.
+static double tg_geodesic_point_rect(struct tg_point q, struct tg_rect r) {
+  int lonWithin =
+      (q.x >= r.min.x && q.x <= r.max.x) ||
+      (q.x + 360 >= r.min.x && q.x + 360 <= r.max.x) ||
+      (q.x - 360 >= r.min.x && q.x - 360 <= r.max.x);
+  if (lonWithin) {
+    if (q.y >= r.min.y && q.y <= r.max.y) {
+      return 0.0;
+    }
+    double dlat = q.y < r.min.y ? r.min.y - q.y : q.y - r.max.y;
+    return dlat * TG_DEG_TO_RAD * TG_EARTH_RADIUS_METERS;
+  }
+  double dlo = fabs(remainder(q.x - r.min.x, 360.0));
+  double dhi = fabs(remainder(q.x - r.max.x, 360.0));
+  double edge = dlo <= dhi ? r.min.x : r.max.x;
+  double qv[3], av[3], bv[3];
+  tg_lonlat_to_xyz(q.x, q.y, qv);
+  tg_lonlat_to_xyz(edge, r.min.y, av);
+  tg_lonlat_to_xyz(edge, r.max.y, bv);
+  return tg_xyz_point_arc(qv, av, bv) * TG_EARTH_RADIUS_METERS;
+}
+
+static double tg_metric_point_point(tg_metric metric, struct tg_point a,
+                                    struct tg_point b) {
+  return metric == TG_METRIC_PLANAR ? tg_planar_point_point(a, b)
+                                    : tg_haversine(a, b);
+}
+
+static double tg_metric_point_segment(tg_metric metric, struct tg_point q,
+                                      struct tg_segment s) {
+  return metric == TG_METRIC_PLANAR ? tg_planar_point_segment(q, s)
+                                    : tg_geodesic_point_segment(q, s);
+}
+
+// Lower bound of the distance from q to any point inside r.
+static double tg_metric_point_rect(tg_metric metric, struct tg_point q,
+                                   struct tg_rect r) {
+  return metric == TG_METRIC_PLANAR ? tg_planar_point_rect(q, r)
+                                    : tg_geodesic_point_rect(q, r);
+}
+
+// udata for tg_ring_nearest_segment / tg_line_nearest_segment: the metric,
+// the query point, and the distance of the first (nearest) segment iterated.
+struct tg_metric_nearest {
+  tg_metric metric;
+  struct tg_point q;
+  double dist;
+};
+
+static double tg_metric_nearest_rect_dist(struct tg_rect rect, int *more,
+                                          void *udata) {
+  struct tg_metric_nearest *ctx = udata;
+  (void)more;
+  return tg_metric_point_rect(ctx->metric, ctx->q, rect);
+}
+
+static double tg_metric_nearest_seg_dist(struct tg_segment seg, int *more,
+                                         void *udata) {
+  struct tg_metric_nearest *ctx = udata;
+  (void)more;
+  return tg_metric_point_segment(ctx->metric, ctx->q, seg);
+}
+
+// tg iterates segments nearest-first, so the first callback is the answer
+static bool tg_metric_nearest_iter(struct tg_segment seg, double dist,
+                                   int index, void *udata) {
+  struct tg_metric_nearest *ctx = udata;
+  (void)seg;
+  (void)index;
+  ctx->dist = dist;
+  return false;
+}
+
+// Distance from q to the nearest segment of ring (INFINITY when the ring
+// has none). Returns false on tg OOM.
+static bool tg_metric_point_ring(tg_metric metric, struct tg_point q,
+                                 const struct tg_ring *ring, double *out) {
+  struct tg_metric_nearest ctx = {metric, q, INFINITY};
+  if (!tg_ring_nearest_segment(ring, tg_metric_nearest_rect_dist,
+                               tg_metric_nearest_seg_dist,
+                               tg_metric_nearest_iter, &ctx)) {
+    return false;
+  }
+  *out = ctx.dist;
+  return true;
+}
+
+static bool tg_metric_point_line(tg_metric metric, struct tg_point q,
+                                 const struct tg_line *line, double *out) {
+  struct tg_metric_nearest ctx = {metric, q, INFINITY};
+  if (!tg_line_nearest_segment(line, tg_metric_nearest_rect_dist,
+                               tg_metric_nearest_seg_dist,
+                               tg_metric_nearest_iter, &ctx)) {
+    return false;
+  }
+  *out = ctx.dist;
+  return true;
+}
+
+// 0 when the polygon contains q (boundary included), else the distance to
+// the nearest edge of the exterior or any hole.
+static bool tg_metric_point_poly(tg_metric metric, struct tg_point q,
+                                 const struct tg_poly *poly, double *out) {
+  if (tg_geom_intersects_xy((const struct tg_geom *)poly, q.x, q.y)) {
+    *out = 0.0;
+    return true;
+  }
+  double best = INFINITY;
+  double d;
+  if (!tg_metric_point_ring(metric, q, tg_poly_exterior(poly), &d)) {
+    return false;
+  }
+  best = fmin(best, d);
+  for (int i = 0; i < tg_poly_num_holes(poly); i++) {
+    if (!tg_metric_point_ring(metric, q, tg_poly_hole_at(poly, i), &d)) {
+      return false;
+    }
+    best = fmin(best, d);
+  }
+  *out = best;
+  return true;
+}
+
+// Distance from q to the nearest point of geom under metric, for all 7
+// geometry types; INFINITY for empty geometries. Returns false on tg OOM
+// (the segment traversals may allocate).
+static bool tg_metric_point_geom(tg_metric metric, struct tg_point q,
+                                 const struct tg_geom *geom, double *out) {
+  double best = INFINITY;
+  double d;
+  switch (tg_geom_typeof(geom)) {
+  case TG_POINT:
+    if (!tg_geom_is_empty(geom)) {
+      best = tg_metric_point_point(metric, q, tg_geom_point(geom));
+    }
+    break;
+  case TG_LINESTRING: {
+    const struct tg_line *line = tg_geom_line(geom);
+    if (line) {
+      if (!tg_metric_point_line(metric, q, line, &best)) {
+        return false;
+      }
+    }
+    break;
+  }
+  case TG_POLYGON: {
+    const struct tg_poly *poly = tg_geom_poly(geom);
+    if (poly) {
+      if (!tg_metric_point_poly(metric, q, poly, &best)) {
+        return false;
+      }
+    }
+    break;
+  }
+  case TG_MULTIPOINT:
+    for (int i = 0; i < tg_geom_num_points(geom); i++) {
+      best = fmin(best,
+                  tg_metric_point_point(metric, q, tg_geom_point_at(geom, i)));
+    }
+    break;
+  case TG_MULTILINESTRING:
+    for (int i = 0; i < tg_geom_num_lines(geom); i++) {
+      if (!tg_metric_point_line(metric, q, tg_geom_line_at(geom, i), &d)) {
+        return false;
+      }
+      best = fmin(best, d);
+    }
+    break;
+  case TG_MULTIPOLYGON:
+    for (int i = 0; i < tg_geom_num_polys(geom); i++) {
+      if (!tg_metric_point_poly(metric, q, tg_geom_poly_at(geom, i), &d)) {
+        return false;
+      }
+      best = fmin(best, d);
+    }
+    break;
+  case TG_GEOMETRYCOLLECTION:
+    for (int i = 0; i < tg_geom_num_geometries(geom); i++) {
+      if (!tg_metric_point_geom(metric, q, tg_geom_geometry_at(geom, i), &d)) {
+        return false;
+      }
+      best = fmin(best, d);
+    }
+    break;
+  }
+  *out = best;
+  return true;
+}
+
+// tg_distance_sphere(a, b): great-circle distance in meters between a Point
+// and any geometry (the nearest point of it; 0 when a polygon contains the
+// point). At least one argument must be a Point — tg has no
+// geometry-to-geometry distance. NULL for empty geometries. Coordinates
+// must be lon/lat.
+static void tg_distance_sphere(sqlite3_context *context, int argc,
+                               sqlite3_value **argv) {
+  struct tg_geom *a = NULL;
+  struct tg_geom *b = NULL;
+  char *errmsg = NULL;
+  (void)argc;
+  if (geomValue(argv[0], &a, &errmsg) != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    return;
+  }
+  if (geomValue(argv[1], &b, &errmsg) != SQLITE_OK) {
+    sqlite3_result_error(context, errmsg, -1);
+    sqlite3_free(errmsg);
+    tg_geom_free(a);
+    return;
+  }
+  const struct tg_geom *point = NULL;
+  const struct tg_geom *other = NULL;
+  if (tg_geom_typeof(a) == TG_POINT) {
+    point = a;
+    other = b;
+  } else if (tg_geom_typeof(b) == TG_POINT) {
+    point = b;
+    other = a;
+  } else {
+    char *msg = sqlite3_mprintf(
+        "tg_distance_sphere() expects at least one Point argument, found %s "
+        "and %s",
+        tg_geom_type_string(tg_geom_typeof(a)),
+        tg_geom_type_string(tg_geom_typeof(b)));
+    sqlite3_result_error(context, msg, -1);
+    sqlite3_free(msg);
+    goto done;
+  }
+  if (tg_geom_is_empty(point) || tg_geom_is_empty(other)) {
+    sqlite3_result_null(context);
+    goto done;
+  }
+  struct tg_point q = tg_geom_point(point);
+  struct tg_rect r = tg_geom_rect(other);
+  if (!tg_lonlat_valid(q.x, q.y) || !tg_lonlat_valid(r.min.x, r.min.y) ||
+      !tg_lonlat_valid(r.max.x, r.max.y)) {
+    sqlite3_result_error(context,
+                         "tg_distance_sphere() expects lon/lat coordinates "
+                         "(-180 <= x <= 180, -90 <= y <= 90)",
+                         -1);
+    goto done;
+  }
+  double d;
+  if (!tg_metric_point_geom(TG_METRIC_GEODESIC, q, other, &d)) {
+    sqlite3_result_error_nomem(context);
+    goto done;
+  }
+  if (isinf(d)) {
+    sqlite3_result_null(context);
+  } else {
+    sqlite3_result_double(context, d);
+  }
+done:
+  tg_geom_free(a);
+  tg_geom_free(b);
+}
+
+#pragma endregion
+
 #pragma region tg0 virtual table
 
 #define TG0_MAX_GEOMETRY_COLUMNS 8
@@ -2633,8 +3089,11 @@ static sqlite3_module tg_bboxModule = {
 //           | '2'   -- point: rowid EQ / text-pk id EQ, argv[0] = the key
 //           | '3'   -- predicate: rtree prefilter + exact tg predicate,
 //                      argv[0] = the query geometry
-//           | '4'   -- reserved for KNN (decision 9); never emitted today
-//   block  := 'P' [geom-col] [pred-op] [strategy]   -- predicate block
+//           | '4'   -- KNN: best-first rtree walk from a query point,
+//                      argv[0] = the MATCH value (a Point geometry)
+//   block  := 'K' [geom-col] [metric] '_'          -- KNN block
+//           | 'P' [geom-col] [pred-op] [strategy]   -- predicate block
+//           | 'D' [cmp-op] '_' '_'                  -- distance bound block
 //           | '&' [data-col] [cmp-op] '_'           -- pushdown block
 //
 // Blocks appear in argv order: the k'th block describes argv[k]. A predicate
@@ -2642,6 +3101,16 @@ static sqlite3_module tg_bboxModule = {
 // geometry column's index into geometry_columns[], [pred-op] identifies the
 // tg predicate, and [strategy] the rtree prefilter (see
 // tg0_predicate_plans[] for both alphabets).
+//
+// A KNN plan carries exactly one 'K' block, always first: [geom-col] as
+// above and [metric] 'G' (geodesic) or 'P' (planar), informational — the
+// column's metric= option is authoritative. It may then carry (in this
+// order) one 'P' block — a tg predicate on the *same* geometry column,
+// folded into the walk as a cell prune + exact per-candidate test — and one
+// 'D' block — `distance < ?` ('d') or `distance <= ?` ('c'), the walk stops
+// once every remaining bound exceeds it (omit stays 0, SQLite re-checks the
+// exact value) — before its '&' pushdown blocks, which prefilter the
+// per-rowid content fetch. See "tg0 KNN plan" below.
 //
 // Predicate and fullscan plans may then carry up to TG0_MAX_PUSHDOWN_BLOCKS
 // '&' pushdown blocks — EQ/NE/LT/LE/GT/GE constraints on plain data columns
@@ -2657,9 +3126,11 @@ static sqlite3_module tg_bboxModule = {
 #define TG0_PLAN_FULLSCAN '1'
 #define TG0_PLAN_POINT '2'
 #define TG0_PLAN_PREDICATE '3'
-#define TG0_PLAN_KNN '4' // reserved, unimplemented
+#define TG0_PLAN_KNN '4'
 
+#define TG0_IDXSTR_KIND_KNN 'K'
 #define TG0_IDXSTR_KIND_PREDICATE 'P'
+#define TG0_IDXSTR_KIND_DISTANCE 'D'
 #define TG0_IDXSTR_KIND_PUSHDOWN '&'
 
 // pushdown block [cmp-op] alphabet, mirroring vec0's vec0_metadata_operator
@@ -2689,8 +3160,11 @@ static sqlite3_module tg_bboxModule = {
 //   column-def :=
 //       name INTEGER PRIMARY KEY
 //     | name TEXT PRIMARY KEY
-//     | name geom-type [INDEXING "=" (NONE | NATURAL | YSTRIPES)]*
+//     | name geom-type [geom-option]*
 //     | name (TEXT | INT | INTEGER | FLOAT | DOUBLE | BLOB)
+//
+//   geom-option := INDEXING "=" (NONE | NATURAL | YSTRIPES)
+//                | METRIC "=" (GEODESIC | PLANAR)
 //
 //   geom-type := GEOMETRY | POINT | LINESTRING | POLYGON | MULTIPOINT
 //              | MULTILINESTRING | MULTIPOLYGON | GEOMETRYCOLLECTION
@@ -2923,12 +3397,14 @@ static int tg0_parse_primary_key_definition(const char *source,
 
 /**
  * Parse an argv[i] entry of a tg0 virtual table definition, and see if it's a
- * geometry column definition: `name <geom-type> [indexing=...]*`.
+ * geometry column definition: `name <geom-type> [indexing=...] [metric=...]`.
  *
  * out_column_name points into source (same lifetime). out_geom_type is 0 for
  * generic `geometry` columns or an enum tg_geom_type value for narrowed ones.
  * out_indexing is the tg_index to use when parsing stored geometries at query
- * time, TG_DEFAULT unless an `indexing=` option overrides it.
+ * time, TG_DEFAULT unless an `indexing=` option overrides it. out_metric is
+ * the distance metric for KNN queries and coordinate validation,
+ * TG_METRIC_GEODESIC (lon/lat, meters) unless `metric=planar`.
  * Returns SQLITE_EMPTY if not a geometry column definition, SQLITE_OK if it
  * is, or SQLITE_ERROR when it is one but has a bad option — in which case
  * *out_errmsg is set to an sqlite3_mprintf'd error message.
@@ -2936,7 +3412,7 @@ static int tg0_parse_primary_key_definition(const char *source,
 static int tg0_parse_geometry_column_definition(
     const char *source, int source_length, char **out_column_name,
     int *out_column_name_length, int *out_geom_type,
-    enum tg_index *out_indexing, char **out_errmsg) {
+    enum tg_index *out_indexing, tg_metric *out_metric, char **out_errmsg) {
   struct Tg0Scanner scanner;
   struct Tg0Token token;
   struct Tg0Token key;
@@ -2944,6 +3420,7 @@ static int tg0_parse_geometry_column_definition(
   int column_name_length;
   int geom_type;
   enum tg_index indexing = TG_DEFAULT;
+  tg_metric metric = TG_METRIC_GEODESIC;
   int rc;
   tg0_scanner_init(&scanner, source, source_length);
 
@@ -2965,10 +3442,10 @@ static int tg0_parse_geometry_column_definition(
     return SQLITE_EMPTY;
   }
 
-  // optional `key=value` options. Only `indexing=none|natural|ystripes` is
-  // recognized; a recognizable option shape with an unknown key or value is
-  // a hard error, anything structurally off falls back to the caller's
-  // generic could-not-parse error.
+  // optional `key=value` options: `indexing=none|natural|ystripes` and
+  // `metric=geodesic|planar`. A recognizable option shape with an unknown
+  // key or value is a hard error, anything structurally off falls back to
+  // the caller's generic could-not-parse error.
   while (1) {
     rc = tg0_scanner_next(&scanner, &key);
     if (rc == TG0_TOKEN_RESULT_EOF) {
@@ -3003,11 +3480,24 @@ static int tg0_parse_geometry_column_definition(
             (int)(token.end - token.start), token.start, source_length, source);
         return SQLITE_ERROR;
       }
+    } else if (tg0_token_is(&key, "metric")) {
+      if (tg0_token_is(&token, "geodesic")) {
+        metric = TG_METRIC_GEODESIC;
+      } else if (tg0_token_is(&token, "planar")) {
+        metric = TG_METRIC_PLANAR;
+      } else {
+        *out_errmsg = sqlite3_mprintf(
+            TG0_CONSTRUCTOR_ERROR
+            "unknown metric option '%.*s' in '%.*s', expected geodesic or "
+            "planar",
+            (int)(token.end - token.start), token.start, source_length, source);
+        return SQLITE_ERROR;
+      }
     } else {
       *out_errmsg = sqlite3_mprintf(
           TG0_CONSTRUCTOR_ERROR
-          "unknown option '%.*s' in '%.*s', only 'indexing=' is supported on "
-          "geometry columns",
+          "unknown option '%.*s' in '%.*s', only 'indexing=' and 'metric=' "
+          "are supported on geometry columns",
           (int)(key.end - key.start), key.start, source_length, source);
       return SQLITE_ERROR;
     }
@@ -3017,6 +3507,7 @@ static int tg0_parse_geometry_column_definition(
   *out_column_name_length = column_name_length;
   *out_geom_type = geom_type;
   *out_indexing = indexing;
+  *out_metric = metric;
   return SQLITE_OK;
 }
 
@@ -3072,11 +3563,11 @@ static int tg0_parse_data_column_definition(const char *source,
   rc = tg0_scanner_next(&scanner, &token);
   if (rc == TG0_TOKEN_RESULT_SOME &&
       token.token_type == TG0_TOKEN_TYPE_IDENTIFIER &&
-      tg0_token_is(&token, "indexing")) {
+      (tg0_token_is(&token, "indexing") || tg0_token_is(&token, "metric"))) {
     *out_errmsg = sqlite3_mprintf(
         TG0_CONSTRUCTOR_ERROR
-        "'indexing=' is only supported on geometry columns, in '%.*s'",
-        source_length, source);
+        "'%.*s=' is only supported on geometry columns, in '%.*s'",
+        (int)(token.end - token.start), token.start, source_length, source);
     return SQLITE_ERROR;
   }
   if (rc != TG0_TOKEN_RESULT_EOF) {
@@ -3125,6 +3616,10 @@ struct tg0_geometry_column {
   // the tg_index used when parsing stored geometries at query time
   // (`indexing=` option, defaults to TG_DEFAULT)
   enum tg_index indexing;
+  // distance metric for KNN queries (`metric=` option, defaults to
+  // TG_METRIC_GEODESIC). Geodesic columns also validate that every written
+  // coordinate is a finite lon/lat pair, planar columns that it is finite
+  tg_metric metric;
 };
 
 struct tg0_data_column {
@@ -3174,7 +3669,39 @@ struct tg0_vtab {
   struct tg0_geometry_column geometry_columns[TG0_MAX_GEOMETRY_COLUMNS];
   // Only the first numDataColumns entries are meaningful.
   struct tg0_data_column data_columns[TG0_MAX_DATA_COLUMNS];
+
+  // Cached shadow-table write statements (vec0-style): prepared lazily on
+  // first use, reset + cleared after every use, finalized by
+  // tg0_free_statements() on destruction and before a rename (their SQL
+  // embeds the table name). Preparing per row made bulk loads ~3x slower
+  // than the rtree inserts themselves.
+  sqlite3_stmt *stmtRowidsInsert;
+  sqlite3_stmt *stmtRowidsLookup;
+  sqlite3_stmt *stmtRowidsDelete;
+  sqlite3_stmt *stmtContentInsert;
+  sqlite3_stmt *stmtContentDelete;
+  sqlite3_stmt *stmtRtreeInsert[TG0_MAX_GEOMETRY_COLUMNS];
+  sqlite3_stmt *stmtRtreeDelete[TG0_MAX_GEOMETRY_COLUMNS];
+  sqlite3_stmt *stmtRtreeUpdate[TG0_MAX_GEOMETRY_COLUMNS];
 };
+
+// Finalizes every cached statement; safe to call repeatedly.
+static void tg0_free_statements(tg0_vtab *p) {
+  sqlite3_finalize(p->stmtRowidsInsert);
+  sqlite3_finalize(p->stmtRowidsLookup);
+  sqlite3_finalize(p->stmtRowidsDelete);
+  sqlite3_finalize(p->stmtContentInsert);
+  sqlite3_finalize(p->stmtContentDelete);
+  p->stmtRowidsInsert = p->stmtRowidsLookup = p->stmtRowidsDelete = NULL;
+  p->stmtContentInsert = p->stmtContentDelete = NULL;
+  for (int i = 0; i < TG0_MAX_GEOMETRY_COLUMNS; i++) {
+    sqlite3_finalize(p->stmtRtreeInsert[i]);
+    sqlite3_finalize(p->stmtRtreeDelete[i]);
+    sqlite3_finalize(p->stmtRtreeUpdate[i]);
+    p->stmtRtreeInsert[i] = p->stmtRtreeDelete[i] = p->stmtRtreeUpdate[i] =
+        NULL;
+  }
+}
 
 // Number of non-pk, non-hidden user columns.
 static int tg0_num_user_columns(tg0_vtab *p) {
@@ -3223,6 +3750,7 @@ static void tg0_free(tg0_vtab *p) {
   if (!p) {
     return;
   }
+  tg0_free_statements(p);
   sqlite3_free(p->schemaName);
   sqlite3_free(p->tableName);
   sqlite3_free(p->pkColumnName);
@@ -3312,6 +3840,7 @@ static int tg0_check_column_name(tg0_vtab *p, const char *arg,
 #define TG0_SHADOW_CONTENT_NAME "\"%w\".\"%w_content\""
 #define TG0_SHADOW_ROWIDS_NAME "\"%w\".\"%w_rowids\""
 #define TG0_SHADOW_RTREE_NAME "\"%w\".\"%w_rtree%02d\""
+#define TG0_SHADOW_RTREE_NODE_NAME "\"%w\".\"%w_rtree%02d_node\""
 
 // Prepares and steps a single shadow-table DDL/DML statement. zSql is an
 // sqlite3_mprintf'd string, freed here; a NULL zSql (OOM in the caller's
@@ -3466,6 +3995,10 @@ struct tg0_cursor {
   int predGeomIdx;
   GeomPredicateFunc predFunc;
   struct tg_geom *queryGeom;
+  // KNN plans only: the best-first traversal state (owned; freed on
+  // re-Filter and xClose). On KNN plans stmt is the by-rowid content fetch,
+  // positioned on the current row
+  struct tg0_knn *knn;
 };
 
 // One row per intercepted predicate: the xFindFunction constraint op, its
@@ -3596,6 +4129,7 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     int columnType = 0;
     int geomType = 0;
     enum tg_index indexing = TG_DEFAULT;
+    tg_metric metric = TG_METRIC_GEODESIC;
     char *errmsg = NULL;
 
     // 1) primary key column, ie `id integer primary key`
@@ -3626,8 +4160,8 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     }
 
     // 2) geometry column, ie `boundary polygon indexing=natural`
-    rc = tg0_parse_geometry_column_definition(arg, nArg, &cName, &nName,
-                                              &geomType, &indexing, &errmsg);
+    rc = tg0_parse_geometry_column_definition(
+        arg, nArg, &cName, &nName, &geomType, &indexing, &metric, &errmsg);
     if (rc == SQLITE_ERROR) {
       *pzErr = errmsg;
       goto error;
@@ -3656,6 +4190,7 @@ static int tg0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
       }
       column->geomType = geomType;
       column->indexing = indexing;
+      column->metric = metric;
       int iUser = tg0_num_user_columns(pNew);
       pNew->user_column_kinds[iUser] = TG0_USER_COLUMN_KIND_GEOMETRY;
       pNew->user_column_idxs[iUser] = pNew->numGeometryColumns;
@@ -3842,10 +4377,13 @@ static int tg0Open(sqlite3_vtab *p, sqlite3_vtab_cursor **ppCursor) {
   return SQLITE_OK;
 }
 
+static void tg0_knn_free(struct tg0_knn *knn);
+
 static int tg0Close(sqlite3_vtab_cursor *cur) {
   tg0_cursor *pCur = (tg0_cursor *)cur;
   sqlite3_finalize(pCur->stmt);
   tg_geom_free(pCur->queryGeom);
+  tg0_knn_free(pCur->knn);
   sqlite3_free(pCur);
   return SQLITE_OK;
 }
@@ -3856,6 +4394,16 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
   int iPredicateTerm = -1;
   int predicatePlan = -1;
   int predicateGeomIdx = -1;
+  int iKnnTerm = -1;
+  int knnGeomIdx = -1;
+  int hasUnusableMatch = 0;
+  sqlite3_int64 limit = -1;
+  // KNN folds: the first `distance <`/`<=` term, and the first predicate on
+  // the MATCH column (preferring one with an rtree prune strategy)
+  int iDistanceTerm = -1;
+  char distanceOp = 0;
+  int iKnnPredicateTerm = -1;
+  int knnPredicatePlan = -1;
   // data-column pushdown candidates (decision 10), in constraint order
   int nPushdown = 0;
   int pushdownTerm[TG0_MAX_PUSHDOWN_BLOCKS];
@@ -3863,24 +4411,66 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
   char pushdownOp[TG0_MAX_PUSHDOWN_BLOCKS];
 
   for (int i = 0; i < pIdxInfo->nConstraint; i++) {
-    if (!pIdxInfo->aConstraint[i].usable)
-      continue;
-
     int iColumn = pIdxInfo->aConstraint[i].iColumn;
     int op = pIdxInfo->aConstraint[i].op;
 
-    // the KNN surface (plan '4', decision 9) is reserved but unimplemented:
-    // its query shapes — MATCH on a geometry column, or any constraint on
-    // the hidden distance column — get a clear error instead of a crash.
-    // LIMIT/OFFSET constraints are excluded: their iColumn is documented as
-    // meaningless and must not be mistaken for the distance column
-    if (op == SQLITE_INDEX_CONSTRAINT_MATCH ||
-        (iColumn == tg0_column_distance_idx(p) &&
-         op != SQLITE_INDEX_CONSTRAINT_LIMIT &&
-         op != SQLITE_INDEX_CONSTRAINT_OFFSET)) {
-      tg_vtab_set_error(pVtab, "KNN queries are not supported on tg0 tables "
-                               "yet");
-      return SQLITE_ERROR;
+    if (!pIdxInfo->aConstraint[i].usable) {
+      // a MATCH whose right-hand side is not available in this join order
+      // (an outer-loop column, say) can only be satisfied by the KNN plan,
+      // so this ordering is not viable — SQLITE_CONSTRAINT asks the planner
+      // to try another rather than failing the statement
+      if (op == SQLITE_INDEX_CONSTRAINT_MATCH) {
+        hasUnusableMatch = 1;
+      }
+      continue;
+    }
+
+    // `geomcol MATCH <point>`: the KNN plan (plan '4'). Exactly one per
+    // scan, and only on a geometry column
+    if (op == SQLITE_INDEX_CONSTRAINT_MATCH) {
+      tg0_user_column_kind kind;
+      int idx;
+      if (tg0_column_lookup(p, iColumn, &kind, &idx) != SQLITE_OK ||
+          kind != TG0_USER_COLUMN_KIND_GEOMETRY) {
+        tg_vtab_set_error(pVtab, "MATCH is only supported on tg0 geometry "
+                                 "columns (nearest-neighbor queries)");
+        return SQLITE_ERROR;
+      }
+      if (iKnnTerm >= 0) {
+        tg_vtab_set_error(pVtab, "only one MATCH constraint is supported per "
+                                 "tg0 query");
+        return SQLITE_ERROR;
+      }
+      iKnnTerm = i;
+      knnGeomIdx = idx;
+      continue;
+    }
+    if (op == SQLITE_INDEX_CONSTRAINT_LIMIT) {
+      // a LIMIT is only a row-count hint: the KNN scan streams nearest-first
+      // and never truncates, so correctness never depends on it
+      sqlite3_value *value = NULL;
+      if (sqlite3_libversion_number() >= 3038000 &&
+          sqlite3_vtab_rhs_value(pIdxInfo, i, &value) == SQLITE_OK && value &&
+          sqlite3_value_type(value) == SQLITE_INTEGER) {
+        limit = sqlite3_value_int64(value);
+      }
+      continue;
+    }
+    if (op == SQLITE_INDEX_CONSTRAINT_OFFSET) {
+      continue;
+    }
+    // constraints on the hidden distance column are only meaningful in a
+    // KNN scan, where SQLite evaluates them against xColumn's distance
+    // (ticket 04 folds `distance <= ?` into the traversal as a prune).
+    // Without a MATCH the column is NULL and the query cannot mean anything
+    if (iColumn == tg0_column_distance_idx(p)) {
+      if (iDistanceTerm < 0 && (op == SQLITE_INDEX_CONSTRAINT_LT ||
+                                op == SQLITE_INDEX_CONSTRAINT_LE)) {
+        iDistanceTerm = i;
+        distanceOp = op == SQLITE_INDEX_CONSTRAINT_LT ? TG0_PUSHDOWN_OP_LT
+                                                       : TG0_PUSHDOWN_OP_LE;
+      }
+      continue;
     }
 
     // rowid EQ — or primary key EQ, the declared primary key is always
@@ -3956,8 +4546,103 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
     }
   }
 
+  // KNN: fold one predicate on the MATCH column into the walk (decision
+  // 10), preferring one whose rtree strategy prunes cells. Predicates on
+  // other geometry columns, and any further ones on this column, stay
+  // unconsumed for SQLite to post-filter on the stream
+  if (iKnnTerm >= 0) {
+    for (int i = 0; i < pIdxInfo->nConstraint; i++) {
+      if (!pIdxInfo->aConstraint[i].usable) {
+        continue;
+      }
+      int iPlan = tg0_predicate_plan_by_op(pIdxInfo->aConstraint[i].op);
+      tg0_user_column_kind kind;
+      int idx;
+      if (iPlan < 0 ||
+          tg0_column_lookup(p, pIdxInfo->aConstraint[i].iColumn, &kind,
+                            &idx) != SQLITE_OK ||
+          kind != TG0_USER_COLUMN_KIND_GEOMETRY || idx != knnGeomIdx) {
+        continue;
+      }
+      if (iKnnPredicateTerm < 0 ||
+          (tg0_predicate_plans[knnPredicatePlan].strategy ==
+               TG0_STRATEGY_FULLSCAN &&
+           tg0_predicate_plans[iPlan].strategy != TG0_STRATEGY_FULLSCAN)) {
+        iKnnPredicateTerm = i;
+        knnPredicatePlan = iPlan;
+      }
+    }
+  }
+
   char *idxStr;
-  if (iPointTerm >= 0) {
+  if (iKnnTerm < 0 && hasUnusableMatch) {
+    return SQLITE_CONSTRAINT;
+  }
+  if (iKnnTerm < 0) {
+    // a distance constraint outside a KNN scan: distance is NULL there, so
+    // the query cannot mean what was intended — say so instead of returning
+    // nothing
+    for (int i = 0; i < pIdxInfo->nConstraint; i++) {
+      if (pIdxInfo->aConstraint[i].usable &&
+          pIdxInfo->aConstraint[i].iColumn == tg0_column_distance_idx(p) &&
+          pIdxInfo->aConstraint[i].op != SQLITE_INDEX_CONSTRAINT_LIMIT &&
+          pIdxInfo->aConstraint[i].op != SQLITE_INDEX_CONSTRAINT_OFFSET) {
+        tg_vtab_set_error(pVtab,
+                          "the tg0 distance column can only be used in a "
+                          "nearest-neighbor query (geomcol MATCH point)");
+        return SQLITE_ERROR;
+      }
+    }
+  }
+  if (iKnnTerm >= 0) {
+    // KNN plan: the MATCH value is argv[0]. Every other constraint stays
+    // unconsumed — predicates run as scalar functions over the returned
+    // WKB, rowid/data-column/distance comparisons are evaluated by SQLite
+    // against xColumn — which keeps the nearest-first stream exact. The
+    // planner's own ORDER BY is consumed when it is exactly `distance ASC`,
+    // the order the scan produces; anything else is sorted by SQLite
+    sqlite3_str *str = sqlite3_str_new(NULL);
+    int argvIndex = 1;
+    sqlite3_str_appendf(str, "%c%c%c%c%c", TG0_PLAN_KNN, TG0_IDXSTR_KIND_KNN,
+                        'A' + knnGeomIdx,
+                        p->geometry_columns[knnGeomIdx].metric ==
+                                TG_METRIC_PLANAR
+                            ? 'P'
+                            : 'G',
+                        '_');
+    pIdxInfo->aConstraintUsage[iKnnTerm].argvIndex = argvIndex++;
+    pIdxInfo->aConstraintUsage[iKnnTerm].omit = 1;
+    if (iKnnPredicateTerm >= 0) {
+      sqlite3_str_appendf(str, "%c%c%c%c", TG0_IDXSTR_KIND_PREDICATE,
+                          'A' + knnGeomIdx,
+                          tg0_predicate_plans[knnPredicatePlan].opChar,
+                          tg0_predicate_plans[knnPredicatePlan].strategy);
+      pIdxInfo->aConstraintUsage[iKnnPredicateTerm].argvIndex = argvIndex++;
+      pIdxInfo->aConstraintUsage[iKnnPredicateTerm].omit = 1;
+    }
+    if (iDistanceTerm >= 0) {
+      sqlite3_str_appendf(str, "%c%c%c%c", TG0_IDXSTR_KIND_DISTANCE,
+                          distanceOp, '_', '_');
+      pIdxInfo->aConstraintUsage[iDistanceTerm].argvIndex = argvIndex++;
+      // omit stays 0: the bound only ends the walk early, SQLite still
+      // compares the exact distance
+    }
+    for (int k = 0; k < nPushdown; k++) {
+      sqlite3_str_appendf(str, "%c%c%c%c", TG0_IDXSTR_KIND_PUSHDOWN,
+                          'A' + pushdownDataIdx[k], pushdownOp[k], '_');
+      pIdxInfo->aConstraintUsage[pushdownTerm[k]].argvIndex = argvIndex++;
+    }
+    idxStr = sqlite3_str_finish(str);
+    if (pIdxInfo->nOrderBy == 1 &&
+        pIdxInfo->aOrderBy[0].iColumn == tg0_column_distance_idx(p) &&
+        !pIdxInfo->aOrderBy[0].desc) {
+      pIdxInfo->orderByConsumed = 1;
+    }
+    // a best-first walk touches O(log n) nodes plus one content lookup per
+    // emitted row; cheaper than any rtree prefilter plan for small k
+    pIdxInfo->estimatedRows = limit > 0 ? limit : 25;
+    pIdxInfo->estimatedCost = 10.0 + (double)pIdxInfo->estimatedRows;
+  } else if (iPointTerm >= 0) {
     // point plans consume no pushdown blocks: the scan is already a single
     // B-tree lookup, and SQLite evaluates the data-column constraints on
     // the one returned row
@@ -4008,6 +4693,467 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
   return SQLITE_OK;
 }
 
+// Number of leading header columns (c.rowid, then r.id on text-primary-key
+// tables) in a tg0_cursor's content scan, before the geomNN/dataNN columns.
+static int tg0_scan_header_columns(tg0_vtab *p) {
+  return p->pkColumnType == SQLITE_TEXT ? 2 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// tg0 KNN plan ('4'): best-first traversal of a geometry column's rtree
+// (plans/knn/plan.md decisions 2, 8, 9).
+//
+// `geomcol MATCH <point>` puts a scan into nearest-neighbor mode: rows come
+// out in ascending distance from the query point under the column's
+// metric=, streamed with no top-k truncation, so LIMIT and any extra WHERE
+// terms SQLite post-filters stay correct. The hidden `distance` column
+// carries each row's exact distance.
+//
+// SQLite's own sqlite3_rtree_query_callback() implements exactly this
+// search, but it is not part of the loadable-extension API (sqlite3ext.h
+// has no rtree entries), so tg0 walks the rtree's %_node shadow blobs
+// itself. The format is documented in rtree.c's "Database Format of R-Tree
+// Tables": node 1 is the root and always exists; bytes 0-1 of the root hold
+// the tree depth (big-endian), bytes 2-3 of every node its cell count; each
+// cell is an 8-byte big-endian integer (leaf level: rowid; otherwise: child
+// nodeno) followed by 4 big-endian float32 coordinates minX, maxX, minY,
+// maxY. Dirty nodes are flushed to %_node at the end of every rtree
+// xUpdate, so a read inside the same transaction sees the current tree.
+//
+// One min-heap per cursor holds three entry kinds, keyed by a lower bound
+// of the distance to everything beneath the entry:
+//
+//   NODE  nodeno + level   key = metric rect bound of the node's cell bbox
+//   LEAF  rowid            key = metric rect bound of the row's stored bbox
+//   ROW   rowid            key = the row's exact distance (already refined)
+//
+// Pop loop: NODE -> read the blob, push one entry per cell; LEAF -> fetch
+// the content row, parse the WKB, compute the exact distance, keep a copy
+// of the row's values and push ROW (or emit at once when nothing left can
+// beat it); ROW -> emit the kept values. Each content row is fetched exactly
+// once: on a table larger than the page cache a second fetch per row costs
+// a page read, which dominated k=1000 scans of a 2 GB table.
+// Stored bboxes are float32 rounded outward, so a cell bound never exceeds
+// the true distance of any row beneath it; and a ROW key is exact, so a
+// popped ROW is nearer than everything remaining. Ties break ROW < LEAF <
+// NODE, then by id, so equal distances emit deterministically.
+// ---------------------------------------------------------------------------
+
+#define TG0_KNN_KIND_ROW 0
+#define TG0_KNN_KIND_LEAF 1
+#define TG0_KNN_KIND_NODE 2
+
+// deepest rtree accepted before a node blob is declared corrupt (SQLite's
+// own rtree refuses depths beyond RTREE_MAX_DEPTH == 40)
+#define TG0_KNN_MAX_DEPTH 40
+// bytes per cell in a 2-D float rtree node: int64 id + 4 float32 coords
+#define TG0_RTREE_CELL_BYTES 24
+
+// A refined candidate's content-row values (the full scan column layout:
+// c.rowid, [r.id], geomNN..., dataNN...), copied out of the fetch statement
+// so the row need not be fetched again when it is emitted.
+typedef struct tg0_knn_row {
+  int n;
+  sqlite3_value *values[1];
+} tg0_knn_row;
+
+typedef struct tg0_knn_entry {
+  double key;
+  int kind;
+  // NODE only: the node's level, 0 for a node whose cells are leaf entries
+  int level;
+  // NODE: nodeno; LEAF / ROW: rowid
+  sqlite3_int64 id;
+  // ROW only: the kept row values (owned by the entry until emitted)
+  tg0_knn_row *row;
+} tg0_knn_entry;
+
+typedef struct tg0_knn {
+  tg0_knn_entry *heap;
+  int n;
+  int cap;
+  // SELECT data FROM t_rtreeNN_node WHERE nodeno = ?1
+  sqlite3_stmt *nodeStmt;
+  // index into geometry_columns[] of the scanned column
+  int geomIdx;
+  tg_metric metric;
+  struct tg_point q;
+  // exact distance of the current (emitted) row, and its kept values —
+  // xColumn/xRowid read from these on KNN plans
+  double currentDistance;
+  tg0_knn_row *current;
+  // folded predicate ('P' block), or predFunc == NULL: the exact test
+  // applied to every candidate, its rtree strategy letter used to prune
+  // cells, and the query bbox grown outward to float32 like plan '3'
+  GeomPredicateFunc predFunc;
+  const struct tg_geom *predGeom;
+  struct tg_geom *predGeomOwned;
+  char predStrategy;
+  struct tg_rect predRect;
+  // distance bound ('D' block): the walk ends once the heap minimum is
+  // >= maxDistance (maxStrict) or > maxDistance; INFINITY when absent
+  double maxDistance;
+  int maxStrict;
+  // 1 when '&' pushdown clauses were applied to the content fetch: a
+  // candidate rowid the fetch does not return was filtered, not lost
+  int hasPushdown;
+} tg0_knn;
+
+static int tg0_knn_entry_less(const tg0_knn_entry *a, const tg0_knn_entry *b) {
+  if (a->key != b->key) {
+    return a->key < b->key;
+  }
+  if (a->kind != b->kind) {
+    return a->kind < b->kind;
+  }
+  return a->id < b->id;
+}
+
+static int tg0_knn_push(tg0_knn *knn, tg0_knn_entry entry) {
+  if (knn->n == knn->cap) {
+    int cap = knn->cap ? knn->cap * 2 : 64;
+    tg0_knn_entry *heap =
+        sqlite3_realloc64(knn->heap, (sqlite3_uint64)cap * sizeof(*heap));
+    if (!heap) {
+      return SQLITE_NOMEM;
+    }
+    knn->heap = heap;
+    knn->cap = cap;
+  }
+  int i = knn->n++;
+  knn->heap[i] = entry;
+  while (i > 0) {
+    int parent = (i - 1) / 2;
+    if (!tg0_knn_entry_less(&knn->heap[i], &knn->heap[parent])) {
+      break;
+    }
+    tg0_knn_entry tmp = knn->heap[i];
+    knn->heap[i] = knn->heap[parent];
+    knn->heap[parent] = tmp;
+    i = parent;
+  }
+  return SQLITE_OK;
+}
+
+// Pops the minimum entry into *out. Returns 0 when the heap is empty.
+static int tg0_knn_pop(tg0_knn *knn, tg0_knn_entry *out) {
+  if (knn->n == 0) {
+    return 0;
+  }
+  *out = knn->heap[0];
+  knn->n--;
+  if (knn->n == 0) {
+    return 1;
+  }
+  knn->heap[0] = knn->heap[knn->n];
+  int i = 0;
+  while (1) {
+    int left = 2 * i + 1;
+    int right = left + 1;
+    int smallest = i;
+    if (left < knn->n &&
+        tg0_knn_entry_less(&knn->heap[left], &knn->heap[smallest])) {
+      smallest = left;
+    }
+    if (right < knn->n &&
+        tg0_knn_entry_less(&knn->heap[right], &knn->heap[smallest])) {
+      smallest = right;
+    }
+    if (smallest == i) {
+      break;
+    }
+    tg0_knn_entry tmp = knn->heap[i];
+    knn->heap[i] = knn->heap[smallest];
+    knn->heap[smallest] = tmp;
+    i = smallest;
+  }
+  return 1;
+}
+
+static void tg0_knn_row_free(tg0_knn_row *row) {
+  if (!row) {
+    return;
+  }
+  for (int i = 0; i < row->n; i++) {
+    sqlite3_value_free(row->values[i]);
+  }
+  sqlite3_free(row);
+}
+
+// Copies every column of the positioned fetch statement into a new row.
+static tg0_knn_row *tg0_knn_row_dup(sqlite3_stmt *stmt) {
+  int n = sqlite3_column_count(stmt);
+  tg0_knn_row *row = sqlite3_malloc64(sizeof(*row) + (sqlite3_uint64)n * sizeof(sqlite3_value *));
+  if (!row) {
+    return NULL;
+  }
+  row->n = n;
+  for (int i = 0; i < n; i++) {
+    row->values[i] = sqlite3_value_dup(sqlite3_column_value(stmt, i));
+    if (!row->values[i]) {
+      row->n = i;
+      tg0_knn_row_free(row);
+      return NULL;
+    }
+  }
+  return row;
+}
+
+static void tg0_knn_free(tg0_knn *knn) {
+  if (!knn) {
+    return;
+  }
+  for (int i = 0; i < knn->n; i++) {
+    tg0_knn_row_free(knn->heap[i].row);
+  }
+  tg0_knn_row_free(knn->current);
+  sqlite3_free(knn->heap);
+  sqlite3_finalize(knn->nodeStmt);
+  tg_geom_free(knn->predGeomOwned);
+  sqlite3_free(knn);
+}
+
+static unsigned tg0_read_be16(const unsigned char *p) {
+  return ((unsigned)p[0] << 8) | p[1];
+}
+
+static sqlite3_int64 tg0_read_be64(const unsigned char *p) {
+  sqlite3_uint64 v = 0;
+  for (int i = 0; i < 8; i++) {
+    v = (v << 8) | p[i];
+  }
+  return (sqlite3_int64)v;
+}
+
+static double tg0_read_be_f32(const unsigned char *p) {
+  unsigned int bits = ((unsigned int)p[0] << 24) | ((unsigned int)p[1] << 16) |
+                      ((unsigned int)p[2] << 8) | p[3];
+  float f;
+  memcpy(&f, &bits, sizeof(f));
+  return (double)f;
+}
+
+// Reads rtree node nodeno and pushes one heap entry per cell. level is the
+// node's own level; -1 means "the root, read the depth from its header".
+// Malformed blobs are reported as SQLITE_CORRUPT_VTAB.
+static int tg0_knn_expand_node(tg0_vtab *p, tg0_knn *knn, sqlite3_int64 nodeno,
+                               int level) {
+  sqlite3_stmt *stmt = knn->nodeStmt;
+  int rc;
+  sqlite3_reset(stmt);
+  sqlite3_bind_int64(stmt, 1, nodeno);
+  rc = sqlite3_step(stmt);
+  if (rc != SQLITE_ROW) {
+    if (rc == SQLITE_DONE) {
+      tg_vtab_set_error(&p->base,
+                        "tg0 table %s: rtree node %lld is missing from %s_rtree%02d_node",
+                        p->tableName, nodeno, p->tableName, knn->geomIdx);
+      return SQLITE_CORRUPT_VTAB;
+    }
+    tg_vtab_set_error(&p->base, "Error reading tg0 rtree node: %s",
+                      sqlite3_errmsg(p->db));
+    return rc;
+  }
+  const unsigned char *data = sqlite3_column_blob(stmt, 0);
+  int nData = sqlite3_column_bytes(stmt, 0);
+  if (!data || nData < 4) {
+    goto corrupt;
+  }
+  if (level < 0) {
+    level = (int)tg0_read_be16(data);
+    if (level > TG0_KNN_MAX_DEPTH) {
+      goto corrupt;
+    }
+  }
+  int nCell = (int)tg0_read_be16(data + 2);
+  if (4 + (sqlite3_int64)nCell * TG0_RTREE_CELL_BYTES > nData) {
+    goto corrupt;
+  }
+  for (int i = 0; i < nCell; i++) {
+    const unsigned char *cell = data + 4 + i * TG0_RTREE_CELL_BYTES;
+    struct tg_rect rect = {{tg0_read_be_f32(cell + 8), tg0_read_be_f32(cell + 16)},
+                           {tg0_read_be_f32(cell + 12), tg0_read_be_f32(cell + 20)}};
+    if (knn->predFunc) {
+      // cell prune by the folded predicate's rtree strategy. Child bboxes
+      // lie inside their node's bbox, so a node that cannot overlap (or
+      // contain) the query bbox has no matching rows beneath it; the
+      // within-style strategies can only be applied exactly at the leaves
+      struct tg_rect qr = knn->predRect;
+      int overlap = rect.min.x <= qr.max.x && rect.max.x >= qr.min.x &&
+                    rect.min.y <= qr.max.y && rect.max.y >= qr.min.y;
+      int contains = rect.min.x <= qr.min.x && rect.max.x >= qr.max.x &&
+                     rect.min.y <= qr.min.y && rect.max.y >= qr.max.y;
+      int within = rect.min.x >= qr.min.x && rect.max.x <= qr.max.x &&
+                   rect.min.y >= qr.min.y && rect.max.y <= qr.max.y;
+      switch (knn->predStrategy) {
+      case TG0_STRATEGY_OVERLAP:
+        if (!overlap) {
+          continue;
+        }
+        break;
+      case TG0_STRATEGY_CONTAINS:
+        if (!contains) {
+          continue;
+        }
+        break;
+      case TG0_STRATEGY_WITHIN:
+        if (level == 0 ? !within : !overlap) {
+          continue;
+        }
+        break;
+      default:
+        break;
+      }
+    }
+    tg0_knn_entry entry;
+    entry.row = NULL;
+    entry.id = tg0_read_be64(cell);
+    if (level > 0 && entry.id <= 1) {
+      // a child pointer back to the root (or to nothing) can only come from
+      // a corrupt node; the level count already bounds the walk's depth
+      goto corrupt;
+    }
+    entry.key = tg_metric_point_rect(knn->metric, knn->q, rect);
+    if (isnan(entry.key)) {
+      // a NaN bound would break heap ordering; treat as unreachable
+      entry.key = INFINITY;
+    }
+    if (level == 0) {
+      entry.kind = TG0_KNN_KIND_LEAF;
+      entry.level = 0;
+    } else {
+      entry.kind = TG0_KNN_KIND_NODE;
+      entry.level = level - 1;
+    }
+    rc = tg0_knn_push(knn, entry);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+  }
+  return SQLITE_OK;
+
+corrupt:
+  tg_vtab_set_error(&p->base,
+                    "tg0 table %s: malformed rtree node %lld in %s_rtree%02d_node",
+                    p->tableName, nodeno, p->tableName, knn->geomIdx);
+  return SQLITE_CORRUPT_VTAB;
+}
+
+// Positions pCur->stmt (the by-rowid content fetch) on rowid. Returns
+// SQLITE_DONE when the fetch returns no row and allowMissing is set (a
+// pushdown clause rejected the candidate); otherwise a missing row means the
+// rtree and content table disagree.
+static int tg0_knn_fetch_row(tg0_cursor *pCur, sqlite3_int64 rowid,
+                             int allowMissing) {
+  tg0_vtab *p = (tg0_vtab *)pCur->base.pVtab;
+  int rc;
+  sqlite3_reset(pCur->stmt);
+  sqlite3_bind_int64(pCur->stmt, 1, rowid);
+  rc = sqlite3_step(pCur->stmt);
+  if (rc == SQLITE_ROW) {
+    return SQLITE_OK;
+  }
+  if (rc == SQLITE_DONE && allowMissing) {
+    return SQLITE_DONE;
+  }
+  if (rc == SQLITE_DONE) {
+    tg_vtab_set_error(&p->base,
+                      "tg0 table %s: rtree entry %lld has no content row",
+                      p->tableName, rowid);
+    return SQLITE_CORRUPT_VTAB;
+  }
+  tg_vtab_set_error(&p->base, "Error fetching tg0 content row: %s",
+                    sqlite3_errmsg(p->db));
+  return rc;
+}
+
+// Advances a KNN scan to its next row (positioned in pCur->stmt with its
+// distance in knn->currentDistance), or sets eof.
+static int tg0_knn_step(tg0_cursor *pCur) {
+  tg0_vtab *p = (tg0_vtab *)pCur->base.pVtab;
+  tg0_knn *knn = pCur->knn;
+  tg0_knn_entry entry;
+  int rc;
+  tg0_knn_row_free(knn->current);
+  knn->current = NULL;
+  while (tg0_knn_pop(knn, &entry)) {
+    // the heap minimum bounds everything left: past the distance bound the
+    // scan is over
+    if (knn->maxStrict ? entry.key >= knn->maxDistance
+                       : entry.key > knn->maxDistance) {
+      tg0_knn_row_free(entry.row);
+      break;
+    }
+    if (entry.kind == TG0_KNN_KIND_NODE) {
+      rc = tg0_knn_expand_node(p, knn, entry.id, entry.level);
+      if (rc != SQLITE_OK) {
+        return rc;
+      }
+      continue;
+    }
+    if (entry.kind == TG0_KNN_KIND_ROW) {
+      knn->current = entry.row;
+      knn->currentDistance = entry.key;
+      return SQLITE_OK;
+    }
+    // LEAF: fetch once (a candidate may be rejected by the pushdown
+    // prefilter) and refine the bound into the exact distance
+    rc = tg0_knn_fetch_row(pCur, entry.id, knn->hasPushdown);
+    if (rc == SQLITE_DONE) {
+      continue;
+    }
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    int iScan = tg0_scan_header_columns(p) + knn->geomIdx;
+    const void *wkb = sqlite3_column_blob(pCur->stmt, iScan);
+    int nWkb = sqlite3_column_bytes(pCur->stmt, iScan);
+    struct tg_geom *candidate =
+        tg_parse_wkb_ix(wkb, nWkb, p->geometry_columns[knn->geomIdx].indexing);
+    if (tg_geom_error(candidate)) {
+      tg_vtab_set_error(&p->base, "Error parsing tg0 stored geometry in %s.%s: %s",
+                        p->tableName, p->geometry_columns[knn->geomIdx].name,
+                        tg_geom_error(candidate));
+      tg_geom_free(candidate);
+      return SQLITE_ERROR;
+    }
+    if (knn->predFunc && !knn->predFunc(candidate, knn->predGeom)) {
+      tg_geom_free(candidate);
+      continue;
+    }
+    double exact;
+    bool ok = tg_metric_point_geom(knn->metric, knn->q, candidate, &exact);
+    tg_geom_free(candidate);
+    if (!ok) {
+      return SQLITE_NOMEM;
+    }
+    if (isinf(exact) || isnan(exact)) {
+      // empty geometry: no nearest point, never emitted (decision 6)
+      continue;
+    }
+    tg0_knn_row *row = tg0_knn_row_dup(pCur->stmt);
+    if (!row) {
+      return SQLITE_NOMEM;
+    }
+    if (knn->n == 0 || exact < knn->heap[0].key) {
+      // nothing left can be nearer: emit right away
+      knn->current = row;
+      knn->currentDistance = exact;
+      return SQLITE_OK;
+    }
+    entry.kind = TG0_KNN_KIND_ROW;
+    entry.key = exact;
+    entry.row = row;
+    rc = tg0_knn_push(knn, entry);
+    if (rc != SQLITE_OK) {
+      tg0_knn_row_free(row);
+      return rc;
+    }
+  }
+  pCur->eof = 1;
+  return SQLITE_OK;
+}
+
 // ---------------------------------------------------------------------------
 // tg0 read path.
 //
@@ -4022,13 +5168,9 @@ static int tg0BestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *pIdxInfo) {
 //                    predicate to each candidate row in tg0_cursor_step —
 //                    the rtree is only ever a prefilter, correctness comes
 //                    from the exact test.
+//   knn       ('4'): WHERE c.rowid = ?1, driven row by row from the
+//                    best-first rtree walk in tg0_knn_step.
 // ---------------------------------------------------------------------------
-
-// Number of leading header columns (c.rowid, then r.id on text-primary-key
-// tables) in a tg0_cursor's content scan, before the geomNN/dataNN columns.
-static int tg0_scan_header_columns(tg0_vtab *p) {
-  return p->pkColumnType == SQLITE_TEXT ? 2 : 1;
-}
 
 // Round v to the nearest float32-representable double at or below (down) /
 // at or above (up) v. Used to grow query bboxes outward before binding them
@@ -4109,6 +5251,7 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
   char pushdownOp[TG0_MAX_PUSHDOWN_BLOCKS];
   int pushdownInclude[TG0_MAX_PUSHDOWN_BLOCKS];
   int argvOffset = 0;
+  const char *knnPushdownBlocks = "";
   // pushdown parameter numbers start after the prefilter's own ?1..?4
   // (point key / rtree bbox); unreferenced lower numbers are harmless
   int bindBase = 5;
@@ -4118,10 +5261,75 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
   pCur->stmt = NULL;
   tg_geom_free(pCur->queryGeom);
   pCur->queryGeom = NULL;
+  tg0_knn_free(pCur->knn);
+  pCur->knn = NULL;
   pCur->predFunc = NULL;
   pCur->predGeomIdx = -1;
   pCur->eof = 0;
   pCur->plan = idxStr[0];
+
+  if (pCur->plan == TG0_PLAN_KNN) {
+    // idxStr = '4' + 'K' [geom-col] [metric] '_', argv[0] = the MATCH value
+    int geomIdx = strlen(idxStr) >= 5 ? idxStr[2] - 'A' : -1;
+    if (strlen(idxStr) < 5 || idxStr[1] != TG0_IDXSTR_KIND_KNN || geomIdx < 0 ||
+        geomIdx >= p->numGeometryColumns || argc < 1) {
+      tg_vtab_set_error(&p->base, "Internal tg0 error: bad KNN plan '%s'",
+                        idxStr);
+      return SQLITE_ERROR;
+    }
+    struct tg0_geometry_column *column = &p->geometry_columns[geomIdx];
+    char *errmsg = NULL;
+    if (geomValue(argv[0], &pCur->queryGeom, &errmsg) != SQLITE_OK) {
+      tg_vtab_set_error(&p->base, "%s.%s MATCH: %s", p->tableName,
+                        column->name, errmsg);
+      sqlite3_free(errmsg);
+      return SQLITE_ERROR;
+    }
+    if (tg_geom_typeof(pCur->queryGeom) != TG_POINT ||
+        tg_geom_is_empty(pCur->queryGeom)) {
+      tg_vtab_set_error(&p->base,
+                        "%s.%s MATCH: nearest-neighbor queries take a Point, "
+                        "received %s%s",
+                        p->tableName, column->name,
+                        tg_geom_is_empty(pCur->queryGeom) ? "an empty " : "a ",
+                        tg_geom_type_string(tg_geom_typeof(pCur->queryGeom)));
+      return SQLITE_ERROR;
+    }
+    struct tg_point q = tg_geom_point(pCur->queryGeom);
+    if (column->metric == TG_METRIC_GEODESIC ? !tg_lonlat_valid(q.x, q.y)
+                                             : !(isfinite(q.x) && isfinite(q.y))) {
+      tg_vtab_set_error(&p->base,
+                        column->metric == TG_METRIC_GEODESIC
+                            ? "%s.%s MATCH: query point (%g, %g) is outside "
+                              "lon/lat range"
+                            : "%s.%s MATCH: query point (%g, %g) must be finite",
+                        p->tableName, column->name, q.x, q.y);
+      return SQLITE_ERROR;
+    }
+    pCur->knn = sqlite3_malloc(sizeof(*pCur->knn));
+    if (!pCur->knn) {
+      return SQLITE_NOMEM;
+    }
+    memset(pCur->knn, 0, sizeof(*pCur->knn));
+    pCur->knn->geomIdx = geomIdx;
+    pCur->knn->metric = column->metric;
+    pCur->knn->q = q;
+    pCur->knn->maxDistance = INFINITY;
+    char *zNodeSql = sqlite3_mprintf("SELECT data FROM "
+                                     TG0_SHADOW_RTREE_NODE_NAME
+                                     " WHERE nodeno = ?1",
+                                     p->schemaName, p->tableName, geomIdx);
+    if (!zNodeSql) {
+      return SQLITE_NOMEM;
+    }
+    rc = sqlite3_prepare_v2(p->db, zNodeSql, -1, &pCur->knn->nodeStmt, NULL);
+    sqlite3_free(zNodeSql);
+    if (rc != SQLITE_OK) {
+      tg_vtab_set_error(&p->base, "Error preparing tg0 rtree node read: %s",
+                        sqlite3_errmsg(p->db));
+      return SQLITE_ERROR;
+    }
+  }
 
   if (pCur->plan == TG0_PLAN_PREDICATE) {
     // idxStr = '3' + [kind][geom-col][op][strategy], argv[0] = query geometry
@@ -4146,10 +5354,73 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
     queryRect = tg_geom_rect(pCur->queryGeom);
   }
 
-  // trailing '&' pushdown blocks (fullscan and predicate plans only)
-  if (pCur->plan == TG0_PLAN_FULLSCAN || pCur->plan == TG0_PLAN_PREDICATE) {
-    argvOffset = pCur->plan == TG0_PLAN_PREDICATE ? 1 : 0;
-    const char *block = idxStr + (pCur->plan == TG0_PLAN_PREDICATE ? 5 : 1);
+  // KNN fold blocks: an optional 'P' predicate on the MATCH column and an
+  // optional 'D' distance bound, each consuming the next argv slot
+  if (pCur->plan == TG0_PLAN_KNN) {
+    argvOffset = 1;
+    const char *block = idxStr + 5;
+    if (strlen(block) >= 4 && block[0] == TG0_IDXSTR_KIND_PREDICATE) {
+      int iPlan = tg0_predicate_plan_by_char(block[2]);
+      if (iPlan < 0 || block[1] - 'A' != pCur->knn->geomIdx ||
+          argvOffset >= argc) {
+        tg_vtab_set_error(&p->base,
+                          "Internal tg0 error: bad KNN predicate block in '%s'",
+                          idxStr);
+        return SQLITE_ERROR;
+      }
+      char *errmsg = NULL;
+      struct tg_geom *predGeom = NULL;
+      if (geomValue(argv[argvOffset], &predGeom, &errmsg) != SQLITE_OK) {
+        tg_vtab_set_error(&p->base, "%s", errmsg);
+        sqlite3_free(errmsg);
+        return SQLITE_ERROR;
+      }
+      // the folded predicate's query geometry rides along in
+      // pCur->queryGeom's sibling slot: keep it on the knn state, freed
+      // with it
+      pCur->knn->predGeomOwned = predGeom;
+      pCur->knn->predGeom = predGeom;
+      pCur->knn->predFunc = tg0_predicate_plans[iPlan].func;
+      pCur->knn->predStrategy = block[3];
+      struct tg_rect r = tg_geom_rect(predGeom);
+      pCur->knn->predRect = (struct tg_rect){
+          {tg0_f32_down(r.min.x), tg0_f32_down(r.min.y)},
+          {tg0_f32_up(r.max.x), tg0_f32_up(r.max.y)}};
+      argvOffset++;
+      block += 4;
+    }
+    if (strlen(block) >= 4 && block[0] == TG0_IDXSTR_KIND_DISTANCE) {
+      if ((block[1] != TG0_PUSHDOWN_OP_LT && block[1] != TG0_PUSHDOWN_OP_LE) ||
+          argvOffset >= argc) {
+        tg_vtab_set_error(&p->base,
+                          "Internal tg0 error: bad KNN distance block in '%s'",
+                          idxStr);
+        return SQLITE_ERROR;
+      }
+      // only a numeric bound can end the walk early; anything else is left
+      // entirely to SQLite's own comparison (omit is 0)
+      sqlite3_value *bound = argv[argvOffset];
+      if (sqlite3_value_numeric_type(bound) == SQLITE_INTEGER ||
+          sqlite3_value_numeric_type(bound) == SQLITE_FLOAT) {
+        pCur->knn->maxDistance = sqlite3_value_double(bound);
+        pCur->knn->maxStrict = block[1] == TG0_PUSHDOWN_OP_LT;
+      }
+      argvOffset++;
+      block += 4;
+    }
+    knnPushdownBlocks = block;
+  }
+
+  // trailing '&' pushdown blocks (fullscan, predicate, and KNN plans)
+  if (pCur->plan == TG0_PLAN_FULLSCAN || pCur->plan == TG0_PLAN_PREDICATE ||
+      pCur->plan == TG0_PLAN_KNN) {
+    const char *block;
+    if (pCur->plan == TG0_PLAN_KNN) {
+      block = knnPushdownBlocks;
+    } else {
+      argvOffset = pCur->plan == TG0_PLAN_PREDICATE ? 1 : 0;
+      block = idxStr + (pCur->plan == TG0_PLAN_PREDICATE ? 5 : 1);
+    }
     for (; *block; block += 4) {
       if (strlen(block) < 4 || block[0] != TG0_IDXSTR_KIND_PUSHDOWN ||
           block[1] - 'A' < 0 || block[1] - 'A' >= p->numDataColumns ||
@@ -4233,6 +5504,9 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
     sqlite3_str_appendall(str, p->pkColumnType == SQLITE_TEXT
                                    ? " WHERE r.id = ?1"
                                    : " WHERE c.rowid = ?1");
+  } else if (pCur->plan == TG0_PLAN_KNN) {
+    // the KNN walk fetches content rows one rowid at a time
+    sqlite3_str_appendall(str, " WHERE c.rowid = ?1");
   } else if (pCur->plan == TG0_PLAN_PREDICATE &&
              strategy != TG0_STRATEGY_FULLSCAN) {
     // rtree bbox prefilter. Bind order: ?1=qminX ?2=qmaxX ?3=qminY ?4=qmaxY
@@ -4257,12 +5531,15 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
   // applied pushdown clauses. Fullscan plans and disjoint-strategy
   // predicate plans have no WHERE clause yet; the first applied clause
   // starts one
-  int hasWhere = pCur->plan == TG0_PLAN_POINT ||
+  int hasWhere = pCur->plan == TG0_PLAN_POINT || pCur->plan == TG0_PLAN_KNN ||
                  (pCur->plan == TG0_PLAN_PREDICATE &&
                   strategy != TG0_STRATEGY_FULLSCAN);
   for (int k = 0; k < nPushdown; k++) {
     if (!pushdownInclude[k]) {
       continue;
+    }
+    if (pCur->knn) {
+      pCur->knn->hasPushdown = 1;
     }
     sqlite3_str_appendf(str, "%s c.data%02d %s ?%d",
                         hasWhere ? " AND" : " WHERE", pushdownDataIdx[k],
@@ -4323,17 +5600,33 @@ static int tg0Filter(sqlite3_vtab_cursor *pVtabCursor, int idxNum,
                       sqlite3_errmsg(p->db));
     return rc;
   }
+  if (pCur->plan == TG0_PLAN_KNN) {
+    // seed the walk with the root node's cells, then produce the first row
+    rc = tg0_knn_expand_node(p, pCur->knn, 1, -1);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    return tg0_knn_step(pCur);
+  }
   return tg0_cursor_step(pCur);
 }
 
 static int tg0Rowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid) {
   tg0_cursor *pCur = (tg0_cursor *)cur;
+  if (pCur->plan == TG0_PLAN_KNN && pCur->knn && pCur->knn->current) {
+    *pRowid = sqlite3_value_int64(pCur->knn->current->values[0]);
+    return SQLITE_OK;
+  }
   *pRowid = sqlite3_column_int64(pCur->stmt, 0);
   return SQLITE_OK;
 }
 
 static int tg0Next(sqlite3_vtab_cursor *cur) {
-  return tg0_cursor_step((tg0_cursor *)cur);
+  tg0_cursor *pCur = (tg0_cursor *)cur;
+  if (pCur->plan == TG0_PLAN_KNN) {
+    return tg0_knn_step(pCur);
+  }
+  return tg0_cursor_step(pCur);
 }
 
 static int tg0Eof(sqlite3_vtab_cursor *cur) { return ((tg0_cursor *)cur)->eof; }
@@ -4351,24 +5644,35 @@ static int tg0Column(sqlite3_vtab_cursor *cur, sqlite3_context *context,
   if (sqlite3_vtab_nochange(context)) {
     return SQLITE_OK;
   }
+  // KNN plans serve the emitted row from the values kept at refinement
+  // time; every other plan reads the positioned scan statement
+  tg0_knn_row *kept =
+      pCur->plan == TG0_PLAN_KNN && pCur->knn ? pCur->knn->current : NULL;
+#define TG0_SCAN_VALUE(iScan)                                                  \
+  (kept ? kept->values[iScan] : sqlite3_column_value(pCur->stmt, iScan))
   if (p->pkColumnName && i == 0) {
     // integer primary keys alias the content rowid (scan column 0); text
     // primary keys resolve through t_rowids (scan column 1)
-    sqlite3_result_value(
-        context, sqlite3_column_value(pCur->stmt,
-                                      p->pkColumnType == SQLITE_TEXT ? 1 : 0));
+    sqlite3_result_value(context,
+                         TG0_SCAN_VALUE(p->pkColumnType == SQLITE_TEXT ? 1 : 0));
     return SQLITE_OK;
   }
   if (tg0_column_lookup(p, i, &kind, &idx) != SQLITE_OK) {
-    // the hidden distance column: NULL until KNN lands
-    sqlite3_result_null(context);
+    // the hidden distance column: the current row's distance from the
+    // query point on KNN plans, NULL on every other plan
+    if (pCur->plan == TG0_PLAN_KNN && pCur->knn) {
+      sqlite3_result_double(context, pCur->knn->currentDistance);
+    } else {
+      sqlite3_result_null(context);
+    }
     return SQLITE_OK;
   }
   int iScan = tg0_scan_header_columns(p) +
               (kind == TG0_USER_COLUMN_KIND_GEOMETRY
                    ? idx
                    : p->numGeometryColumns + idx);
-  sqlite3_result_value(context, sqlite3_column_value(pCur->stmt, iScan));
+  sqlite3_result_value(context, TG0_SCAN_VALUE(iScan));
+#undef TG0_SCAN_VALUE
   return SQLITE_OK;
 }
 
@@ -4412,10 +5716,14 @@ static int tg0_value_is_wkb(sqlite3_value *value) {
 
 // Parses and validates a value being written to geometry column iGeom: NULL
 // is rejected (geometry columns are NOT NULL), the value must parse through
-// geomValue(), and narrowed columns must match their declared type exactly.
+// geomValue(), narrowed columns must match their declared type exactly, and
+// the bbox must be finite — and within lon/lat range on geodesic columns,
+// so a table holding projected coordinates fails at its first INSERT with a
+// message naming `metric=planar` instead of producing garbage distances.
 // On success *out_geom is an owned tg_geom the caller must tg_geom_free().
 // On failure the vtab error is set and SQLITE_CONSTRAINT (NULL value / type
-// mismatch) or SQLITE_ERROR (unparseable input) is returned.
+// mismatch / bad coordinates) or SQLITE_ERROR (unparseable input) is
+// returned.
 static int tg0_validate_geometry_value(tg0_vtab *p, int iGeom,
                                        sqlite3_value *value,
                                        struct tg_geom **out_geom) {
@@ -4440,6 +5748,31 @@ static int tg0_validate_geometry_value(tg0_vtab *p, int iGeom,
                       p->tableName, column->name,
                       tg_geom_type_string(column->geomType),
                       tg_geom_type_string(tg_geom_typeof(geom)));
+    tg_geom_free(geom);
+    return SQLITE_CONSTRAINT;
+  }
+  struct tg_rect rect = tg_geom_rect(geom);
+  if (column->metric == TG_METRIC_GEODESIC
+          ? !(tg_lonlat_valid(rect.min.x, rect.min.y) &&
+              tg_lonlat_valid(rect.max.x, rect.max.y))
+          : !(isfinite(rect.min.x) && isfinite(rect.min.y) &&
+              isfinite(rect.max.x) && isfinite(rect.max.y))) {
+    if (column->metric == TG_METRIC_GEODESIC) {
+      tg_vtab_set_error(&p->base,
+                        "%s.%s: coordinates outside lon/lat range (x=%g, "
+                        "y=%g); declare the column with metric=planar for "
+                        "projected coordinates",
+                        p->tableName, column->name,
+                        fabs(rect.min.x) > fabs(rect.max.x) || isnan(rect.min.x)
+                            ? rect.min.x
+                            : rect.max.x,
+                        fabs(rect.min.y) > fabs(rect.max.y) || isnan(rect.min.y)
+                            ? rect.min.y
+                            : rect.max.y);
+    } else {
+      tg_vtab_set_error(&p->base, "%s.%s: coordinates must be finite",
+                        p->tableName, column->name);
+    }
     tg_geom_free(geom);
     return SQLITE_CONSTRAINT;
   }
@@ -4530,6 +5863,40 @@ static int tg0_write_step(tg0_vtab *p, sqlite3_stmt *stmt, const char *zWhat) {
   return rc == SQLITE_ROW ? SQLITE_ERROR : rc;
 }
 
+// Returns the cached statement in *slot, preparing zSql (sqlite3_mprintf'd,
+// freed here) on first use. Same error contract as tg0_write_prepare.
+static int tg0_cached_prepare(tg0_vtab *p, sqlite3_stmt **slot, char *zSql,
+                              const char *zWhat) {
+  if (*slot) {
+    sqlite3_free(zSql);
+    return SQLITE_OK;
+  }
+  return tg0_write_prepare(p, zSql, slot, zWhat);
+}
+
+// Resets a cached statement and clears its bindings so the next use (or a
+// bind failure's error path) never sees stale parameter values.
+static void tg0_cached_reset(sqlite3_stmt *stmt) {
+  if (stmt) {
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+  }
+}
+
+// Steps a fully-bound cached DML statement to completion and resets it.
+// Same error contract as tg0_write_step, minus the finalize.
+static int tg0_cached_step(tg0_vtab *p, sqlite3_stmt *stmt, const char *zWhat) {
+  int rc = sqlite3_step(stmt);
+  if (rc != SQLITE_DONE) {
+    tg_vtab_set_error(&p->base, "%s: %s", zWhat, sqlite3_errmsg(p->db));
+    rc = rc == SQLITE_ROW ? SQLITE_ERROR : rc;
+  } else {
+    rc = SQLITE_OK;
+  }
+  tg0_cached_reset(stmt);
+  return rc;
+}
+
 // Resolves the argv[0] rowid/primary-key value of a DELETE or UPDATE to the
 // int64 rowid the shadow tables are keyed by. Text primary keys go through
 // the t_rowids mapping table; everything else is the value itself.
@@ -4539,39 +5906,39 @@ static int tg0_resolve_rowid(tg0_vtab *p, sqlite3_value *idValue,
     *out_rowid = sqlite3_value_int64(idValue);
     return SQLITE_OK;
   }
-  sqlite3_stmt *stmt;
-  int rc = tg0_write_prepare(
-      p,
+  int rc = tg0_cached_prepare(
+      p, &p->stmtRowidsLookup,
       sqlite3_mprintf("SELECT rowid FROM " TG0_SHADOW_ROWIDS_NAME
                       " WHERE id = ?1",
                       p->schemaName, p->tableName),
-      &stmt, "Error preparing tg0 rowids lookup");
+      "Error preparing tg0 rowids lookup");
   if (rc != SQLITE_OK) {
     return rc;
   }
+  sqlite3_stmt *stmt = p->stmtRowidsLookup;
   rc = sqlite3_bind_value(stmt, 1, idValue);
   if (rc != SQLITE_OK) {
     tg_vtab_set_error(&p->base, "Error binding tg0 rowids lookup: %s",
                       sqlite3_errmsg(p->db));
-    sqlite3_finalize(stmt);
+    tg0_cached_reset(stmt);
     return rc;
   }
   rc = sqlite3_step(stmt);
   if (rc == SQLITE_ROW) {
     *out_rowid = sqlite3_column_int64(stmt, 0);
-    sqlite3_finalize(stmt);
+    tg0_cached_reset(stmt);
     return SQLITE_OK;
   }
   if (rc == SQLITE_DONE) {
     // clean scan, no mapping row: the primary key does not exist
     tg_vtab_set_error(&p->base, "Could not find a tg0 row with primary key %Q",
                       (const char *)sqlite3_value_text(idValue));
-    sqlite3_finalize(stmt);
+    tg0_cached_reset(stmt);
     return SQLITE_ERROR;
   }
   tg_vtab_set_error(&p->base, "Error looking up tg0 primary key: %s",
                     sqlite3_errmsg(p->db));
-  sqlite3_finalize(stmt);
+  tg0_cached_reset(stmt);
   return rc;
 }
 
@@ -4670,14 +6037,15 @@ static int tg0_write_insert(tg0_vtab *p, int argc, sqlite3_value **argv,
       rc = SQLITE_CONSTRAINT;
       goto done;
     }
-    rc = tg0_write_prepare(p,
-                           sqlite3_mprintf("INSERT INTO " TG0_SHADOW_ROWIDS_NAME
-                                           "(id) VALUES (?1)",
-                                           p->schemaName, p->tableName),
-                           &stmt, "Error preparing tg0 rowids insert");
+    rc = tg0_cached_prepare(p, &p->stmtRowidsInsert,
+                            sqlite3_mprintf("INSERT INTO " TG0_SHADOW_ROWIDS_NAME
+                                            "(id) VALUES (?1)",
+                                            p->schemaName, p->tableName),
+                            "Error preparing tg0 rowids insert");
     if (rc != SQLITE_OK) {
       goto done;
     }
+    stmt = p->stmtRowidsInsert;
     rc = sqlite3_bind_value(stmt, 1, idValue);
     if (rc != SQLITE_OK) {
       tg_vtab_set_error(&p->base, "Error binding tg0 rowids insert: %s",
@@ -4685,7 +6053,7 @@ static int tg0_write_insert(tg0_vtab *p, int argc, sqlite3_value **argv,
       goto done;
     }
     // a duplicate id surfaces here as the id column's UNIQUE violation
-    rc = tg0_write_step(p, stmt, "Error inserting tg0 primary key");
+    rc = tg0_cached_step(p, stmt, "Error inserting tg0 primary key");
     stmt = NULL;
     if (rc != SQLITE_OK) {
       goto done;
@@ -4710,25 +6078,28 @@ static int tg0_write_insert(tg0_vtab *p, int argc, sqlite3_value **argv,
   }
 
   // content row: rowid (NULL autoassigns) + geometry WKB + data values
-  sqlite3_str *str = sqlite3_str_new(NULL);
-  sqlite3_str_appendf(str, "INSERT INTO " TG0_SHADOW_CONTENT_NAME "(rowid",
-                      p->schemaName, p->tableName);
-  for (int i = 0; i < p->numGeometryColumns; i++) {
-    sqlite3_str_appendf(str, ", geom%02d", i);
+  if (!p->stmtContentInsert) {
+    sqlite3_str *str = sqlite3_str_new(NULL);
+    sqlite3_str_appendf(str, "INSERT INTO " TG0_SHADOW_CONTENT_NAME "(rowid",
+                        p->schemaName, p->tableName);
+    for (int i = 0; i < p->numGeometryColumns; i++) {
+      sqlite3_str_appendf(str, ", geom%02d", i);
+    }
+    for (int i = 0; i < p->numDataColumns; i++) {
+      sqlite3_str_appendf(str, ", data%02d", i);
+    }
+    sqlite3_str_appendall(str, ") VALUES (?");
+    for (int i = 0; i < tg0_num_user_columns(p); i++) {
+      sqlite3_str_appendall(str, ", ?");
+    }
+    sqlite3_str_appendall(str, ")");
+    rc = tg0_cached_prepare(p, &p->stmtContentInsert, sqlite3_str_finish(str),
+                            "Error preparing tg0 content insert");
+    if (rc != SQLITE_OK) {
+      goto done;
+    }
   }
-  for (int i = 0; i < p->numDataColumns; i++) {
-    sqlite3_str_appendf(str, ", data%02d", i);
-  }
-  sqlite3_str_appendall(str, ") VALUES (?");
-  for (int i = 0; i < tg0_num_user_columns(p); i++) {
-    sqlite3_str_appendall(str, ", ?");
-  }
-  sqlite3_str_appendall(str, ")");
-  rc = tg0_write_prepare(p, sqlite3_str_finish(str), &stmt,
-                         "Error preparing tg0 content insert");
-  if (rc != SQLITE_OK) {
-    goto done;
-  }
+  stmt = p->stmtContentInsert;
   rc = hasRowid ? sqlite3_bind_int64(stmt, 1, rowid)
                 : sqlite3_bind_null(stmt, 1);
   for (int i = 0; i < tg0_num_user_columns(p) && rc == SQLITE_OK; i++) {
@@ -4746,7 +6117,7 @@ static int tg0_write_insert(tg0_vtab *p, int argc, sqlite3_value **argv,
                       sqlite3_errmsg(p->db));
     goto done;
   }
-  rc = tg0_write_step(p, stmt, "Error inserting tg0 content row");
+  rc = tg0_cached_step(p, stmt, "Error inserting tg0 content row");
   stmt = NULL;
   if (rc != SQLITE_OK) {
     goto done;
@@ -4758,22 +6129,23 @@ static int tg0_write_insert(tg0_vtab *p, int argc, sqlite3_value **argv,
   // one bbox row per geometry column's rtree
   for (int i = 0; i < p->numGeometryColumns; i++) {
     struct tg_rect rect = tg_geom_rect(geoms[i]);
-    rc = tg0_write_prepare(
-        p,
+    rc = tg0_cached_prepare(
+        p, &p->stmtRtreeInsert[i],
         sqlite3_mprintf("INSERT INTO " TG0_SHADOW_RTREE_NAME
                         "(id, minX, maxX, minY, maxY)"
                         " VALUES (?1, ?2, ?3, ?4, ?5)",
                         p->schemaName, p->tableName, i),
-        &stmt, "Error preparing tg0 rtree insert");
+        "Error preparing tg0 rtree insert");
     if (rc != SQLITE_OK) {
       goto done;
     }
+    stmt = p->stmtRtreeInsert[i];
     sqlite3_bind_int64(stmt, 1, rowid);
     sqlite3_bind_double(stmt, 2, rect.min.x);
     sqlite3_bind_double(stmt, 3, rect.max.x);
     sqlite3_bind_double(stmt, 4, rect.min.y);
     sqlite3_bind_double(stmt, 5, rect.max.y);
-    rc = tg0_write_step(p, stmt, "Error inserting tg0 rtree row");
+    rc = tg0_cached_step(p, stmt, "Error inserting tg0 rtree row");
     stmt = NULL;
     if (rc != SQLITE_OK) {
       goto done;
@@ -4782,7 +6154,9 @@ static int tg0_write_insert(tg0_vtab *p, int argc, sqlite3_value **argv,
   *pRowid = rowid;
 
 done:
-  sqlite3_finalize(stmt);
+  // stmt is non-NULL only when a cached statement was left bound by an
+  // error path before it was stepped
+  tg0_cached_reset(stmt);
   for (int i = 0; i < p->numGeometryColumns; i++) {
     tg_geom_free(geoms[i]);
   }
@@ -4798,45 +6172,48 @@ static int tg0_write_delete(tg0_vtab *p, sqlite3_value *idValue) {
   if (rc != SQLITE_OK) {
     return rc;
   }
-  rc = tg0_write_prepare(p,
-                         sqlite3_mprintf("DELETE FROM " TG0_SHADOW_CONTENT_NAME
-                                         " WHERE rowid = ?1",
-                                         p->schemaName, p->tableName),
-                         &stmt, "Error preparing tg0 content delete");
+  rc = tg0_cached_prepare(p, &p->stmtContentDelete,
+                          sqlite3_mprintf("DELETE FROM " TG0_SHADOW_CONTENT_NAME
+                                          " WHERE rowid = ?1",
+                                          p->schemaName, p->tableName),
+                          "Error preparing tg0 content delete");
   if (rc != SQLITE_OK) {
     return rc;
   }
+  stmt = p->stmtContentDelete;
   sqlite3_bind_int64(stmt, 1, rowid);
-  rc = tg0_write_step(p, stmt, "Error deleting tg0 content row");
+  rc = tg0_cached_step(p, stmt, "Error deleting tg0 content row");
   if (rc != SQLITE_OK) {
     return rc;
   }
   for (int i = 0; i < p->numGeometryColumns; i++) {
-    rc = tg0_write_prepare(p,
-                           sqlite3_mprintf("DELETE FROM " TG0_SHADOW_RTREE_NAME
-                                           " WHERE id = ?1",
-                                           p->schemaName, p->tableName, i),
-                           &stmt, "Error preparing tg0 rtree delete");
+    rc = tg0_cached_prepare(p, &p->stmtRtreeDelete[i],
+                            sqlite3_mprintf("DELETE FROM " TG0_SHADOW_RTREE_NAME
+                                            " WHERE id = ?1",
+                                            p->schemaName, p->tableName, i),
+                            "Error preparing tg0 rtree delete");
     if (rc != SQLITE_OK) {
       return rc;
     }
+    stmt = p->stmtRtreeDelete[i];
     sqlite3_bind_int64(stmt, 1, rowid);
-    rc = tg0_write_step(p, stmt, "Error deleting tg0 rtree row");
+    rc = tg0_cached_step(p, stmt, "Error deleting tg0 rtree row");
     if (rc != SQLITE_OK) {
       return rc;
     }
   }
   if (p->pkColumnType == SQLITE_TEXT) {
-    rc = tg0_write_prepare(p,
-                           sqlite3_mprintf("DELETE FROM " TG0_SHADOW_ROWIDS_NAME
-                                           " WHERE rowid = ?1",
-                                           p->schemaName, p->tableName),
-                           &stmt, "Error preparing tg0 rowids delete");
+    rc = tg0_cached_prepare(p, &p->stmtRowidsDelete,
+                            sqlite3_mprintf("DELETE FROM " TG0_SHADOW_ROWIDS_NAME
+                                            " WHERE rowid = ?1",
+                                            p->schemaName, p->tableName),
+                            "Error preparing tg0 rowids delete");
     if (rc != SQLITE_OK) {
       return rc;
     }
+    stmt = p->stmtRowidsDelete;
     sqlite3_bind_int64(stmt, 1, rowid);
-    rc = tg0_write_step(p, stmt, "Error deleting tg0 rowids row");
+    rc = tg0_cached_step(p, stmt, "Error deleting tg0 rowids row");
   }
   return rc;
 }
@@ -4965,29 +6342,31 @@ static int tg0_write_update(tg0_vtab *p, int argc, sqlite3_value **argv) {
       continue;
     }
     struct tg_rect rect = tg_geom_rect(geoms[i]);
-    rc = tg0_write_prepare(
-        p,
+    rc = tg0_cached_prepare(
+        p, &p->stmtRtreeUpdate[i],
         sqlite3_mprintf("UPDATE " TG0_SHADOW_RTREE_NAME
                         " SET minX = ?2, maxX = ?3, minY = ?4, maxY = ?5"
                         " WHERE id = ?1",
                         p->schemaName, p->tableName, i),
-        &stmt, "Error preparing tg0 rtree update");
+        "Error preparing tg0 rtree update");
     if (rc != SQLITE_OK) {
       goto done;
     }
-    sqlite3_bind_int64(stmt, 1, rowid);
-    sqlite3_bind_double(stmt, 2, rect.min.x);
-    sqlite3_bind_double(stmt, 3, rect.max.x);
-    sqlite3_bind_double(stmt, 4, rect.min.y);
-    sqlite3_bind_double(stmt, 5, rect.max.y);
-    rc = tg0_write_step(p, stmt, "Error updating tg0 rtree row");
-    stmt = NULL;
+    sqlite3_stmt *cached = p->stmtRtreeUpdate[i];
+    sqlite3_bind_int64(cached, 1, rowid);
+    sqlite3_bind_double(cached, 2, rect.min.x);
+    sqlite3_bind_double(cached, 3, rect.max.x);
+    sqlite3_bind_double(cached, 4, rect.min.y);
+    sqlite3_bind_double(cached, 5, rect.max.y);
+    rc = tg0_cached_step(p, cached, "Error updating tg0 rtree row");
     if (rc != SQLITE_OK) {
       goto done;
     }
   }
 
 done:
+  // the content UPDATE is built per call (its SET list depends on which
+  // columns changed) and is the only finalized statement left here
   sqlite3_finalize(stmt);
   for (int i = 0; i < p->numGeometryColumns; i++) {
     tg_geom_free(geoms[i]);
@@ -5065,6 +6444,9 @@ static int tg0Rename(sqlite3_vtab *pVtab, const char *zNew) {
   tg0_vtab *p = (tg0_vtab *)pVtab;
   char *zErrMsg = NULL;
   int rc;
+
+  // cached write statements embed the old shadow table names
+  tg0_free_statements(p);
 
   char *zNewName = sqlite3_mprintf("%s", zNew);
   if (!zNewName) {
@@ -5358,6 +6740,9 @@ int sqlite3_tg_init(sqlite3 *db, char **pzErrMsg,
       {(char *)"tg_disjoint",       2, tg_predicate_impl,   tg_geom_disjoint,   NULL,         DEFAULT_FLAGS},
       {(char *)"tg_equals",         2, tg_predicate_impl,   tg_geom_equals,     NULL,         DEFAULT_FLAGS},
       {(char *)"tg_intersects",     2, tg_predicate_impl,   tg_geom_intersects, NULL,         DEFAULT_FLAGS},
+
+      // measurements
+      {(char *)"tg_distance_sphere", 2, tg_distance_sphere, NULL,             NULL,         DEFAULT_FLAGS},
       {(char *)"tg_touches",        2, tg_predicate_impl,   tg_geom_touches,    NULL,         DEFAULT_FLAGS},
       {(char *)"tg_within",         2, tg_predicate_impl,   tg_geom_within,     NULL,         DEFAULT_FLAGS},
 

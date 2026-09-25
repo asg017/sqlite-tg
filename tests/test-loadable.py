@@ -68,6 +68,7 @@ FUNCTIONS = [
     "tg_debug",
     "tg_dims",
     "tg_disjoint",
+    "tg_distance_sphere",
     "tg_equals",
     "tg_extra_json",
     "tg_geom",
@@ -371,6 +372,122 @@ def test_tg_y():
         match="invalid geometry input",
     ):
         tg_y(None)
+
+
+def haversine_m(a, b):
+    """Reference great-circle distance in meters (IUGG mean radius)."""
+    import math
+
+    R = 6371008.8
+    lon1, lat1 = map(math.radians, a)
+    lon2, lat2 = map(math.radians, b)
+    h = (
+        math.sin((lat2 - lat1) / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+    )
+    return 2 * R * math.asin(math.sqrt(h))
+
+
+def test_tg_distance_sphere():
+    import random
+
+    def dist(a, b):
+        return db.execute("select tg_distance_sphere(?, ?)", [a, b]).fetchone()[0]
+
+    # known pairs: LA <-> NYC, one degree of latitude, the antimeridian
+    la, nyc = (-118.2437, 34.0522), (-74.0060, 40.7128)
+    d = dist(f"POINT({la[0]} {la[1]})", f"POINT({nyc[0]} {nyc[1]})")
+    assert d == pytest.approx(haversine_m(la, nyc), rel=1e-12)
+    assert d == pytest.approx(3_935_752, abs=1)
+    assert dist("POINT(0 0)", "POINT(0 1)") == pytest.approx(111_195.08, abs=0.01)
+    assert dist("POINT(179.9 0)", "POINT(-179.9 0)") == pytest.approx(
+        22_239.02, abs=0.01
+    )
+    # symmetric, every input format, pointer values
+    assert dist("POINT(10 20)", "POINT(30 40)") == dist("POINT(30 40)", "POINT(10 20)")
+    assert db.execute(
+        "select tg_distance_sphere(tg_point(10, 20), tg_to_wkb(tg_point(30, 40)))"
+    ).fetchone()[0] == pytest.approx(haversine_m((10, 20), (30, 40)), rel=1e-12)
+
+    # random point pairs against the Python reference
+    rng = random.Random(1)
+    for _ in range(200):
+        a = (rng.uniform(-180, 180), rng.uniform(-90, 90))
+        b = (rng.uniform(-180, 180), rng.uniform(-90, 90))
+        assert dist(f"POINT({a[0]} {a[1]})", f"POINT({b[0]} {b[1]})") == pytest.approx(
+            haversine_m(a, b), rel=1e-9, abs=1e-6
+        )
+
+    # non-point geometries: distance to the nearest point of the geometry
+    square = "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"
+    assert dist("POINT(5 5)", square) == 0  # inside
+    assert dist("POINT(10 5)", square) == 0  # on the boundary
+    assert dist("POINT(5 -1)", square) == pytest.approx(111_195.08, abs=0.01)
+    # either argument may be the point
+    assert dist(square, "POINT(5 -1)") == dist("POINT(5 -1)", square)
+    # nearest point of an edge is interior to it, not an endpoint
+    assert dist("POINT(5 -1)", "LINESTRING(0 0, 10 0)") == pytest.approx(
+        111_195.08, abs=0.01
+    )
+    # ... or is an endpoint when the query lies beyond it
+    assert dist("POINT(20 0)", "LINESTRING(0 0, 10 0)") == pytest.approx(
+        haversine_m((20, 0), (10, 0)), rel=1e-9
+    )
+    # holes count: a point inside a hole is outside the polygon. The nearest
+    # hole edge is a meridian one — a degree of longitude at 5N is shorter
+    # than a degree of latitude — and the nearest point of that meridian is
+    # a hair poleward of (4, 5), since meridians are great circles
+    donut = "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0), (4 4, 6 4, 6 6, 4 6, 4 4))"
+    d = dist("POINT(5 5)", donut)
+    assert d < haversine_m((5, 5), (4, 5))
+    assert d == pytest.approx(haversine_m((5, 5), (4, 5)), rel=1e-6)
+    # multi geometries and collections: the nearest member
+    assert dist("POINT(0 0)", "MULTIPOINT(50 50, 0 3, -20 0)") == pytest.approx(
+        haversine_m((0, 0), (0, 3)), rel=1e-9
+    )
+    assert dist(
+        "POINT(0 0)", "GEOMETRYCOLLECTION(POINT(0 2), LINESTRING(1 1, 1 -1))"
+    ) == pytest.approx(haversine_m((0, 0), (1, 0)), rel=1e-9)
+    # a query far from a segment picks the true nearest point, not a frame
+    # approximation: compare against dense sampling along the edge
+    seg = ((-43.5, -89.06), (-44.19, -88.17))
+    q = (-45.26, -80.0)
+    best = min(
+        haversine_m(
+            q,
+            (
+                seg[0][0] + (seg[1][0] - seg[0][0]) * t / 5000,
+                seg[0][1] + (seg[1][1] - seg[0][1]) * t / 5000,
+            ),
+        )
+        for t in range(5001)
+    )
+    assert dist(
+        f"POINT({q[0]} {q[1]})",
+        f"LINESTRING({seg[0][0]} {seg[0][1]}, {seg[1][0]} {seg[1][1]})",
+    ) == pytest.approx(best, rel=1e-9)
+
+    # empty geometries have no nearest point
+    assert dist("POINT EMPTY", "POINT(1 1)") is None
+    assert dist("POINT(1 1)", "LINESTRING EMPTY") is None
+
+    # errors
+    with pytest.raises(sqlite3.OperationalError) as e:
+        dist("LINESTRING(0 0, 1 1)", square)
+    assert (
+        str(e.value)
+        == "tg_distance_sphere() expects at least one Point argument, found LineString and Polygon"
+    )
+    with pytest.raises(sqlite3.OperationalError) as e:
+        dist("POINT(500000 4000000)", "POINT(0 0)")
+    assert str(e.value).startswith("tg_distance_sphere() expects lon/lat coordinates")
+    with pytest.raises(sqlite3.OperationalError) as e:
+        dist("POINT(0 0)", "LINESTRING(0 0, 181 0)")
+    assert str(e.value).startswith("tg_distance_sphere() expects lon/lat coordinates")
+    with pytest.raises(sqlite3.OperationalError):
+        dist(None, "POINT(0 0)")
+    with pytest.raises(sqlite3.OperationalError):
+        dist("POINT(0 0)", "not a geometry")
 
 
 def test_tg_min_x_min_y_max_x_max_y():
@@ -1419,6 +1536,29 @@ def test_tg0_create_geometry_columns(snapshot):
 
 
 @pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_create_metric_option(snapshot):
+    # metric= selects the KNN distance metric and the write-time coordinate
+    # check; geodesic (lon/lat) is the default. Combines with indexing=
+    db.execute(
+        "create virtual table tg_metric using tg0("
+        "a point, "
+        "b point metric=geodesic, "
+        "c point metric=planar, "
+        "d polygon METRIC=PLANAR indexing=ystripes, "
+        "e polygon indexing=natural metric=geodesic)"
+    )
+    assert table_xinfo("tg_metric") == snapshot(name="metric options xinfo")
+    db.execute("drop table tg_metric")
+
+    assert tg0_error(
+        "create virtual table tg_bad using tg0(a point metric=spherical)"
+    ) == snapshot(name="unknown metric value")
+    assert tg0_error(
+        "create virtual table tg_bad using tg0(a point, label text metric=planar)"
+    ) == snapshot(name="metric on data column")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
 def test_tg0_create_data_columns(snapshot):
     db.execute(
         "create virtual table tg_data using tg0("
@@ -1771,6 +1911,48 @@ def test_tg0_write_geometry_type_enforcement(snapshot):
         db.execute("insert into tg_wg(shape) values (?)", [geometry])
     assert execute_all(db, "select count(*) as n from tg_wg_content") == [{"n": 7}]
     db.execute("drop table tg_wg")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_write_coordinate_validation(snapshot):
+    import struct
+
+    # geodesic (default) columns reject coordinates outside lon/lat range on
+    # INSERT and UPDATE; planar columns accept them. Neither accepts NaN or
+    # infinities (built as WKB, since WKT has no spelling for them)
+    def wkb_point(x, y):
+        return struct.pack("<BIdd", 1, 1, x, y)
+
+    db.execute(
+        "create virtual table tg_coords using tg0(geo point, flat point metric=planar)"
+    )
+    db.execute(
+        "insert into tg_coords(geo, flat) values ('POINT(-118.24 34.05)', 'POINT(500000 4000000)')"
+    )
+    assert tg0_write_error(
+        "insert into tg_coords(geo, flat) values ('POINT(500000 4000000)', 'POINT(0 0)')"
+    ) == snapshot(name="insert projected into geodesic")
+    assert tg0_write_error(
+        "insert into tg_coords(geo, flat) values ('POINT(0 -90.5)', 'POINT(0 0)')"
+    ) == snapshot(name="insert latitude past the pole")
+    assert tg0_write_error(
+        "update tg_coords set geo = 'POINT(181 0)'"
+    ) == snapshot(name="update out of range")
+    assert tg0_write_error(
+        "insert into tg_coords(geo, flat) values (?, 'POINT(0 0)')",
+        [wkb_point(float("nan"), 0)],
+    ) == snapshot(name="nan into geodesic")
+    assert tg0_write_error(
+        "insert into tg_coords(geo, flat) values ('POINT(0 0)', ?)",
+        [wkb_point(1, float("inf"))],
+    ) == snapshot(name="infinity into planar")
+    # the antimeridian and the poles themselves are in range
+    db.execute(
+        "insert into tg_coords(geo, flat) values ('POINT(180 90)', 'POINT(-1e300 1e300)')"
+    )
+    db.execute("insert into tg_coords(geo, flat) values ('POINT(-180 -90)', 'POINT(0 0)')")
+    assert db.execute("select count(*) from tg_coords").fetchone()[0] == 3
+    db.execute("drop table tg_coords")
 
 
 @pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
@@ -2329,15 +2511,467 @@ def test_tg0_read_float32_ulp_regression():
     db.execute("drop table tg_ulp")
 
 
+# ---------------------------------------------------------------------------
+# tg0 KNN (plan '4'): `geomcol MATCH <point>` streams rows nearest-first from
+# a best-first walk of the column's rtree nodes; the hidden distance column
+# carries each row's exact distance. Every ordering test is cross-checked
+# against a brute-force ranking computed in Python (haversine) or via the
+# tg_distance_sphere() kernel over the stored WKB.
+# ---------------------------------------------------------------------------
+
+
+def knn_reference(rows, q, metric="geodesic"):
+    """rows: [(name, (lon, lat))] -> [(name, distance)] sorted nearest-first."""
+    import math
+
+    def d(p):
+        if metric == "geodesic":
+            return haversine_m(q, p)
+        return math.hypot(p[0] - q[0], p[1] - q[1])
+
+    return sorted(((name, d(p)) for name, p in rows), key=lambda r: (r[1], r[0]))
+
+
+def knn_points(seed, n):
+    import random
+
+    rng = random.Random(seed)
+    return [
+        (f"p{i:04d}", (rng.uniform(-180, 180), rng.uniform(-90, 90)))
+        for i in range(n)
+    ]
+
+
+@pytest.fixture
+def tg0_knn_table():
+    rows = knn_points(7, 300)
+    db.execute(
+        "create virtual table tg_knn using tg0(name text, geo point, flat point metric=planar)"
+    )
+    db.executemany(
+        "insert into tg_knn(name, geo, flat) values (?, ?, ?)",
+        [(name, f"POINT({x} {y})", f"POINT({x} {y})") for name, (x, y) in rows],
+    )
+    yield rows
+    db.execute("drop table tg_knn")
+
+
+def knn_query(table, column, q, k=None, extra=""):
+    sql = (
+        f"select name, distance from {table} where {column} match ? {extra} "
+        "order by distance"
+    )
+    if k is not None:
+        sql += f" limit {k}"
+    return [
+        (r["name"], r["distance"])
+        for r in db.execute(sql, [f"POINT({q[0]} {q[1]})"]).fetchall()
+    ]
+
+
+def assert_ranking(got, expected):
+    assert [g[0] for g in got] == [e[0] for e in expected]
+    for g, e in zip(got, expected):
+        assert g[1] == pytest.approx(e[1], rel=1e-9, abs=1e-6)
+
+
 @pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
-def test_tg0_read_knn_reserved(tg0_read_table, snapshot):
-    # the MATCH / distance-constraint surface is reserved for KNN (plan '4')
-    with pytest.raises(sqlite3.OperationalError) as excinfo:
-        db.execute("select * from tg_rd where shape match 'POINT(1 1)'").fetchall()
-    assert str(excinfo.value) == snapshot(name="match")
-    with pytest.raises(sqlite3.OperationalError) as excinfo:
-        db.execute("select * from tg_rd where distance < 10").fetchall()
-    assert str(excinfo.value) == snapshot(name="distance constraint")
+def test_tg0_knn_random_points(tg0_knn_table):
+    import random
+
+    rng = random.Random(11)
+    queries = [(rng.uniform(-180, 180), rng.uniform(-90, 90)) for _ in range(20)]
+    # plus the awkward spots: the antimeridian, both poles, the origin
+    queries += [(179.99, 10), (-179.99, -10), (0, 89.9), (0, -89.9), (0, 0)]
+    for q in queries:
+        for column, metric in (("geo", "geodesic"), ("flat", "planar")):
+            expected = knn_reference(tg0_knn_table, q, metric)
+            # every row, nearest-first (streams past any k)
+            assert_ranking(knn_query("tg_knn", column, q), expected)
+            # LIMIT short-circuits the same stream
+            assert_ranking(knn_query("tg_knn", column, q, k=10), expected[:10])
+            assert_ranking(knn_query("tg_knn", column, q, k=1), expected[:1])
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_antimeridian_and_poles():
+    # geodesic ranking wraps in longitude and converges at the poles;
+    # planar ranking of the same coordinates does not
+    db.execute("create virtual table tg_am using tg0(name text, geo point, flat point metric=planar)")
+    rows = [
+        ("east", "POINT(179.9 0)"),
+        ("west", "POINT(-179.9 0)"),
+        ("middle", "POINT(0 0)"),
+        ("north", "POINT(-90 89.9)"),
+    ]
+    db.executemany("insert into tg_am(name, geo, flat) values (?, ?, ?)", [(n, w, w) for n, w in rows])
+    # geodesic: west and east are a fifth of a degree apart across the
+    # seam, the pole is a quarter turn away, the origin half a turn
+    assert [r[0] for r in knn_query("tg_am", "geo", (-179.95, 0))] == ["west", "east", "north", "middle"]
+    # planar: east is 359.85 "degrees" away
+    assert [r[0] for r in knn_query("tg_am", "flat", (-179.95, 0))] == ["west", "north", "middle", "east"]
+    # from next to the pole: the pole point, then the equator points in
+    # order of longitude difference (45 -> 0, 134.9 -> 179.9, 135.1 -> -179.9)
+    assert [r[0] for r in knn_query("tg_am", "geo", (45, 89.95))] == ["north", "middle", "east", "west"]
+    got = knn_query("tg_am", "geo", (45, 89.95))
+    assert got[0][1] == pytest.approx(haversine_m((45, 89.95), (-90, 89.9)), rel=1e-9)
+    db.execute("drop table tg_am")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_geometry_candidates():
+    # lines, polygons, multi-geometries and collections rank by the distance
+    # to their nearest point; a polygon containing the query is at 0. The
+    # walk's exact distances must equal the tg_distance_sphere() kernel
+    # applied to the stored WKB
+    db.execute("create virtual table tg_kg using tg0(name text, shape geometry)")
+    rows = [
+        ("square", "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"),
+        ("donut", "POLYGON((20 20, 30 20, 30 30, 20 30, 20 20), (24 24, 26 24, 26 26, 24 26, 24 24))"),
+        ("line", "LINESTRING(-20 0, -20 40)"),
+        ("far_point", "POINT(100 -40)"),
+        ("multi", "MULTIPOINT(50 50, 0 -3)"),
+        ("coll", "GEOMETRYCOLLECTION(POINT(0 15), LINESTRING(5 12, 5 13))"),
+        ("empty", "POINT EMPTY"),
+    ]
+    db.executemany("insert into tg_kg(name, shape) values (?, ?)", rows)
+    for q in [(5, 5), (25, 25), (-19, 20), (0, -2), (5, 11.5), (100, -40), (170, 80)]:
+        got = knn_query("tg_kg", "shape", q)
+        ref = sorted(
+            (
+                (r["name"], r["d"])
+                for r in db.execute(
+                    "select name, tg_distance_sphere(?, shape) as d from tg_kg where name <> 'empty'",
+                    [f"POINT({q[0]} {q[1]})"],
+                )
+            ),
+            key=lambda r: (r[1], r[0]),
+        )
+        assert_ranking(got, ref)
+        # empty geometries have no nearest point and are never emitted
+        assert "empty" not in [g[0] for g in got]
+    assert knn_query("tg_kg", "shape", (5, 5))[0] == ("square", 0.0)
+    assert knn_query("tg_kg", "shape", (25, 25))[0][0] == "donut"
+    assert knn_query("tg_kg", "shape", (25, 25))[0][1] > 0
+    db.execute("drop table tg_kg")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_primary_keys_and_small_tables():
+    # text primary keys route the by-rowid content fetch through the rowids
+    # join; integer primary keys alias the rowid; empty and one-row tables
+    # terminate cleanly
+    rows = knn_points(3, 40)
+    for ddl, key in (
+        ("id text primary key, geo point", lambda name: name),
+        ("id integer primary key, geo point", lambda name: int(name[1:]) + 100),
+        ("geo point", None),
+    ):
+        db.execute(f"create virtual table tg_kp using tg0({ddl})")
+        count = lambda: len(
+            db.execute("select distance from tg_kp where geo match 'POINT(0 0)' order by distance").fetchall()
+        )
+        assert count() == 0
+        if key is None:
+            db.executemany("insert into tg_kp(geo) values (?)", [(f"POINT({x} {y})",) for _, (x, y) in rows[:1]])
+        else:
+            db.executemany("insert into tg_kp(id, geo) values (?, ?)", [(key(n), f"POINT({x} {y})") for n, (x, y) in rows[:1]])
+        assert count() == 1
+        if key is None:
+            db.executemany("insert into tg_kp(geo) values (?)", [(f"POINT({x} {y})",) for _, (x, y) in rows[1:]])
+        else:
+            db.executemany("insert into tg_kp(id, geo) values (?, ?)", [(key(n), f"POINT({x} {y})") for n, (x, y) in rows[1:]])
+        expected = knn_reference(rows, (10, 20))
+        # (text primary keys make the table WITHOUT ROWID, so select only
+        # the distance)
+        got = db.execute(
+            "select distance from tg_kp where geo match 'POINT(10 20)' order by distance"
+        ).fetchall()
+        assert [g["distance"] for g in got] == pytest.approx([e[1] for e in expected], rel=1e-9)
+        if key is not None:
+            ids = [r["id"] for r in db.execute("select id from tg_kp where geo match 'POINT(10 20)' order by distance limit 5")]
+            assert ids == [key(e[0]) for e in expected[:5]]
+        db.execute("drop table tg_kp")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_within_transaction_and_cursor_reuse(tg0_knn_table):
+    # rows inserted earlier in the same transaction are visible to the walk
+    # (the rtree flushes nodes per statement), and a cursor re-filtered by a
+    # correlated subquery tears down and rebuilds its walk each time
+    db.commit()  # the fixture's inserts left Python's implicit transaction open
+    db.execute("begin")
+    db.execute("insert into tg_knn(name, geo, flat) values ('fresh', 'POINT(10.001 20.001)', 'POINT(10.001 20.001)')")
+    assert knn_query("tg_knn", "geo", (10, 20), k=1)[0][0] == "fresh"
+    db.execute("rollback")
+    assert knn_query("tg_knn", "geo", (10, 20), k=1)[0][0] != "fresh"
+
+    # nearest neighbor of every row, excluding itself: the canonical
+    # correlated-subquery join
+    got = db.execute(
+        "select a.name, (select b.name from tg_knn b where b.geo match a.geo "
+        "and b.name <> a.name order by b.distance limit 1) as nearest "
+        "from tg_knn a order by a.name limit 25"
+    ).fetchall()
+    for row in got:
+        ref = knn_reference(tg0_knn_table, dict(tg0_knn_table)[row["name"]])
+        assert row["nearest"] == [n for n, _ in ref if n != row["name"]][0]
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_extra_filters(tg0_knn_table):
+    # unconsumed WHERE terms are post-filtered by SQLite on the stream, so
+    # they combine with LIMIT correctly; predicates on the same column run
+    # as scalar functions over the returned WKB
+    q = (30, 30)
+    expected = [e for e in knn_reference(tg0_knn_table, q) if e[0] > "p0150"]
+    assert_ranking(knn_query("tg_knn", "geo", q, k=5, extra="and name > 'p0150'"), expected[:5])
+    expected = [e for e in knn_reference(tg0_knn_table, q) if e[1] <= 2_000_000]
+    assert_ranking(knn_query("tg_knn", "geo", q, extra="and distance <= 2000000"), expected)
+    bbox = "POLYGON((0 0, 60 0, 60 60, 0 60, 0 0))"
+    expected = [
+        e for e in knn_reference(tg0_knn_table, q)
+        if 0 <= dict(tg0_knn_table)[e[0]][0] <= 60 and 0 <= dict(tg0_knn_table)[e[0]][1] <= 60
+    ]
+    assert_ranking(
+        knn_query("tg_knn", "geo", q, k=3, extra=f"and tg_intersects(geo, '{bbox}')"),
+        expected[:3],
+    )
+    # a rowid constraint alongside MATCH is evaluated by SQLite on the stream
+    assert len(knn_query("tg_knn", "geo", q, extra="and rowid = 5")) == 1
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_folded_predicate(tg0_knn_table):
+    # ticket 04: a predicate on the MATCH column is folded into the walk as
+    # a cell prune + exact test. Results must equal the unfolded form, where
+    # tg_to_wkb() around the column defeats interception and SQLite
+    # post-filters the stream instead
+    import random
+
+    rng = random.Random(5)
+    shapes = [
+        "POLYGON((0 0, 60 0, 60 60, 0 60, 0 0))",
+        "POLYGON((-180 -90, -100 -90, -100 -20, -180 -20, -180 -90))",
+        "POLYGON((170 -10, 180 -10, 180 10, 170 10, 170 -10))",
+        "LINESTRING(-170 -80, 170 80)",
+        "POINT(1000 1000)",  # nothing anywhere near: empty results
+    ]
+    predicates = ["tg_intersects", "tg_within", "tg_coveredby", "tg_disjoint", "tg_contains", "tg_covers", "tg_touches", "tg_equals"]
+    for _ in range(6):
+        q = (rng.uniform(-180, 180), rng.uniform(-90, 90))
+        for shape in shapes:
+            for predicate in predicates:
+                folded = db.execute(
+                    f"select name, distance from tg_knn where geo match ? and {predicate}(geo, ?) order by distance",
+                    [f"POINT({q[0]} {q[1]})", shape],
+                ).fetchall()
+                plain = db.execute(
+                    f"select name, distance from tg_knn where geo match ? and {predicate}(tg_to_wkb(geo), ?) order by distance",
+                    [f"POINT({q[0]} {q[1]})", shape],
+                ).fetchall()
+                assert [tuple(r) for r in folded] == [tuple(r) for r in plain], (q, shape, predicate)
+    # the fold shows up in the plan and consumes the predicate
+    plan = explain_query_plan(
+        "select name from tg_knn where geo match 'POINT(0 0)' and tg_intersects(geo, 'POINT(0 0)') order by distance"
+    )
+    assert "4KAG_PAIO" in plan
+    # a second predicate on the same column, and one on another geometry
+    # column, stay unconsumed but still filter
+    got = db.execute(
+        "select name from tg_knn where geo match 'POINT(30 30)' "
+        "and tg_intersects(geo, 'POLYGON((0 0, 60 0, 60 60, 0 60, 0 0))') "
+        "and tg_within(geo, 'POLYGON((20 20, 40 20, 40 40, 20 40, 20 20))') "
+        "and tg_intersects(flat, 'POLYGON((25 25, 40 25, 40 40, 25 40, 25 25))') order by distance"
+    ).fetchall()
+    pts = dict(tg0_knn_table)
+    assert [r["name"] for r in got] == [
+        n for n, _ in knn_reference(tg0_knn_table, (30, 30))
+        if 25 <= pts[n][0] <= 40 and 25 <= pts[n][1] <= 40
+    ]
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_distance_bound(tg0_knn_table):
+    # ticket 04: `distance < ?` / `<= ?` end the walk early; results equal
+    # the unpruned form (unary + defeats constraint consumption)
+    q = (30, 30)
+    # reference distances as the extension reports them (its ranking is
+    # validated against Python elsewhere; here the bound must be exact to
+    # the ulp, which Python's own haversine is not)
+    ref = knn_query("tg_knn", "geo", q)
+    for op in ("<", "<="):
+        for bound in (0, ref[0][1], ref[3][1], 2_000_000, 1e12):
+            pruned = db.execute(
+                f"select name, distance from tg_knn where geo match ? and distance {op} ? order by distance",
+                [f"POINT({q[0]} {q[1]})", bound],
+            ).fetchall()
+            plain = db.execute(
+                f"select name, distance from tg_knn where geo match ? and +distance {op} ? order by distance",
+                [f"POINT({q[0]} {q[1]})", bound],
+            ).fetchall()
+            assert [tuple(r) for r in pruned] == [tuple(r) for r in plain], (op, bound)
+            expected = [e for e in ref if (e[1] < bound if op == "<" else e[1] <= bound)]
+            assert_ranking([tuple(r) for r in pruned], expected)
+    # the exact bound on the nearest row's own distance: < excludes it, <=
+    # keeps it
+    assert len(db.execute("select 1 from tg_knn where geo match ? and distance < ?", [f"POINT({q[0]} {q[1]})", ref[0][1]]).fetchall()) == 0
+    assert len(db.execute("select 1 from tg_knn where geo match ? and distance <= ?", [f"POINT({q[0]} {q[1]})", ref[0][1]]).fetchall()) == 1
+    # non-numeric / NULL bounds are left entirely to SQLite's comparison
+    for bound in (None, "abc"):
+        pruned = db.execute("select name from tg_knn where geo match 'POINT(0 0)' and distance < ? order by distance", [bound]).fetchall()
+        plain = db.execute("select name from tg_knn where geo match 'POINT(0 0)' and +distance < ? order by distance", [bound]).fetchall()
+        assert [r[0] for r in pruned] == [r[0] for r in plain]
+    # other comparison operators are simply post-filtered
+    got = db.execute("select name from tg_knn where geo match ? and distance > ? order by distance limit 2", [f"POINT({q[0]} {q[1]})", ref[2][1]]).fetchall()
+    assert [r[0] for r in got] == [ref[3][0], ref[4][0]]
+    assert "4KAG_Dd__" in explain_query_plan("select name from tg_knn where geo match 'POINT(0 0)' and distance < 5 order by distance")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_pushdown(tg0_knn_table):
+    # ticket 04: data-column constraints prefilter the per-rowid content
+    # fetch (omit stays 0: SQLite re-checks). Equivalent to the unpushed
+    # form, and combinable with the predicate and distance folds
+    q = (30, 30)
+    for extra, defeated in (
+        ("name > 'p0150'", "+name > 'p0150'"),
+        ("name = 'p0007'", "+name = 'p0007'"),
+        ("name < 'p0100' and name <> 'p0050'", "+name < 'p0100' and +name <> 'p0050'"),
+    ):
+        pushed = db.execute(f"select name, distance from tg_knn where geo match ? and {extra} order by distance limit 20", [f"POINT({q[0]} {q[1]})"]).fetchall()
+        plain = db.execute(f"select name, distance from tg_knn where geo match ? and {defeated} order by distance limit 20", [f"POINT({q[0]} {q[1]})"]).fetchall()
+        assert [tuple(r) for r in pushed] == [tuple(r) for r in plain]
+        assert len(pushed) > 0
+    plan = explain_query_plan(
+        "select name from tg_knn where geo match 'POINT(0 0)' and tg_intersects(geo, 'POINT(0 0)') and distance <= 5 and name > 'a' order by distance"
+    )
+    assert plan.endswith("4KAG_PAIODc__&Ab_")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_join_order():
+    # a MATCH whose right-hand side comes from another table is only usable
+    # once that table is the outer loop; xBestIndex reports the other order
+    # as unusable (SQLITE_CONSTRAINT) instead of failing the statement
+    rows = knn_points(9, 30)
+    db.execute("create virtual table tg_ja using tg0(name text, geo point)")
+    db.execute("create table tg_jq(name text, pt text)")
+    db.executemany("insert into tg_ja(name, geo) values (?, ?)", [(n, f"POINT({x} {y})") for n, (x, y) in rows])
+    queries = [("q1", (10, 10)), ("q2", (-100, 45)), ("q3", (170, -60))]
+    db.executemany("insert into tg_jq(name, pt) values (?, ?)", [(n, f"POINT({x} {y})") for n, (x, y) in queries])
+    got = db.execute(
+        "select q.name as q, a.name as nearest from tg_jq q join tg_ja a on a.geo match q.pt "
+        "where a.distance = (select min(b.distance) from tg_ja b where b.geo match q.pt) order by q.name"
+    ).fetchall()
+    assert [(r["q"], r["nearest"]) for r in got] == [
+        (n, knn_reference(rows, qp)[0][0]) for n, qp in queries
+    ]
+    # the same through a lateral-style correlated subquery
+    got = db.execute(
+        "select q.name, (select a.name from tg_ja a where a.geo match q.pt order by a.distance limit 1) as nearest "
+        "from tg_jq q order by q.name"
+    ).fetchall()
+    assert [(r[0], r[1]) for r in got] == [(n, knn_reference(rows, qp)[0][0]) for n, qp in queries]
+    db.execute("drop table tg_ja")
+    db.execute("drop table tg_jq")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_corrupt_nodes(snapshot):
+    # ticket 05: the node reader never crashes or loops on malformed
+    # %_node blobs — every case is a clean SQLITE_CORRUPT_VTAB error
+    import struct
+
+    rows = knn_points(13, 200)  # deep enough for interior nodes
+    db.execute("create virtual table tg_kc using tg0(name text, geo point)")
+    db.executemany("insert into tg_kc(name, geo) values (?, ?)", [(n, f"POINT({x} {y})") for n, (x, y) in rows])
+    db.commit()
+    root = db.execute("select data from tg_kc_rtree00_node where nodeno = 1").fetchone()[0]
+    depth = struct.unpack(">H", root[:2])[0]
+    assert depth >= 1
+    child = struct.unpack(">q", root[4:12])[0]
+    assert child > 1
+
+    def knn_error(label):
+        with pytest.raises(sqlite3.DatabaseError) as excinfo:
+            db.execute("select name from tg_kc where geo match 'POINT(0 0)' order by distance").fetchall()
+        return f"{type(excinfo.value).__name__}: {excinfo.value}"
+
+    errors = {}
+    cases = {
+        # header claims more cells than the blob holds
+        "cell count past the end": struct.pack(">HH", depth, 60000) + root[4:],
+        # a blob too short for even a header
+        "truncated blob": root[:3],
+        # empty blob / NULL data
+        "empty blob": b"",
+        # an absurd depth
+        "depth 65535": struct.pack(">H", 65535) + root[2:],
+        # an interior node pointing back at the root
+        "child is the root": root[:4] + struct.pack(">q", 1) + root[12:],
+        # an interior node pointing at a nonexistent node
+        "missing child": root[:4] + struct.pack(">q", 123456789) + root[12:],
+    }
+    for label, blob in cases.items():
+        db.execute("update tg_kc_rtree00_node set data = ? where nodeno = 1", [blob])
+        errors[label] = knn_error(label)
+    db.execute("update tg_kc_rtree00_node set data = null where nodeno = 1")
+    errors["null blob"] = knn_error("null blob")
+    # restore and confirm the walk is healthy again
+    db.execute("update tg_kc_rtree00_node set data = ? where nodeno = 1", [root])
+    assert len(db.execute("select name from tg_kc where geo match 'POINT(0 0)' order by distance").fetchall()) == 200
+    # a leaf entry whose rowid has no content row
+    db.execute("delete from tg_kc_content where rowid = 1")
+    errors["rtree entry without content row"] = knn_error("no content")
+    # NaN coordinates in a stored cell only push that entry to the end
+    db.execute("update tg_kc_rtree00_node set data = ? where nodeno = 1", [root[:12] + struct.pack(">ffff", float("nan"), float("nan"), float("nan"), float("nan")) + root[28:]])
+    db.execute("insert into tg_kc_content(rowid, geom00, data00) select 1, geom00, data00 from tg_kc_content where rowid = 2")
+    assert len(db.execute("select name from tg_kc where geo match 'POINT(0 0)' order by distance").fetchall()) == 200
+    assert errors == snapshot(name="corrupt node errors")
+    db.execute("drop table tg_kc")
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_eqp(tg0_knn_table, snapshot):
+    # `order by distance` (ASC, alone) is consumed by the plan: no temp
+    # B-tree. Anything else is sorted by SQLite over the full stream
+    plans = {}
+    for label, sql in {
+        "asc": "select name from tg_knn where geo match 'POINT(1 1)' order by distance limit 3",
+        "desc": "select name from tg_knn where geo match 'POINT(1 1)' order by distance desc limit 3",
+        "no order by": "select name from tg_knn where geo match 'POINT(1 1)' limit 3",
+        "planar column": "select name from tg_knn where flat match 'POINT(1 1)' order by distance",
+        "distance filter": "select name from tg_knn where geo match 'POINT(1 1)' and distance < 100 order by distance",
+    }.items():
+        plans[label] = [r["detail"] for r in db.execute("explain query plan " + sql)]
+    assert plans == snapshot(name="knn plans")
+    assert "TEMP B-TREE" not in " ".join(plans["asc"])
+    assert "TEMP B-TREE" in " ".join(plans["desc"])
+
+
+@pytest.mark.skipif(not SUPPORTS_RTREE, reason="tg0 require R-Tree extension")
+def test_tg0_knn_errors(tg0_knn_table, snapshot):
+    errors = {}
+    for label, sql in {
+        "match a linestring": "select * from tg_knn where geo match 'LINESTRING(0 0, 1 1)'",
+        "match an empty point": "select * from tg_knn where geo match 'POINT EMPTY'",
+        "match not a geometry": "select * from tg_knn where geo match 'nope'",
+        "match null": "select * from tg_knn where geo match null",
+        "match out of range": "select * from tg_knn where geo match 'POINT(500 0)'",
+        "match on data column": "select * from tg_knn where name match 'POINT(0 0)'",
+        "two matches": "select * from tg_knn where geo match 'POINT(0 0)' and flat match 'POINT(0 0)'",
+        "distance without match": "select * from tg_knn where distance < 10",
+    }.items():
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            db.execute(sql).fetchall()
+        errors[label] = str(excinfo.value)
+    assert errors == snapshot(name="knn errors")
+    # planar columns accept any finite query point
+    assert len(knn_query("tg_knn", "flat", (500, 0), k=1)) == 1
+    # distance is NULL outside a KNN scan
+    assert db.execute("select distance from tg_knn where rowid = 1").fetchone()[0] is None
+    assert db.execute("select distance from tg_knn limit 1").fetchone()[0] is None
 
 
 # ticket 05: data-column constraint pushdown. Pure optimization — every test

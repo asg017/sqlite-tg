@@ -118,7 +118,7 @@
   "tg0 constructor error: could not parse 'a geometri'"
 # ---
 # name: test_tg0_create_errors[unknown geometry option]
-  "tg0 constructor error: unknown option 'compression' in 'a polygon compression=zstd', only 'indexing=' is supported on geometry columns"
+  "tg0 constructor error: unknown option 'compression' in 'a polygon compression=zstd', only 'indexing=' and 'metric=' are supported on geometry columns"
 # ---
 # name: test_tg0_create_errors[unknown indexing option]
   "tg0 constructor error: unknown indexing option 'foo' in 'a polygon indexing=foo', expected one of none, natural, or ystripes"
@@ -315,6 +315,70 @@
     }),
   ])
 # ---
+# name: test_tg0_create_metric_option[metric on data column]
+  "tg0 constructor error: 'metric=' is only supported on geometry columns, in 'label text metric=planar'"
+# ---
+# name: test_tg0_create_metric_option[metric options xinfo]
+  list([
+    dict({
+      'cid': 0,
+      'dflt_value': None,
+      'hidden': 0,
+      'name': 'a',
+      'notnull': 0,
+      'pk': 0,
+      'type': 'point',
+    }),
+    dict({
+      'cid': 1,
+      'dflt_value': None,
+      'hidden': 0,
+      'name': 'b',
+      'notnull': 0,
+      'pk': 0,
+      'type': 'point',
+    }),
+    dict({
+      'cid': 2,
+      'dflt_value': None,
+      'hidden': 0,
+      'name': 'c',
+      'notnull': 0,
+      'pk': 0,
+      'type': 'point',
+    }),
+    dict({
+      'cid': 3,
+      'dflt_value': None,
+      'hidden': 0,
+      'name': 'd',
+      'notnull': 0,
+      'pk': 0,
+      'type': 'polygon',
+    }),
+    dict({
+      'cid': 4,
+      'dflt_value': None,
+      'hidden': 0,
+      'name': 'e',
+      'notnull': 0,
+      'pk': 0,
+      'type': 'polygon',
+    }),
+    dict({
+      'cid': 5,
+      'dflt_value': None,
+      'hidden': 1,
+      'name': 'distance',
+      'notnull': 0,
+      'pk': 0,
+      'type': '',
+    }),
+  ])
+# ---
+# name: test_tg0_create_metric_option[unknown metric value]
+  "tg0 constructor error: unknown metric option 'spherical' in 'a point metric=spherical', expected geodesic or planar"
+# ---
 # name: test_tg0_create_primary_keys[integer pk xinfo]
   list([
     dict({
@@ -437,6 +501,50 @@
 # name: test_tg0_integrity_check[orphaned rtree entry]
   'tg0 table tg_ic: 1 orphaned tg_ic_rtree00 entry with no content row (geometry column "shape")'
 # ---
+# name: test_tg0_knn_corrupt_nodes[corrupt node errors]
+  dict({
+    'cell count past the end': 'DatabaseError: tg0 table tg_kc: malformed rtree node 1 in tg_kc_rtree00_node',
+    'child is the root': 'DatabaseError: tg0 table tg_kc: malformed rtree node 1 in tg_kc_rtree00_node',
+    'depth 65535': 'DatabaseError: tg0 table tg_kc: malformed rtree node 1 in tg_kc_rtree00_node',
+    'empty blob': 'DatabaseError: tg0 table tg_kc: malformed rtree node 1 in tg_kc_rtree00_node',
+    'missing child': 'DatabaseError: tg0 table tg_kc: rtree node 123456789 is missing from tg_kc_rtree00_node',
+    'null blob': 'DatabaseError: tg0 table tg_kc: malformed rtree node 1 in tg_kc_rtree00_node',
+    'rtree entry without content row': 'DatabaseError: tg0 table tg_kc: rtree entry 1 has no content row',
+    'truncated blob': 'DatabaseError: tg0 table tg_kc: malformed rtree node 1 in tg_kc_rtree00_node',
+  })
+# ---
+# name: test_tg0_knn_eqp[knn plans]
+  dict({
+    'asc': list([
+      'SCAN tg_knn VIRTUAL TABLE INDEX 0:4KAG_',
+    ]),
+    'desc': list([
+      'SCAN tg_knn VIRTUAL TABLE INDEX 0:4KAG_',
+      'USE TEMP B-TREE FOR ORDER BY',
+    ]),
+    'distance filter': list([
+      'SCAN tg_knn VIRTUAL TABLE INDEX 0:4KAG_Dd__',
+    ]),
+    'no order by': list([
+      'SCAN tg_knn VIRTUAL TABLE INDEX 0:4KAG_',
+    ]),
+    'planar column': list([
+      'SCAN tg_knn VIRTUAL TABLE INDEX 0:4KBP_',
+    ]),
+  })
+# ---
+# name: test_tg0_knn_errors[knn errors]
+  dict({
+    'distance without match': 'the tg0 distance column can only be used in a nearest-neighbor query (geomcol MATCH point)',
+    'match a linestring': 'tg_knn.geo MATCH: nearest-neighbor queries take a Point, received a LineString',
+    'match an empty point': 'tg_knn.geo MATCH: nearest-neighbor queries take a Point, received an empty Point',
+    'match not a geometry': "tg_knn.geo MATCH: ParseError: unknown type 'nope'",
+    'match null': 'tg_knn.geo MATCH: invalid geometry input. Must be WKT (as text), WKB (as blob), or GeoJSON (as text).',
+    'match on data column': 'MATCH is only supported on tg0 geometry columns (nearest-neighbor queries)',
+    'match out of range': 'tg_knn.geo MATCH: query point (500, 0) is outside lon/lat range',
+    'two matches': 'only one MATCH constraint is supported per tg0 query',
+  })
+# ---
 # name: test_tg0_old_syntax_migration_hint[bare identifier hint]
   "tg0 constructor error: could not parse 'tzid'. tg0's syntax changed in v0.0.1-alpha.22: columns now require types, and the _shape column was removed. Drop and recreate this table. See https://github.com/asg017/sqlite-tg/blob/main/docs.md#tg0 for details."
 # ---
@@ -481,12 +589,6 @@
 # ---
 # name: test_tg0_read_eqp[within (within)]
   'SCAN tg_rd VIRTUAL TABLE INDEX 0:3PAWW'
-# ---
-# name: test_tg0_read_knn_reserved[distance constraint]
-  'KNN queries are not supported on tg0 tables yet'
-# ---
-# name: test_tg0_read_knn_reserved[match]
-  'KNN queries are not supported on tg0 tables yet'
 # ---
 # name: test_tg0_rename_plain[plain renamed shadow tables]
   list([
@@ -801,6 +903,21 @@
       'type': 'table',
     }),
   ])
+# ---
+# name: test_tg0_write_coordinate_validation[infinity into planar]
+  'IntegrityError: tg_coords.flat: coordinates must be finite'
+# ---
+# name: test_tg0_write_coordinate_validation[insert latitude past the pole]
+  'IntegrityError: tg_coords.geo: coordinates outside lon/lat range (x=0, y=-90.5); declare the column with metric=planar for projected coordinates'
+# ---
+# name: test_tg0_write_coordinate_validation[insert projected into geodesic]
+  'IntegrityError: tg_coords.geo: coordinates outside lon/lat range (x=500000, y=4e+06); declare the column with metric=planar for projected coordinates'
+# ---
+# name: test_tg0_write_coordinate_validation[nan into geodesic]
+  'IntegrityError: tg_coords.geo: coordinates outside lon/lat range (x=NaN, y=0); declare the column with metric=planar for projected coordinates'
+# ---
+# name: test_tg0_write_coordinate_validation[update out of range]
+  'IntegrityError: tg_coords.geo: coordinates outside lon/lat range (x=181, y=0); declare the column with metric=planar for projected coordinates'
 # ---
 # name: test_tg0_write_data_columns[float into integer]
   'IntegrityError: tg_wd.n: expected integer value, received float'

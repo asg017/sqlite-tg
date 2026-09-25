@@ -28,3 +28,11 @@ sqlite3 tmp-tg.db < query-tg.sql
 463
 Run Time: real 1.374 user 1.265926 sys 0.104428
 ```
+
+Nearest-neighbor queries on the same table (`knn-tg.sql`): the 10 nearest
+footprints to a point, and everything within 250 m, both served from the
+bbox R-Tree walk rather than a scan.
+
+```
+sqlite3 tmp-tg.db < knn-tg.sql
+```

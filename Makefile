@@ -190,4 +190,12 @@ wasm: $(TARGET_WASM)
 test-wasm:
 	deno test -A examples/wasm/test-wasm.ts
 
+# point-and-click KNN map running the wasm build in the browser
+# (examples/knn-map/README.md); needs `make wasm` and the bundled database
+knn-map: $(TARGET_WASM)
+	@echo "open http://localhost:8080/examples/knn-map/"
+	python3 -m http.server 8080 --bind 127.0.0.1
+
+.PHONY: knn-map
+
 # ███████████████████████████████   END WASM   ███████████████████████████████
